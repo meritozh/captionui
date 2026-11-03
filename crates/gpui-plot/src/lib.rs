@@ -34,6 +34,9 @@ pub mod density;
 pub mod frame;
 pub mod mark;
 pub mod paint;
+pub mod plot;
+pub mod render;
+pub mod theme;
 pub mod scale;
 pub mod style;
 pub mod table;
@@ -51,3 +54,5 @@ pub use transform::{
     Anchor, Bin, Reducer, StackOffset, StackedPoint, StackedSeries, Thresholds, WindowReducer,
 };
 pub use value::{PlotKind, Value};
+
+pub use plot::{Interaction, LegendPosition, Plot, PlotTitle};
