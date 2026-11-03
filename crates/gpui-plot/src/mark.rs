@@ -343,12 +343,66 @@ pub enum Curve {
     Natural,
     /// Straight segments, Plot's `linear`.
     Linear,
+    /// Straight segments that close back to the first point, Plot's
+    /// `linear-closed`.
+    LinearClosed,
     /// A step that holds each value until the next point, Plot's `step`.
     Step,
     /// A step centered on the point, Plot's `step-after`/`step-before` pair.
     StepAfter,
     /// A step that rises before the point.
     StepBefore,
+    /// A cubic basis spline that smooths away the data's corners, Plot's
+    /// `basis`.
+    Basis,
+    /// An open cubic basis spline.
+    BasisOpen,
+    /// A closed cubic basis spline.
+    BasisClosed,
+    /// A cardinal spline with a tension, Plot's `cardinal`.
+    Cardinal,
+    /// An open cardinal spline.
+    CardinalOpen,
+    /// A closed cardinal spline.
+    CardinalClosed,
+    /// A Catmull-Rom spline, Plot's `catmull-rom`.
+    CatmullRom,
+    /// An open Catmull-Rom spline.
+    CatmullRomOpen,
+    /// A closed Catmull-Rom spline.
+    CatmullRomClosed,
+    /// A cubic spline that preserves the data's monotonicity in x, Plot's
+    /// `monotone-x`.
+    MonotoneX,
+    /// A cubic spline that preserves the data's monotonicity in y.
+    MonotoneY,
+    /// A Bézier curve whose tangents are horizontal, Plot's `bump-x`.
+    BumpX,
+    /// A Bézier curve whose tangents are vertical.
+    BumpY,
+    /// A straightened cubic basis spline, Plot's `bundle`.
+    Bundle,
+}
+
+impl Curve {
+    /// Whether the curve closes its path back to the first point.
+    pub fn is_closed(self) -> bool {
+        matches!(
+            self,
+            Curve::LinearClosed
+                | Curve::BasisClosed
+                | Curve::CardinalClosed
+                | Curve::CatmullRomClosed
+        )
+    }
+
+    /// Whether the curve is a spline that starts and ends on its end points.
+    pub fn is_open(self) -> bool {
+        matches!(
+            self,
+            Curve::BasisOpen | Curve::CardinalOpen | Curve::CatmullRomOpen
+        )
+    }
 }
 
 impl Default for MarkStyle {

@@ -180,6 +180,13 @@ pub fn examples() -> Vec<Example> {
             height: 440.,
             build: nicened_domain,
         },
+        Example {
+            title: "Curves",
+            section: "Features / curves",
+            description: "The same points through Plot's spline families, from basis to bundle.",
+            height: 440.,
+            build: curves,
+        },
     ]
 }
 
@@ -513,6 +520,40 @@ fn nicened_domain() -> Plot {
         .y_nice(true)
         .y_ticks(5)
         .grid(false)
+}
+
+fn curves() -> Plot {
+    let data = data::curve_points();
+    // One line per curve, offset vertically so all of them stay readable; each
+    // line draws its own series, which gives it its own palette color.
+    const CURVES: [(&str, Curve); 10] = [
+        ("natural", Curve::Natural),
+        ("basis", Curve::Basis),
+        ("cardinal", Curve::Cardinal),
+        ("catmull-rom", Curve::CatmullRom),
+        ("monotone-x", Curve::MonotoneX),
+        ("bump-x", Curve::BumpX),
+        ("bundle", Curve::Bundle),
+        ("linear", Curve::Linear),
+        ("step", Curve::Step),
+        ("step-after", Curve::StepAfter),
+    ];
+    let mut plot = Plot::new(data.clone())
+        .title("Curves")
+        .subtitle("One line per interpolation, offset for comparison")
+        .dot(|mark| mark.x("step").y("value").r(2.5));
+    for (index, (name, curve)) in CURVES.into_iter().enumerate() {
+        let offset = index as f64 * 12.;
+        plot = plot.line(move |mark| {
+            mark.x("step")
+                .y(move |row: &Table| Value::Number(row.number("value").unwrap_or(0.) + offset))
+                .curve(curve)
+                .z(Value::text(name))
+                .stroke_width(1.5)
+                .title(name)
+        });
+    }
+    plot.legend(LegendPosition::Top).grid(false)
 }
 
 /// A color from HSLA components, for marks that want a specific hue rather

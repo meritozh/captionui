@@ -164,7 +164,8 @@ fn contact_sheet(dir: &Path, examples: &[gallery::Example], out: &Path) {
             let image = image::open(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
             let rgba = image.to_rgba8();
-            let height = (TILE.0 as f32 * rgba.height() as f32 / rgba.width() as f32).round() as u32;
+            let height =
+                (TILE.0 as f32 * rgba.height() as f32 / rgba.width() as f32).round() as u32;
             image::imageops::resize(
                 &rgba,
                 TILE.0,
@@ -186,7 +187,7 @@ fn contact_sheet(dir: &Path, examples: &[gallery::Example], out: &Path) {
     for (row, row_height) in rows.iter().zip(&row_heights) {
         for (column, tile) in row.iter().enumerate() {
             let x = column as u32 * TILE.0;
-            image::imageops::overlay(&mut sheet, tile, x as i64, y as i64);
+            image::imageops::overlay(&mut sheet, tile, x as i64, y);
         }
         y += *row_height as i64;
     }

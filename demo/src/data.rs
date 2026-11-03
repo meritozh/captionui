@@ -269,6 +269,21 @@ fn flow_row(source: &str, target: &str) -> f64 {
     source * 2. + target
 }
 
+/// A short, irregular series for comparing curve interpolations: a dozen
+/// points that make a spline's overshoot visible.
+pub fn curve_points() -> Vec<Table> {
+    const VALUES: [f64; 12] = [12., 34., 28., 58., 46., 72., 40., 66., 54., 80., 62., 88.];
+    VALUES
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            Table::empty()
+                .with("step", Value::Number(index as f64))
+                .with("value", Value::Number(value))
+        })
+        .collect()
+}
+
 /// A time series with a moving average, for the window transform.
 pub fn noisy_series() -> Vec<Table> {
     let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

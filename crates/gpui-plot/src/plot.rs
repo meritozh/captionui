@@ -814,25 +814,35 @@ impl Plot {
         prepared.iter().flat_map(render::basic::y_values).collect()
     }
 
+    /// The plot's ordinal color scale: the distinct `z` values across every
+    /// mark, colored from the theme's palette.
+    fn ordinal_scale(&self, theme: &PlotTheme, prepared: &[PreparedMark]) -> ColorScale {
+        ColorScale::ordinal(
+            crate::scale::dedup(
+                prepared
+                    .iter()
+                    .filter(|mark| mark.mark.channels.fill.is_none())
+                    .flat_map(|mark| mark.rows.iter())
+                    .filter_map(|row| row.z.as_ref().map(|z| z.key())),
+            ),
+            theme.palette.clone(),
+        )
+    }
+
     /// The legend's entries: one per series or one per categorical value.
     fn legend_entries(&self, theme: &PlotTheme, prepared: &[PreparedMark]) -> Vec<LegendEntry> {
         let mut entries = Vec::new();
+        // The color scale spans every mark's `z` values, the way Plot's is one
+        // scale for the whole plot: a chart drawn as one line per series has a
+        // `z` value in each mark, and each mark's own domain would give every
+        // line the first palette color.
+        let ordinal = self.ordinal_scale(theme, prepared);
         for (index, mark) in prepared.iter().enumerate() {
             let mut series: Vec<(SharedString, Hsla)> = Vec::new();
-            // A `z` channel with no explicit fill is an ordinal color scale
-            // over the series, which is how the marks paint themselves; the
-            // legend has to resolve it the same way or its swatches lie.
-            let ordinal = mark.mark.channels.fill.is_none().then(|| {
-                let domain = crate::scale::dedup(
-                    mark.rows
-                        .iter()
-                        .filter_map(|row| row.z.as_ref().map(|z| z.key())),
-                );
-                ColorScale::ordinal(domain, theme.palette.clone())
-            });
+            let mark_ordinal = mark.mark.channels.fill.is_none().then(|| ordinal.clone());
             for row in mark.rows.iter() {
                 if let Some(z) = &row.z {
-                    let color = match (&mark.mark.channels.fill, &ordinal) {
+                    let color = match (&mark.mark.channels.fill, &mark_ordinal) {
                         (Some(channel), _) => channel.read(&row.row),
                         (None, Some(scale)) => {
                             scale.color(z).unwrap_or_else(|| theme.palette_color(index))
@@ -1013,7 +1023,9 @@ impl PlotTrait for Plot {
         if self.grid {
             paint_grid(&frame, &theme, window);
         }
-        // The marks.
+        // The marks. Every mark shares one ordinal color scale, so a series
+        // keeps its color across marks.
+        let ordinal = self.ordinal_scale(&theme, &prepared);
         let mut row_offset = 0;
         for (index, mark) in prepared.iter().enumerate() {
             let mut ctx = DrawContext {
@@ -1024,6 +1036,7 @@ impl PlotTrait for Plot {
                 hover_progress: self.hover_progress,
                 hovered: self.hover,
                 row_offset,
+                ordinal: &ordinal,
                 window,
                 cx,
             };
