@@ -31,7 +31,9 @@
 extern crate gpui_kit as gpui;
 
 pub mod density;
+pub mod frame;
 pub mod mark;
+pub mod paint;
 pub mod scale;
 pub mod style;
 pub mod table;
