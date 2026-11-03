@@ -1,0 +1,438 @@
+//! The gallery's chart definitions: one [`Plot`] per example, built from the
+//! sample data the way Plot's own examples are built.
+
+use gpui_plot::mark::Curve;
+use gpui_plot::{ColorRange, LegendPosition, Plot, StackOffset, Table, Transform, Value};
+
+use crate::data;
+
+/// One example in the gallery.
+pub struct Example {
+    /// The example's title.
+    pub title: &'static str,
+    /// The Plot documentation section it mirrors.
+    pub section: &'static str,
+    /// A sentence on what the example demonstrates.
+    pub description: &'static str,
+    /// Builds the plot.
+    pub build: fn() -> Plot,
+}
+
+/// The gallery's examples, in the order the Plot documentation presents them.
+pub fn examples() -> Vec<Example> {
+    vec![
+        Example {
+            title: "Line chart",
+            section: "Marks / line",
+            description: "A daily temperature series over a year, with an area under it and a moving-average overlay.",
+            build: line_chart,
+        },
+        Example {
+            title: "Dot plot",
+            section: "Marks / dot",
+            description: "Two economic series as dots, colored by a categorical series channel.",
+            build: dot_plot,
+        },
+        Example {
+            title: "Bar chart",
+            section: "Marks / barY",
+            description: "Categorical sales as vertical bars, with a pinned zero baseline.",
+            build: bar_chart,
+        },
+        Example {
+            title: "Horizontal bars",
+            section: "Marks / barX",
+            description: "The same sales as horizontal bars, which suits long category names.",
+            build: horizontal_bars,
+        },
+        Example {
+            title: "Stacked bars",
+            section: "Marks / stack",
+            description: "Monthly traffic stacked by platform, with the stack normalized to a share of each month.",
+            build: stacked_bars,
+        },
+        Example {
+            title: "Stacked area",
+            section: "Marks / areaY",
+            description: "A wide table stacked into an area chart, each column a series.",
+            build: stacked_area,
+        },
+        Example {
+            title: "Histogram",
+            section: "Transforms / bin",
+            description: "A distribution binned into a histogram with the count reducer.",
+            build: histogram,
+        },
+        Example {
+            title: "Heatmap",
+            section: "Marks / cell",
+            description: "Activity by hour and day as cells, colored by a continuous range.",
+            build: heatmap,
+        },
+        Example {
+            title: "Box plot",
+            section: "Marks / boxY",
+            description: "Four treatment groups summarized as box-and-whisker plots.",
+            build: box_plot,
+        },
+        Example {
+            title: "Violin plot",
+            section: "Marks / violinY",
+            description: "The same groups as kernel-density violins, showing the shape of each distribution.",
+            build: violin_plot,
+        },
+        Example {
+            title: "Density",
+            section: "Marks / densityX",
+            description: "A kernel density estimate of the temperature series, with the raw ticks beneath.",
+            build: density_plot,
+        },
+        Example {
+            title: "Hexbin",
+            section: "Marks / hexbin",
+            description: "A two-dimensional cloud binned into hexagons, a dot plot's answer for dense data.",
+            build: hexbin_plot,
+        },
+        Example {
+            title: "Pie chart",
+            section: "Marks / pie",
+            description: "Market share by channel as a pie, the radial layout Plot's pie mark draws.",
+            build: pie_chart,
+        },
+        Example {
+            title: "Waffle",
+            section: "Marks / waffle",
+            description: "The same shares as a unit-square waffle, one cell per percent.",
+            build: waffle_chart,
+        },
+        Example {
+            title: "Rules and ticks",
+            section: "Marks / ruleY, tickX",
+            description: "Reference rules at round values, with ticks marking each datum.",
+            build: rules_and_ticks,
+        },
+        Example {
+            title: "Log scale",
+            section: "Scales / log",
+            description: "A growth series on a logarithmic y scale, where equal ratios take equal heights.",
+            build: log_scale,
+        },
+        Example {
+            title: "Moving average",
+            section: "Transforms / window",
+            description: "A noisy series smoothed by a centered window transform.",
+            build: moving_average,
+        },
+        Example {
+            title: "Labels",
+            section: "Marks / text",
+            description: "Bars with their values drawn as labels above them.",
+            build: labelled_bars,
+        },
+    ]
+}
+
+fn line_chart() -> Plot {
+    let data = data::temperature();
+    Plot::new(data.clone())
+        .title("Daily temperature")
+        .subtitle("A year of readings, with a 30-day mean")
+        .area_y(|mark| {
+            mark.x("date")
+                .y("temperature")
+                .fill(theme_color(0.55, 0.65, 0.6, 0.25))
+                .stroke_width(0.)
+        })
+        .line(|mark| mark.x("date").y("temperature").curve(Curve::Natural))
+        .line(|mark| {
+            mark.x("date")
+                .y("temperature")
+                .window(
+                    30,
+                    gpui_plot::WindowReducer::Mean,
+                    gpui_plot::Anchor::Middle,
+                )
+                .stroke(theme_color(0.33, 0.7, 0.45, 1.))
+                .stroke_width(2.5)
+                .title("30-day mean")
+        })
+        .y_axis(true)
+        .grid(true)
+}
+
+fn dot_plot() -> Plot {
+    let data = data::economics();
+    let long: Vec<Table> = data
+        .iter()
+        .flat_map(|row| {
+            ["unemployment", "inflation"]
+                .into_iter()
+                .filter_map(|field| {
+                    let value = row.number(field)?;
+                    Some(
+                        Table::empty()
+                            .with("date", row.value("date"))
+                            .with("value", Value::Number(value))
+                            .with("series", Value::text(field)),
+                    )
+                })
+        })
+        .collect();
+
+    Plot::new(long)
+        .title("Economic indicators")
+        .subtitle("Monthly unemployment and inflation")
+        .dot(|mark| mark.x("date").y("value").z("series").r(3.5))
+        .legend(LegendPosition::Top)
+        .y_axis(true)
+}
+
+fn bar_chart() -> Plot {
+    let data = data::sales();
+    Plot::new(data)
+        .title("Sales by region")
+        .bar_y(|mark| mark.x("region").y("sales").corner_radius(4.))
+        .y_zero(true)
+        .x_axis(true)
+        .y_axis(true)
+        .grid(false)
+}
+
+fn horizontal_bars() -> Plot {
+    let data = data::sales();
+    Plot::new(data)
+        .title("Sales by region")
+        .subtitle("Horizontal bars suit long labels")
+        .bar_x(|mark| mark.x("sales").y("region").corner_radius(4.))
+        .x_zero(true)
+        .grid(false)
+}
+
+fn stacked_bars() -> Plot {
+    let data = data::long_stacked();
+    Plot::new(data)
+        .title("Monthly visits")
+        .subtitle("Stacked by platform, normalized")
+        .bar_y(|mark| {
+            mark.x("month")
+                .y("visits")
+                .z("platform")
+                .stack(StackOffset::Normalize)
+                .stack_series("platform")
+        })
+        .legend(LegendPosition::Top)
+        .y_zero(true)
+        .grid(false)
+}
+
+fn stacked_area() -> Plot {
+    let data = data::stacked();
+    Plot::new(data)
+        .title("Traffic by device")
+        .subtitle("A wide table, one column per series")
+        .area_y(|mark| {
+            mark.x("month")
+                .y("desktop")
+                .stack(StackOffset::Zero)
+                .stack_fields(["desktop", "mobile", "tablet"])
+                .stroke_width(1.)
+        })
+        .legend(LegendPosition::Top)
+        .y_zero(true)
+}
+
+fn histogram() -> Plot {
+    let data = data::cloud();
+    Plot::new(data)
+        .title("Distribution of x")
+        .subtitle("Binned into a histogram")
+        .bar_y(|mark| {
+            mark.x("x")
+                .y1(Value::Number(0.))
+                .y2("x")
+                .bin(gpui_plot::Thresholds::Count(20))
+                .reduce(gpui_plot::Reducer::Count)
+                .corner_radius(2.)
+        })
+        .y_zero(true)
+        .grid(false)
+}
+
+fn heatmap() -> Plot {
+    let data = data::heatmap();
+    Plot::new(data)
+        .title("Activity by hour and day")
+        .cell(|mark| {
+            mark.x("day").y("hour").fill(|row: &Table| {
+                // A sequential ramp from the theme's first chart color.
+                let value = row.number("activity").unwrap_or(0.) / 60.;
+                ramp(value)
+            })
+        })
+        .x_scale(gpui_plot::frame::ScaleKind::Band)
+        .y_scale(gpui_plot::frame::ScaleKind::Band)
+        .grid(false)
+        .legend(LegendPosition::None)
+}
+
+fn box_plot() -> Plot {
+    let data = data::distributions();
+    Plot::new(data)
+        .title("Scores by group")
+        .subtitle("Median, quartiles and the full range")
+        .box_x(|mark| mark.x("score").y("group"))
+        .y_scale(gpui_plot::frame::ScaleKind::Band)
+        .grid(false)
+}
+
+fn violin_plot() -> Plot {
+    let data = data::distributions();
+    Plot::new(data)
+        .title("Score distributions")
+        .subtitle("Kernel density per group")
+        .violin_x(|mark| mark.x("score").y("group"))
+        .y_scale(gpui_plot::frame::ScaleKind::Band)
+        .grid(false)
+}
+
+fn density_plot() -> Plot {
+    let data = data::temperature();
+    Plot::new(data)
+        .title("Temperature density")
+        .subtitle("A kernel density estimate")
+        .density_x(|mark| mark.x("temperature"))
+        .tick_x(|mark| mark.x("temperature").stroke_width(1.).opacity(0.25))
+        .y_zero(true)
+}
+
+fn hexbin_plot() -> Plot {
+    let data = data::cloud();
+    Plot::new(data)
+        .title("Two clusters")
+        .subtitle("Hexagonal binning of 400 points")
+        .hexbin(|mark| mark.x("x").y("y"))
+        .dot(|mark| mark.x("x").y("y").r(1.5).opacity(0.35))
+        .grid(false)
+}
+
+fn pie_chart() -> Plot {
+    let data = data::market_share();
+    Plot::new(data)
+        .title("Market share")
+        .pie(|mark| mark.y("share").z("channel"))
+        .legend(LegendPosition::Right)
+        .grid(false)
+        .x_axis(false)
+        .y_axis(false)
+}
+
+fn waffle_chart() -> Plot {
+    let data = data::market_share();
+    Plot::new(data)
+        .title("Market share")
+        .subtitle("One cell per percent")
+        .waffle(|mark| mark.y("share").z("channel"))
+        .legend(LegendPosition::Top)
+        .grid(false)
+        .x_axis(false)
+        .y_axis(false)
+}
+
+fn rules_and_ticks() -> Plot {
+    let data = data::noisy_series();
+    Plot::new(data)
+        .title("Reference rules")
+        .subtitle("Round values marked across the plot")
+        .tick_x(|mark| mark.x("date").opacity(0.18))
+        .line(|mark| mark.x("date").y("value"))
+        .rule_y(|mark| {
+            mark.y(Value::Number(80.))
+                .stroke(theme_color(0.6, 0.6, 0.5, 0.7))
+        })
+        .rule_y(|mark| {
+            mark.y(Value::Number(120.))
+                .stroke(theme_color(0.0, 0.6, 0.5, 0.7))
+        })
+        .y_axis(true)
+}
+
+fn log_scale() -> Plot {
+    let data = data::economics();
+    Plot::new(data)
+        .title("Growth on a log scale")
+        .subtitle("Equal ratios take equal heights")
+        .line(|mark| mark.x("date").y("gdp"))
+        .dot(|mark| mark.x("date").y("gdp").r(2.))
+        .y_transform(Transform::Log)
+        .y_axis(true)
+}
+
+fn moving_average() -> Plot {
+    let data = data::noisy_series();
+    Plot::new(data)
+        .title("Noisy series")
+        .subtitle("Raw values and a 7-day centered mean")
+        .dot(|mark| mark.x("date").y("value").r(2.).opacity(0.4))
+        .line(|mark| {
+            mark.x("date")
+                .y("value")
+                .window(7, gpui_plot::WindowReducer::Mean, gpui_plot::Anchor::Middle)
+                .stroke_width(2.5)
+                .title("7-day mean")
+        })
+        .y_axis(true)
+}
+
+fn labelled_bars() -> Plot {
+    let data = data::sales();
+    Plot::new(data)
+        .title("Sales by region")
+        .subtitle("Bars labelled with their values")
+        .bar_y(|mark| mark.x("region").y("sales").corner_radius(4.))
+        .text(|mark| {
+            mark.x("region")
+                .y("sales")
+                .text("sales")
+                .dy(-10.)
+                .stroke(theme_color(0.0, 0.0, 0.25, 1.))
+        })
+        .y_zero(true)
+        .grid(false)
+}
+
+/// A color from HSLA components, for marks that want a specific hue rather
+/// than the theme's palette.
+fn theme_color(h: f32, s: f32, l: f32, a: f32) -> gpui_kit::Hsla {
+    gpui_kit::Hsla { h, s, l, a }
+}
+
+/// A sequential ramp for a heatmap, from the theme's blue to a warm accent.
+fn ramp(value: f64) -> gpui_kit::Hsla {
+    let value = value.clamp(0., 1.);
+    let from = gpui_kit::Hsla {
+        h: 0.58,
+        s: 0.55,
+        l: 0.93,
+        a: 1.,
+    };
+    let to = gpui_kit::Hsla {
+        h: 0.58,
+        s: 0.7,
+        l: 0.35,
+        a: 1.,
+    };
+    gpui_kit::Hsla {
+        h: from.h + (to.h - from.h) * value as f32,
+        s: from.s + (to.s - from.s) * value as f32,
+        l: from.l + (to.l - from.l) * value as f32,
+        a: 1.,
+    }
+}
+
+/// The `color` option's ranges, for a caller that wants one by name.
+pub fn range_by_name(name: &str) -> ColorRange {
+    match name {
+        "blue-red" => ColorRange::blue_red(),
+        _ => ColorRange::observable10(),
+    }
+}

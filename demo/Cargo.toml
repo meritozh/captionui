@@ -1,0 +1,20 @@
+[package]
+name = "gpui-plot-demo"
+description = "A gallery of gpui-plot charts and interactions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gpui_plot_demo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gpui-plot-demo"
+path = "src/main.rs"
+
+[dependencies]
+gpui-plot.workspace = true
+gpui-kit.workspace = true
+chrono.workspace = true
