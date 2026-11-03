@@ -181,6 +181,20 @@ pub fn examples() -> Vec<Example> {
             build: nicened_domain,
         },
         Example {
+            title: "Annotated peaks",
+            section: "Marks / tip",
+            description: "A line with tips pinned to its highest and lowest readings.",
+            height: 440.,
+            build: annotated_peaks,
+        },
+        Example {
+            title: "Frame and grid marks",
+            section: "Marks / axisX, gridX, frame",
+            description: "Axes, grid lines and the frame drawn as marks rather than plot options.",
+            height: 440.,
+            build: furniture_marks,
+        },
+        Example {
             title: "Sized dots",
             section: "Legends / size",
             description: "Two series as dots whose radius encodes a value, with a size legend beside them.",
@@ -527,6 +541,69 @@ fn nicened_domain() -> Plot {
         .y_nice(true)
         .y_ticks(5)
         .grid(false)
+}
+
+fn furniture_marks() -> Plot {
+    let data = data::temperature();
+    Plot::new(data)
+        .title("Daily temperature")
+        .subtitle("Grid, axes and frame drawn as marks")
+        .grid_y(|mark| mark)
+        .grid_x(|mark| mark)
+        .frame_mark(|mark| mark.stroke(theme_color(0.0, 0.0, 0.45, 1.)))
+        .axis_x(|mark| mark.stroke(theme_color(0.0, 0.0, 0.45, 1.)))
+        .axis_y(|mark| mark.stroke(theme_color(0.0, 0.0, 0.45, 1.)))
+        .line(|mark| mark.x("date").y("temperature").curve(Curve::Natural))
+        .grid(false)
+        .y_axis(true)
+        .x_axis(true)
+}
+
+fn annotated_peaks() -> Plot {
+    let data = data::noisy_series();
+    let high = data
+        .iter()
+        .map(|row| row.number("value").unwrap_or(0.))
+        .fold(f64::MIN, f64::max);
+    let low = data
+        .iter()
+        .map(|row| row.number("value").unwrap_or(0.))
+        .fold(f64::MAX, f64::min);
+
+    let mut plot = Plot::new(data.clone())
+        .title("Noisy series")
+        .subtitle("Tips pinned to the extremes")
+        .line(|mark| mark.x("date").y("value"));
+    for (value, name) in [(high, "peak"), (low, "trough")] {
+        // The tip names a fixed point, so its channels are constants: the
+        // mark reads them from the source row rather than from the datum.
+        let tip_date = data
+            .iter()
+            .find(|row| row.number("value") == Some(value))
+            .map(|row| row.value("date"))
+            .unwrap_or(Value::Null);
+        let tip_name = Value::text(name);
+        plot = plot.tip(move |mark| {
+            mark.x(tip_date.clone())
+                .y(Value::Number(value))
+                .text(tip_name.clone())
+        });
+    }
+    for (value, _name) in [(high, "peak"), (low, "trough")] {
+        let row = data
+            .iter()
+            .find(|row| row.number("value") == Some(value))
+            .cloned()
+            .unwrap_or_default();
+        let date = row.value("date");
+        plot = plot.dot(|mark| {
+            mark.x(date.clone())
+                .y(Value::Number(value))
+                .r(4.)
+                .stroke(theme_color(0.0, 0.0, 0.3, 1.))
+        });
+    }
+    plot.y_axis(true)
 }
 
 fn sized_dots() -> Plot {

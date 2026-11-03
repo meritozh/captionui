@@ -106,6 +106,15 @@ pub fn prepare(data: &Dataset, marks: &[Mark]) -> Vec<PreparedMark> {
 }
 
 fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
+    // A furniture mark draws the plot's axes, grid or frame rather than data,
+    // so it reads no channels and resolves no rows.
+    if mark.kind.is_furniture() {
+        return PreparedMark {
+            mark: mark.clone(),
+            rows: Vec::new(),
+            dodge_along_x: false,
+        };
+    }
     let channels = &mark.channels;
     let mut rows: Vec<PreparedRow> = data
         .rows()

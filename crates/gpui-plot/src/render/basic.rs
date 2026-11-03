@@ -8,7 +8,8 @@
 use std::collections::HashMap;
 
 use gpui::{
-    App, ContentMask, Hsla, PathBuilder, Pixels, Point, SharedString, TextAlign, Window, point, px,
+    App, Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, SharedString, TextAlign, Window,
+    point, px,
 };
 
 use crate::frame::Frame;
@@ -236,6 +237,12 @@ pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         MarkKind::TickY => draw_ticks_y(prepared, ctx),
         MarkKind::Vector => draw_vectors(prepared, ctx),
         MarkKind::Link => draw_links(prepared, ctx),
+        MarkKind::Tip => draw_tips(prepared, ctx),
+        MarkKind::AxisX => draw_axis_x(prepared, ctx),
+        MarkKind::AxisY => draw_axis_y(prepared, ctx),
+        MarkKind::GridX => draw_grid_x(prepared, ctx),
+        MarkKind::GridY => draw_grid_y(prepared, ctx),
+        MarkKind::Frame => draw_frame(prepared, ctx),
         _ => {}
     }
 }
@@ -1376,4 +1383,238 @@ pub fn y_values(prepared: &PreparedMark) -> Vec<Value> {
         .flatten()
         .filter(|value| !value.is_null())
         .collect()
+}
+
+/// Plot's `tip`: a label at the datum the mark selects, drawn permanently so
+/// a chart can point at a value without a pointer.
+fn draw_tips(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let font = gpui::font(ctx.theme.font_family.clone());
+    let size = ctx.theme.label_size;
+    let padding = 6.;
+    let gap = 10.;
+
+    // Tips are not clipped to the plot: a tip on the topmost point sits above
+    // it, and Plot draws the whole label.
+    for row in prepared.rows.iter() {
+        let Some(placed) = position(prepared, ctx, row) else {
+            continue;
+        };
+        let text = prepared
+            .mark
+            .channels
+            .text
+            .as_ref()
+            .map(|channel| channel.read(&row.row).label())
+            .unwrap_or_else(|| row.y_value().label());
+        if text.is_empty() {
+            continue;
+        }
+        let fill = match &prepared.mark.channels.fill {
+            Some(channel) => channel.read(&row.row),
+            None => {
+                let color = prepared.mark.style.fill;
+                if color == crate::mark::MarkStyle::default().fill {
+                    ctx.theme.mark_color
+                } else {
+                    color
+                }
+            }
+        };
+        // The box takes the mark's color, so its label reads in whichever of
+        // the theme's two tooltip colors contrasts with it.
+        let ink = if contrast_ratio(fill, ctx.theme.tooltip_foreground)
+            >= contrast_ratio(fill, ctx.theme.tooltip_background)
+        {
+            ctx.theme.tooltip_foreground
+        } else {
+            ctx.theme.tooltip_background
+        };
+        let label = Label::new(
+            text,
+            size,
+            ink,
+            gpui::FontWeight::MEDIUM,
+            font.clone(),
+            ctx.window,
+        );
+        let at = ctx.absolute(placed);
+        // Above the datum, or below it when the tip would run off the top.
+        let above = at.y - px(gap + size.as_f32() + padding * 2.);
+        let top = if above < ctx.frame.plot.origin.y {
+            at.y + px(gap)
+        } else {
+            above
+        };
+        let box_bounds = Bounds::new(
+            point(at.x - px(label.width.as_f32() / 2. + padding), top),
+            gpui::size(label.width + px(padding * 2.), size + px(padding * 2.)),
+        );
+        paint::paint_rect(box_bounds, 4., fill, ctx.window);
+        let text_at = point(
+            box_bounds.origin.x + px(padding),
+            box_bounds.origin.y + px(padding),
+        );
+        label.paint_at(text_at, TextAlign::Left, None, ctx.window, ctx.cx);
+    }
+}
+
+/// Plot's `axisX`: an x axis drawn as a mark, so it can sit inside the frame
+/// or take a color of its own rather than the plot-level axis.
+fn draw_axis_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let color = furniture_color(prepared, ctx.theme.axis);
+    let frame = ctx.frame;
+    let plot = frame.plot;
+    // The axis line along the bottom of the plot, with a tick at each x tick.
+    ctx.clipped(|ctx| {
+        let baseline = plot.origin.y + plot.size.height;
+        paint::paint_stroke(
+            &[
+                point(plot.origin.x, baseline),
+                point(plot.origin.x + plot.size.width, baseline),
+            ],
+            ctx.theme.line_width.as_f32(),
+            color,
+            ctx.window,
+        );
+        for tick in frame.x.ticks.iter() {
+            let x = plot.origin.x + px(tick.position);
+            paint::paint_stroke(
+                &[point(x, baseline), point(x, baseline - px(4.))],
+                1.,
+                color,
+                ctx.window,
+            );
+        }
+    });
+}
+
+/// Plot's `axisY`: a y axis drawn as a mark.
+fn draw_axis_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let color = furniture_color(prepared, ctx.theme.axis);
+    let frame = ctx.frame;
+    let plot = frame.plot;
+    ctx.clipped(|ctx| {
+        paint::paint_stroke(
+            &[
+                point(plot.origin.x, plot.origin.y),
+                point(plot.origin.x, plot.origin.y + plot.size.height),
+            ],
+            ctx.theme.line_width.as_f32(),
+            color,
+            ctx.window,
+        );
+        for tick in frame.y.ticks.iter() {
+            let y = plot.origin.y + px(tick.position);
+            paint::paint_stroke(
+                &[point(plot.origin.x, y), point(plot.origin.x + px(4.), y)],
+                1.,
+                color,
+                ctx.window,
+            );
+        }
+    });
+}
+
+/// Plot's `gridX`: a vertical grid line at each x tick.
+fn draw_grid_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let color = grid_color(prepared, ctx);
+    let frame = ctx.frame;
+    let plot = frame.plot;
+    ctx.clipped(|ctx| {
+        for tick in frame.x.ticks.iter() {
+            let x = plot.origin.x + px(tick.position);
+            paint::paint_stroke(
+                &[
+                    point(x, plot.origin.y),
+                    point(x, plot.origin.y + plot.size.height),
+                ],
+                ctx.theme.line_width.as_f32(),
+                color,
+                ctx.window,
+            );
+        }
+    });
+}
+
+/// Plot's `gridY`: a horizontal grid line at each y tick.
+fn draw_grid_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let color = grid_color(prepared, ctx);
+    let frame = ctx.frame;
+    let plot = frame.plot;
+    ctx.clipped(|ctx| {
+        for tick in frame.y.ticks.iter() {
+            let y = plot.origin.y + px(tick.position);
+            paint::paint_stroke(
+                &[
+                    point(plot.origin.x, y),
+                    point(plot.origin.x + plot.size.width, y),
+                ],
+                ctx.theme.line_width.as_f32(),
+                color,
+                ctx.window,
+            );
+        }
+    });
+}
+
+/// The color a furniture mark draws in: the stroke the mark sets, else the
+/// theme's color for that piece of furniture.
+fn furniture_color(prepared: &PreparedMark, fallback: Hsla) -> Hsla {
+    match &prepared.mark.channels.stroke {
+        Some(channel) => channel.read(&crate::table::Table::empty()),
+        None => {
+            let color = prepared.mark.style.stroke;
+            // A mark that never set a stroke still carries the style's default,
+            // so the theme's color for this piece of furniture wins unless the
+            // mark asked for one: the defaults are what "no stroke" looks like.
+            if color == crate::mark::MarkStyle::default().stroke {
+                fallback
+            } else {
+                color
+            }
+        }
+    }
+}
+fn grid_color(prepared: &PreparedMark, ctx: &DrawContext<'_>) -> Hsla {
+    furniture_color(prepared, ctx.theme.grid)
+}
+
+/// Plot's `frame`: the plot's outline, drawn as a mark so a chart can turn the
+/// frame on without turning on the axes.
+fn draw_frame(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let color = grid_color(prepared, ctx);
+    let plot = ctx.frame.plot;
+    let width = prepared.mark.style.stroke_width;
+    ctx.clipped(|ctx| {
+        let corners = [
+            point(plot.origin.x, plot.origin.y),
+            point(plot.origin.x + plot.size.width, plot.origin.y),
+            point(
+                plot.origin.x + plot.size.width,
+                plot.origin.y + plot.size.height,
+            ),
+            point(plot.origin.x, plot.origin.y + plot.size.height),
+            point(plot.origin.x, plot.origin.y),
+        ];
+        paint::paint_stroke(&corners, width, color, ctx.window);
+    });
+}
+
+/// The WCAG contrast ratio between two colors' relative luminances, so a
+/// label can pick the ink that reads against the color behind it.
+fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+fn luminance(color: Hsla) -> f32 {
+    let rgba = gpui::Rgba::from(color);
+    let channel = |value: f32| {
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(rgba.r) + 0.7152 * channel(rgba.g) + 0.0722 * channel(rgba.b)
 }

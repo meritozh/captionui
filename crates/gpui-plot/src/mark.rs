@@ -80,6 +80,20 @@ pub enum MarkKind {
     Waffle,
     /// A curved link between two points, Plot's `link`.
     Link,
+    /// A pinned annotation at a point, Plot's `tip`: the hover tooltip drawn
+    /// permanently at one datum.
+    Tip,
+    /// An x axis drawn as a mark, Plot's `axisX`, for a plot that wants its
+    /// axes inside the frame or in a color of its own.
+    AxisX,
+    /// A y axis drawn as a mark, Plot's `axisY`.
+    AxisY,
+    /// Grid lines across x drawn as a mark, Plot's `gridX`.
+    GridX,
+    /// Grid lines across y drawn as a mark, Plot's `gridY`.
+    GridY,
+    /// The frame's outline drawn as a mark, Plot's `frame`.
+    Frame,
 }
 
 impl MarkKind {
@@ -118,7 +132,22 @@ impl MarkKind {
             MarkKind::Arc => "arc",
             MarkKind::Waffle => "waffle",
             MarkKind::Link => "link",
+            MarkKind::Tip => "tip",
+            MarkKind::AxisX => "axisX",
+            MarkKind::AxisY => "axisY",
+            MarkKind::GridX => "gridX",
+            MarkKind::GridY => "gridY",
+            MarkKind::Frame => "frame",
         }
+    }
+
+    /// Whether this mark draws a part of the plot's furniture — an axis, a
+    /// grid or the frame — rather than data, so it reads no channels.
+    pub fn is_furniture(self) -> bool {
+        matches!(
+            self,
+            MarkKind::AxisX | MarkKind::AxisY | MarkKind::GridX | MarkKind::GridY | MarkKind::Frame
+        )
     }
 
     /// Whether this mark reads two positional channels (`x` and `y`) rather
@@ -1163,3 +1192,34 @@ mod tests {
         assert!(!mark.sort.as_ref().unwrap().reverse);
     }
 }
+
+mark_builder!(
+    /// A pinned annotation, Plot's `tip`.
+    TipMark,
+    MarkKind::Tip
+);
+mark_builder!(
+    /// An x axis drawn as a mark, Plot's `axisX`.
+    AxisXMark,
+    MarkKind::AxisX
+);
+mark_builder!(
+    /// A y axis drawn as a mark, Plot's `axisY`.
+    AxisYMark,
+    MarkKind::AxisY
+);
+mark_builder!(
+    /// Grid lines across x, Plot's `gridX`.
+    GridXMark,
+    MarkKind::GridX
+);
+mark_builder!(
+    /// Grid lines across y, Plot's `gridY`.
+    GridYMark,
+    MarkKind::GridY
+);
+mark_builder!(
+    /// The frame's outline, Plot's `frame`.
+    FrameMark,
+    MarkKind::Frame
+);

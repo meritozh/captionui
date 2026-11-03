@@ -335,6 +335,69 @@ impl Plot {
     }
 
     /// Add a horizontal rule mark.
+    /// Add a `tip` mark, Plot's `tip`: the hover tooltip, drawn permanently at
+    /// the datum the mark selects.
+    pub fn tip(
+        mut self,
+        configure: impl FnOnce(crate::mark::TipMark) -> crate::mark::TipMark,
+    ) -> Self {
+        let builder = configure(crate::mark::TipMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add an `axisX` mark, Plot's `axisX`: an x axis drawn as a mark rather
+    /// than as a plot-level option, so a chart can put one inside the frame.
+    pub fn axis_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::AxisXMark) -> crate::mark::AxisXMark,
+    ) -> Self {
+        let builder = configure(crate::mark::AxisXMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add an `axisY` mark, Plot's `axisY`.
+    pub fn axis_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::AxisYMark) -> crate::mark::AxisYMark,
+    ) -> Self {
+        let builder = configure(crate::mark::AxisYMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `gridX` mark, Plot's `gridX`: grid lines at each x tick.
+    pub fn grid_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::GridXMark) -> crate::mark::GridXMark,
+    ) -> Self {
+        let builder = configure(crate::mark::GridXMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `gridY` mark, Plot's `gridY`.
+    pub fn grid_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::GridYMark) -> crate::mark::GridYMark,
+    ) -> Self {
+        let builder = configure(crate::mark::GridYMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `frame` mark, Plot's `frame`: the plot's outline, which Plot
+    /// draws only when the plot asks for it.
+    pub fn frame_mark(
+        mut self,
+        configure: impl FnOnce(crate::mark::FrameMark) -> crate::mark::FrameMark,
+    ) -> Self {
+        let builder = configure(crate::mark::FrameMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
     pub fn rule_y(
         mut self,
         configure: impl FnOnce(crate::mark::RuleYMark) -> crate::mark::RuleYMark,
@@ -1800,6 +1863,28 @@ impl IntoElement for Plot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tip_and_furniture_marks_prepare() {
+        let data = vec![
+            Table::empty()
+                .with("x", Value::Number(1.))
+                .with("y", Value::Number(2.)),
+            Table::empty()
+                .with("x", Value::Number(2.))
+                .with("y", Value::Number(5.)),
+        ];
+        let plot = Plot::new(data)
+            .tip(|mark| mark.x("x").y("y").text("hi"))
+            .grid_x(|mark| mark)
+            .frame_mark(|mark| mark);
+        let prepared = render::prepare(plot.data(), plot.marks());
+        // The tip reads the data; the furniture marks draw no rows.
+        assert_eq!(prepared[0].rows.len(), 2);
+        assert!(prepared[1].rows.is_empty());
+        assert!(prepared[2].rows.is_empty());
+        assert!(prepared[1].mark.kind.is_furniture());
+    }
 
     fn sample() -> Vec<Table> {
         [("a", 4.), ("b", 7.), ("c", 2.)]
