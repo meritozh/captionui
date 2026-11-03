@@ -142,27 +142,24 @@ read pre-stack values, and a categorical palette that was one blue ramp.
 ## Coverage against Observable Plot
 
 Implemented: the basic marks, the statistical and radial marks, the one-
-dimensional variants (`dotX`/`dotY`, `lineX`/`lineY`, `rectX`/`rectY`), all
+dimensional variants (`dotX`/`dotY`, `lineX`/`lineY`, `rectX`/`rectY`), the
+furniture marks (`axisX`/`axisY`, `gridX`/`gridY`, `frame`) and `tip`, all
 channel types, the linear-family and ordinal scales with `nice`, `clamp`,
-`reverse` and pinned ranges, the transforms above (including `dodge`), color
-ranges, legends, axes, grid, tooltips, and hover highlighting.
+`reverse` and pinned ranges, the transforms above (including `dodge`, `select`,
+`map`, `shift` and `shuffle`), color ranges, legends (color, size and
+opacity, with a title and per-mark swatch shapes), axes, grid, tooltips, and
+hover highlighting.
 
 Not implemented yet, in the order the work is planned:
 
-1. **Legends.** Size, opacity and symbol legends; only the categorical color
-   legend exists, though it now has a title and per-mark swatch shapes.
-2. **Annotations.** The `tip` mark and the `pointer` transforms; the hover
-   tooltip exists but nothing can be pinned to the plot.
-3. **Axis and grid marks.** `axisX`/`axisY` and `gridX`/`gridY` as marks
-   (axes and grid are currently only plot-level options), and `frame`.
-4. **More transforms.** `select` (min/max per group), `shift`, `map`,
-   `groupX`/`groupY`, `find`, `shuffle`.
-5. **More marks.** `linearRegression`, `bollinger`, `difference`, `image`,
+1. **Grouping transforms.** `groupX`/`groupY` as mark options (a mark's
+   `reduce` covers the common cases) and `find`.
+2. **More marks.** `linearRegression`, `bollinger`, `difference`, `image`,
    `raster`, `hexgrid`, `cellX`/`cellY`, `textX`/`textY`,
    `vectorX`/`vectorY`/`spike`/`arrow`, `waffleX`/`waffleY`.
-6. **Faceting** (`fx`/`fy`), which needs a nested-figure layout.
-7. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
-8. **Geo projections**, which are out of scope for a desktop chart library
+3. **Faceting** (`fx`/`fy`), which needs a nested-figure layout.
+4. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
+5. **Geo projections**, which are out of scope for a desktop chart library
    with no basemap ecosystem.
 
 The `tension` option for cardinal curves is also missing; the curves
