@@ -251,6 +251,12 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         normalize_rows(&mut rows);
     }
 
+    // A grouping collapses the rows sharing a category into one row each,
+    // Plot's `groupX`/`groupY`/`groupZ`.
+    if let Some(config) = &mark.group {
+        rows = collapse_groups(rows, mark, config);
+    }
+
     // A reducer collapses the rows sharing a category, Plot's `groupX`.
     if let Some(reducer) = mark.reduce {
         rows = reduce_rows(rows, mark, reducer);
@@ -324,6 +330,58 @@ pub fn apply_dodge(prepared: &mut [PreparedMark], frame: &Frame) {
     }
 }
 
+/// Grow a mark's interval channels from its value channel, the way Plot's
+/// `barY` grows from zero to `y` and its `rectY`/`cell` marks fill their
+/// missing interval ends.
+///
+/// Plot derives these from the mark's own options, so the same derivation has
+/// to run again on a grouped row: the grouping writes the reduced value into
+/// `y` after the raw rows already had their intervals derived, and a bar with
+/// a `y` but no `y1`/`y2` draws nothing.
+fn derive_intervals(
+    mark: &Mark,
+    x: &Value,
+    y: &Value,
+    x1: &mut Option<Value>,
+    x2: &mut Option<Value>,
+    y1: &mut Option<Value>,
+    y2: &mut Option<Value>,
+) {
+    let unset = |start: &Option<Value>, end: &Option<Value>| start.is_none() && end.is_none();
+    match mark.kind {
+        MarkKind::BarY | MarkKind::AreaY | MarkKind::WaffleY if unset(y1, y2) && !y.is_null() => {
+            *y1 = Some(Value::Number(0.));
+            *y2 = Some(y.clone());
+        }
+        MarkKind::BarX | MarkKind::AreaX | MarkKind::WaffleX if unset(x1, x2) && !x.is_null() => {
+            *x1 = Some(Value::Number(0.));
+            *x2 = Some(x.clone());
+        }
+        // `rectX`/`rectY` with one value channel is a bar: its interval runs
+        // from the baseline to the value, which is how Plot's implicit stack
+        // reads it.
+        MarkKind::RectY if unset(y1, y2) && !y.is_null() => {
+            *y1 = Some(Value::Number(0.));
+            *y2 = Some(y.clone());
+        }
+        // `rectX` grows along x from the baseline, so its *value* is the x
+        // interval's end and its cross axis is the index.
+        MarkKind::RectX if unset(x1, x2) && !x.is_null() => {
+            *x1 = Some(Value::Number(0.));
+            *x2 = Some(x.clone());
+        }
+        MarkKind::Cell => {
+            if x1.is_none() && !x.is_null() {
+                *x1 = Some(x.clone());
+            }
+            if y1.is_none() && !y.is_null() {
+                *y1 = Some(y.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
 fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> PreparedRow {
     let read = |channel: &Option<crate::table::Channel>| {
         channel
@@ -334,49 +392,16 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
 
     let mut x = read(&channels.x);
     let mut y = read(&channels.y);
-    let mut x1 = read(&channels.x1);
-    let mut x2 = read(&channels.x2);
-    let mut y1 = read(&channels.y1);
-    let mut y2 = read(&channels.y2);
+    let x1 = read(&channels.x1);
+    let x2 = read(&channels.x2);
+    let y1 = read(&channels.y1);
+    let y2 = read(&channels.y2);
 
-    // A bar's length channel becomes its interval: Plot's `barY` grows from
-    // zero to `y`, or from `y1` to `y2` when both are given.
-    match mark.kind {
-        MarkKind::BarY | MarkKind::AreaY | MarkKind::WaffleY
-            if y1.is_null() && y2.is_null() && !y.is_null() =>
-        {
-            y1 = Value::Number(0.);
-            y2 = y.clone();
-        }
-        MarkKind::BarX | MarkKind::AreaX | MarkKind::WaffleX
-            if x1.is_null() && x2.is_null() && !x.is_null() =>
-        {
-            x1 = Value::Number(0.);
-            x2 = x.clone();
-        }
-        // `rectX`/`rectY` with one value channel is a bar: its interval runs
-        // from the baseline to the value, which is how Plot's implicit stack
-        // reads it.
-        MarkKind::RectY if y1.is_null() && y2.is_null() && !y.is_null() => {
-            y1 = Value::Number(0.);
-            y2 = y.clone();
-        }
-        // `rectX` grows along x from the baseline, so its *value* is the x
-        // interval's end and its cross axis is the index.
-        MarkKind::RectX if x1.is_null() && x2.is_null() && !x.is_null() => {
-            x1 = Value::Number(0.);
-            x2 = x.clone();
-        }
-        MarkKind::Cell => {
-            if x1.is_null() && !x.is_null() {
-                x1 = x.clone();
-            }
-            if y1.is_null() && !y.is_null() {
-                y1 = y.clone();
-            }
-        }
-        _ => {}
-    }
+    let mut x1 = (!x1.is_null()).then_some(x1);
+    let mut x2 = (!x2.is_null()).then_some(x2);
+    let mut y1 = (!y1.is_null()).then_some(y1);
+    let mut y2 = (!y2.is_null()).then_some(y2);
+    derive_intervals(mark, &x, &y, &mut x1, &mut x2, &mut y1, &mut y2);
 
     // A one-dimensional mark has no second position channel. Plot fills it
     // with the datum's index for `lineX`/`rectX`, and leaves it unset for
@@ -398,10 +423,10 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
         index,
         x,
         y,
-        x1: (!x1.is_null()).then_some(x1),
-        x2: (!x2.is_null()).then_some(x2),
-        y1: (!y1.is_null()).then_some(y1),
-        y2: (!y2.is_null()).then_some(y2),
+        x1,
+        x2,
+        y1,
+        y2,
         z,
         r: channels.r.as_ref().map(|channel| channel.read(row)),
         symbol: channels
@@ -522,6 +547,129 @@ fn normalize_rows(rows: &mut [PreparedRow]) {
             row.y2 = None;
         }
     }
+}
+
+/// The value a grouped output reduces, read from one member of the group.
+///
+/// Plot reads the channel the output writes unless the output names another
+/// input, and `y1`/`y2` fall back to `y` when the mark names no interval —
+/// Plot's `maybeInput` — so `{y1: "min"}` is the smallest y value even though
+/// a bar's interval has already been grown from zero by the time it groups.
+fn group_input(row: &PreparedRow, mark: &Mark, output: &crate::mark::GroupOutput) -> Value {
+    let name = output.input.as_deref().unwrap_or(&output.name);
+    match name {
+        // An interval's end falls back to the channel it splits, the way
+        // Plot's `maybeInput` does.
+        "x1" | "x2" if mark.channels.x1.is_some() || mark.channels.x2.is_some() => row
+            .x1
+            .as_ref()
+            .or(row.x2.as_ref())
+            .unwrap_or(&row.x)
+            .clone(),
+        "y1" | "y2" if mark.channels.y1.is_some() || mark.channels.y2.is_some() => row
+            .y1
+            .as_ref()
+            .or(row.y2.as_ref())
+            .unwrap_or(&row.y)
+            .clone(),
+        "x1" | "x2" => row.x_value().clone(),
+        "y1" | "y2" => row.y_value().clone(),
+        "x" => row.x_value().clone(),
+        "y" => row.y_value().clone(),
+        "z" => row.z.clone().unwrap_or(Value::Null),
+        // Any other name is a field on the record, which is where a grouped
+        // color, label or tooltip value lands.
+        field => row.row.value(field),
+    }
+}
+
+/// Collapse the rows sharing a category, Plot's `groupX`/`groupY`/`groupZ`.
+///
+/// Every group becomes one row: its category channel keeps the key, its
+/// outputs hold the reductions, and every other channel — the radius, the
+/// symbol, the record the tooltip reads — carries over from the group's first
+/// member. The groups keep the order they first appear in, so a categorical
+/// axis reads in data order.
+fn collapse_groups(
+    rows: Vec<PreparedRow>,
+    mark: &Mark,
+    config: &crate::mark::GroupConfig,
+) -> Vec<PreparedRow> {
+    let key = |row: &PreparedRow| match config.axis {
+        Some(Axis::X) => row.x_value().clone(),
+        Some(Axis::Y) => row.y_value().clone(),
+        // `groupZ` subdivides by the series, and a row with no `z` is its
+        // own group rather than a missing one.
+        None => row.z.clone().unwrap_or(Value::Null),
+    };
+
+    let mut groups: Vec<(Value, Vec<PreparedRow>)> = Vec::new();
+    for row in rows {
+        let key = key(&row);
+        match groups.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, members)) => members.push(row),
+            None => groups.push((key, vec![row])),
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(key, members)| {
+            let first = members[0].clone();
+            let mut grouped = PreparedRow {
+                x: Value::Null,
+                y: Value::Null,
+                x1: None,
+                x2: None,
+                y1: None,
+                y2: None,
+                ..first
+            };
+            for output in &config.outputs {
+                let values: Vec<Value> = members
+                    .iter()
+                    .map(|row| group_input(row, mark, output))
+                    .collect();
+                let records: Vec<&Table> = members.iter().map(|row| &row.row).collect();
+                let reduced = output.reducer.reduce(&values, &records);
+                match &*output.name {
+                    "x" => grouped.x = reduced,
+                    "y" => grouped.y = reduced,
+                    "x1" => grouped.x1 = (!reduced.is_null()).then_some(reduced),
+                    "x2" => grouped.x2 = (!reduced.is_null()).then_some(reduced),
+                    "y1" => grouped.y1 = (!reduced.is_null()).then_some(reduced),
+                    "y2" => grouped.y2 = (!reduced.is_null()).then_some(reduced),
+                    "z" => grouped.z = (!reduced.is_null()).then_some(reduced),
+                    // Anything else is a field the record gains, so a channel
+                    // that reads it — a fill accessor, a text label — sees the
+                    // reduced value.
+                    field => grouped.row = grouped.row.with(field, reduced),
+                }
+            }
+            // The category channel keeps the key when no output wrote it,
+            // which is what makes a grouped dot sit at its own category.
+            if grouped.x.is_null() && grouped.x1.is_none() {
+                grouped.x = key.clone();
+            }
+            if grouped.y.is_null() && grouped.y1.is_none() {
+                grouped.y = key;
+            }
+            // The grouping wrote the reduced value into a channel the mark
+            // turns into an interval, so a bar grows from zero to the count
+            // again. Plot derives the interval from the mark's options after
+            // its transforms, not before.
+            derive_intervals(
+                mark,
+                &grouped.x,
+                &grouped.y,
+                &mut grouped.x1,
+                &mut grouped.x2,
+                &mut grouped.y1,
+                &mut grouped.y2,
+            );
+            grouped
+        })
+        .collect()
 }
 
 fn reduce_rows(rows: Vec<PreparedRow>, mark: &Mark, reducer: Reducer) -> Vec<PreparedRow> {
@@ -907,6 +1055,118 @@ mod stack_tests {
             .map(|row| row.y2.as_ref().unwrap().as_number().unwrap())
             .fold(0.0_f64, f64::max);
         assert_eq!(top, 4.);
+    }
+
+    fn grouped_rows() -> Vec<Table> {
+        vec![
+            Table::empty()
+                .with("c", Value::text("a"))
+                .with("v", Value::Number(1.))
+                .with("sex", Value::text("F")),
+            Table::empty()
+                .with("c", Value::text("a"))
+                .with("v", Value::Number(3.))
+                .with("sex", Value::text("M")),
+            Table::empty()
+                .with("c", Value::text("b"))
+                .with("v", Value::Number(5.))
+                .with("sex", Value::text("F")),
+        ]
+    }
+
+    #[test]
+    fn group_x_counts_rows_per_category() {
+        let mark = Mark::new(MarkKind::BarY).x("c").y("v").group_x();
+        let prepared = prepare(&Dataset::new(grouped_rows()), &[mark]);
+        let rows = &prepared[0].rows;
+        assert_eq!(rows.len(), 2, "one row per category");
+        assert_eq!(rows[0].x_value(), &Value::text("a"));
+        assert_eq!(rows[0].y_value(), &Value::Number(2.));
+        assert_eq!(rows[1].x_value(), &Value::text("b"));
+        assert_eq!(rows[1].y_value(), &Value::Number(1.));
+    }
+
+    #[test]
+    fn a_grouped_bar_keeps_its_baseline() {
+        // The grouping writes the count into `y` after the raw rows already
+        // grew their interval from zero, so the interval has to be derived
+        // again for the bar to have a length to draw.
+        let mark = Mark::new(MarkKind::BarY).x("c").y("v").group_x();
+        let prepared = prepare(&Dataset::new(grouped_rows()), &[mark]);
+        let rows = &prepared[0].rows;
+        assert_eq!(
+            rows[0].y_interval(),
+            Some((Value::Number(0.), Value::Number(2.)))
+        );
+        assert_eq!(
+            rows[1].y_interval(),
+            Some((Value::Number(0.), Value::Number(1.)))
+        );
+    }
+
+    #[test]
+    fn group_x_reduces_a_named_channel() {
+        let mark = Mark::new(MarkKind::BarY)
+            .x("c")
+            .y("v")
+            .group_x()
+            .group_output("y", crate::transform::GroupReducer::Sum);
+        let prepared = prepare(&Dataset::new(grouped_rows()), &[mark]);
+        let rows = &prepared[0].rows;
+        // The later output replaces the default count, and sums the y values.
+        assert_eq!(rows[0].y_value(), &Value::Number(4.));
+        assert_eq!(rows[1].y_value(), &Value::Number(5.));
+    }
+
+    #[test]
+    fn find_picks_the_row_matching_its_test() {
+        // Plot's example: a bar's two ends come from two rows of the same x,
+        // chosen by a field rather than by an extreme.
+        let mark = Mark::new(MarkKind::BarY)
+            .x("c")
+            .y("v")
+            .group_x()
+            .group_output(
+                "y1",
+                crate::transform::GroupReducer::find(|row| {
+                    row.value("sex").label().as_ref() == "F"
+                }),
+            )
+            .group_output(
+                "y2",
+                crate::transform::GroupReducer::find(|row| {
+                    row.value("sex").label().as_ref() == "M"
+                }),
+            );
+        let prepared = prepare(&Dataset::new(grouped_rows()), &[mark]);
+        let rows = &prepared[0].rows;
+        let a = rows
+            .iter()
+            .find(|row| row.x_value() == &Value::text("a"))
+            .unwrap();
+        assert_eq!(a.y1.as_ref().unwrap(), &Value::Number(1.));
+        assert_eq!(a.y2.as_ref().unwrap(), &Value::Number(3.));
+        // Category "b" has no M row, so its upper end is missing rather than
+        // borrowing a neighbour's value.
+        let b = rows
+            .iter()
+            .find(|row| row.x_value() == &Value::text("b"))
+            .unwrap();
+        assert_eq!(b.y1.as_ref().unwrap(), &Value::Number(5.));
+        assert!(b.y2.is_none());
+    }
+
+    #[test]
+    fn group_z_subdivides_by_series() {
+        let mark = Mark::new(MarkKind::BarY).x("c").y("v").z("sex").group_z();
+        let prepared = prepare(&Dataset::new(grouped_rows()), &[mark]);
+        let rows = &prepared[0].rows;
+        // One row per series, each holding the series' count.
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].z.as_ref().unwrap(), &Value::text("F"));
+        assert_eq!(rows[0].row.number("fill"), Some(2.));
+        assert_eq!(rows[1].z.as_ref().unwrap(), &Value::text("M"));
+        assert_eq!(rows[1].row.number("fill"), Some(1.));
     }
 }
 

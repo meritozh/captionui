@@ -9,7 +9,9 @@ use gpui::{Hsla, SharedString};
 
 use crate::style::{ColorChannel, NumberChannel, Symbol};
 use crate::table::{Channel, IntoChannel};
-use crate::transform::{Anchor, Dodge, Reducer, Selector, StackOffset, Thresholds, WindowReducer};
+use crate::transform::{
+    Anchor, Dodge, GroupReducer, Reducer, Selector, StackOffset, Thresholds, WindowReducer,
+};
 
 /// The mark types this library draws, matching Plot's mark set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -377,6 +379,57 @@ impl Default for BinConfig {
     }
 }
 
+/// How a mark groups its rows, Plot's `groupX`, `groupY` and `groupZ`.
+///
+/// A group collapses the rows that share a category into one row per
+/// category, each output channel reduced over the rows that formed it. Plot
+/// splits the work between the axis the group reads — `groupX` groups by x,
+/// `groupY` by y, `groupZ` by `z` alone — and the other channels it carries
+/// along.
+#[derive(Clone, Debug)]
+pub struct GroupConfig {
+    /// The axis the groups read, or `None` for `groupZ`, which groups by the
+    /// `z` channel alone.
+    pub axis: Option<Axis>,
+    /// The outputs: which channel each group's reduction lands in, and how.
+    pub outputs: Vec<GroupOutput>,
+}
+
+/// One grouped output channel: a field or channel name and its reducer.
+///
+/// Plot names outputs by channel — `{y: "count", fill: "mean"}` — and the
+/// reducer reads that channel's own input unless it names one. `"count"`
+/// takes no input at all, and a reducer that needs a value falls back to the
+/// channel it writes, so `{y: "mean"}` averages the y values.
+#[derive(Clone, Debug)]
+pub struct GroupOutput {
+    /// The channel the reduced value lands in, Plot's output name: `"x"`,
+    /// `"y"`, `"x1"`, `"y2"`, `"fill"`, or a field name.
+    pub name: SharedString,
+    /// How the group is reduced.
+    pub reducer: GroupReducer,
+    /// The field the reducer reads, when it differs from the output's own
+    /// channel; Plot's `{y: {value: "v", reduce: "mean"}}`.
+    pub input: Option<SharedString>,
+}
+
+impl GroupOutput {
+    /// An output writing `name`, reduced with `reducer`, reading that channel.
+    pub fn new(name: impl Into<SharedString>, reducer: GroupReducer) -> Self {
+        Self {
+            name: name.into(),
+            reducer,
+            input: None,
+        }
+    }
+
+    /// Read a field other than the output's own channel.
+    pub fn input(mut self, field: impl Into<SharedString>) -> Self {
+        self.input = Some(field.into());
+        self
+    }
+}
+
 /// How a mark's data is ordered, Plot's `sort` option.
 #[derive(Clone, Debug, Default)]
 pub struct SortConfig {
@@ -628,6 +681,8 @@ pub struct Mark {
     pub sort: Option<SortConfig>,
     /// A reducer applied over the mark's rows, Plot's `reduce`.
     pub reduce: Option<Reducer>,
+    /// How the mark groups its rows before drawing, Plot's `groupX`/`groupY`.
+    pub group: Option<GroupConfig>,
     /// A window transform applied to the mark's value, Plot's `window`.
     pub window: Option<(usize, WindowReducer, Anchor)>,
     /// A numeric transform of the mark's value, Plot's `normalize`.
@@ -738,6 +793,7 @@ impl Mark {
             bin: None,
             sort: None,
             reduce: None,
+            group: None,
             window: None,
             normalize: false,
             dodge: None,
@@ -943,6 +999,55 @@ impl Mark {
     /// Reduce the mark's rows with a reducer, Plot's `reduce`.
     pub fn reduce(mut self, reducer: Reducer) -> Self {
         self.reduce = Some(reducer);
+        self
+    }
+
+    /// Group the mark's rows by x and reduce them, Plot's `groupX`.
+    ///
+    /// Plot's default output is a count, which is what turns a scatter's rows
+    /// into a histogram: every x value becomes one row whose y is how many
+    /// readings shared it.
+    pub fn group_x(mut self) -> Self {
+        self.group = Some(GroupConfig {
+            axis: Some(Axis::X),
+            outputs: vec![GroupOutput::new("y", GroupReducer::Count)],
+        });
+        self
+    }
+
+    /// Group the mark's rows by y and reduce them, Plot's `groupY`.
+    pub fn group_y(mut self) -> Self {
+        self.group = Some(GroupConfig {
+            axis: Some(Axis::Y),
+            outputs: vec![GroupOutput::new("x", GroupReducer::Count)],
+        });
+        self
+    }
+
+    /// Group the mark's rows by its `z` channel and reduce them, Plot's
+    /// `groupZ`. Without a `z` the whole dataset is one group.
+    pub fn group_z(mut self) -> Self {
+        self.group = Some(GroupConfig {
+            axis: None,
+            outputs: vec![GroupOutput::new("fill", GroupReducer::Count)],
+        });
+        self
+    }
+
+    /// Reduce a named channel over the mark's groups, Plot's
+    /// `groupX({y: "mean"}, …)`. The reducer reads the channel it writes
+    /// unless [`GroupOutput::input`] names another field.
+    pub fn group_output(mut self, name: impl Into<SharedString>, reducer: GroupReducer) -> Self {
+        let output = GroupOutput::new(name, reducer);
+        match &mut self.group {
+            Some(config) => config.outputs.push(output),
+            None => {
+                self.group = Some(GroupConfig {
+                    axis: Some(Axis::X),
+                    outputs: vec![output],
+                });
+            }
+        }
         self
     }
 
@@ -1322,6 +1427,34 @@ macro_rules! mark_builder {
             /// Reduce the mark's rows.
             pub fn reduce(mut self, reducer: Reducer) -> Self {
                 self.0 = self.0.reduce(reducer);
+                self
+            }
+
+            /// Group the mark's rows by x, Plot's `groupX`.
+            pub fn group_x(mut self) -> Self {
+                self.0 = self.0.group_x();
+                self
+            }
+
+            /// Group the mark's rows by y, Plot's `groupY`.
+            pub fn group_y(mut self) -> Self {
+                self.0 = self.0.group_y();
+                self
+            }
+
+            /// Group the mark's rows by its `z` channel, Plot's `groupZ`.
+            pub fn group_z(mut self) -> Self {
+                self.0 = self.0.group_z();
+                self
+            }
+
+            /// Reduce a named channel over the mark's groups.
+            pub fn group_output(
+                mut self,
+                name: impl Into<SharedString>,
+                reducer: GroupReducer,
+            ) -> Self {
+                self.0 = self.0.group_output(name, reducer);
                 self
             }
 

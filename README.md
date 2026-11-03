@@ -12,7 +12,7 @@ The repository has two crates:
 | Path | What it is |
 | --- | --- |
 | `crates/gpui-plot` | The library. |
-| `demo` | A gallery window of 18 charts, plus an offscreen snapshot renderer. |
+| `demo` | A gallery window of 44 charts, plus an offscreen snapshot renderer. |
 
 ## Quick start
 
@@ -111,12 +111,14 @@ ramps, and diverging ramps (`ColorRange::blue_red()`). `Plot::color(field, range
 colors marks by a quantitative field; a `fill` channel can read a row or compute
 a color per datum.
 
-**Transforms.** `group`, `bin` (with count and custom reducers), `stack`
-(zero, center, normalize; long and wide data), `window` (mean, sum, median,
-min, max, cumulative mean, difference, change, percent change; middle, start
-and end anchors), `dodge` (`dodge_x`/`dodge_y` beeswarms, with anchor, radius
-and padding), `normalize`, `sort`, `reverse`, and `filter` are available on
-`Mark` or as functions in `gpui_plot::transform`.
+**Transforms.** `group`, `groupX`/`groupY`/`groupZ` (a group's outputs are
+reducers over its members: count, distinct, sum, mean, min, max, median,
+deviation, first, last, and `find`), `bin` (with count and custom reducers),
+`stack` (zero, center, normalize; long and wide data), `window` (mean, sum,
+median, min, max, cumulative mean, difference, change, percent change; middle,
+start and end anchors), `dodge` (`dodge_x`/`dodge_y` beeswarms, with anchor,
+radius and padding), `normalize`, `sort`, `reverse`, and `filter` are available
+on `Mark` or as functions in `gpui_plot::transform`.
 
 **Frame.** Titles and subtitles, a legend in five positions (top, bottom, left,
 right, none) that lays out as a row or a column and reserves its measured width,
@@ -155,7 +157,7 @@ resolution.
 cargo run -p gpui-plot-demo --example snapshots
 ```
 
-renders all 42 gallery charts through GPUI's headless renderer, writes each to
+renders all 44 gallery charts through GPUI's headless renderer, writes each to
 `demo/snapshots/*.png`, and asserts each painted more than 12 distinct colors.
 This is the check that caught the defects unit tests could not: charts that
 painted nothing, legends over the title, clipped axis labels, stacked bars that
@@ -170,7 +172,8 @@ dimensional variants (`dotX`/`dotY`, `lineX`/`lineY`, `rectX`/`rectY`), the
 furniture marks (`axisX`/`axisY`, `gridX`/`gridY`, `frame`) and `tip`, all
 channel types, the linear-family and ordinal scales with `nice`, `clamp`,
 `reverse` and pinned ranges, the transforms above (including `dodge`, `select`,
-`map`, `shift` and `shuffle`), faceting (`fx`/`fy`), color ranges, legends
+`map`, `shift`, `shuffle` and `groupX`/`groupY`/`groupZ` with `find`),
+faceting (`fx`/`fy`), color ranges, legends
 (color, size and opacity, with a title and per-mark swatch shapes), axes, grid,
 tooltips, and hover highlighting.
 
@@ -180,11 +183,9 @@ own lattice, `cellX`/`cellY`, `textX`/`textY`, `vectorX`/`vectorY`, `vector`,
 `spike`, `arrow`, `waffleX`/`waffleY`, `boxX`/`boxY`, and the Delaunay family
 (`delaunayLink`, `delaunayMesh`, `hull`, `voronoi`, `voronoiMesh`).
 
-Not implemented yet, in the order the work is planned:
+Not implemented yet:
 
-1. **Grouping transforms.** `groupX`/`groupY` as mark options (a mark's
-   `reduce` covers the common cases) and `find`.
-2. **Geo projections**, which are out of scope for a desktop chart library
+1. **Geo projections**, which are out of scope for a desktop chart library
    with no basemap ecosystem.
 
 The `tension` option for cardinal curves is also missing; the curves

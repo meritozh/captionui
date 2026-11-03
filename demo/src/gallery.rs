@@ -3,8 +3,8 @@
 
 use gpui_plot::mark::Curve;
 use gpui_plot::{
-    ColorRange, Dodge, DodgeAnchor, LegendPosition, MapReducer, Plot, Reducer, Selector,
-    StackOffset, Table, Thresholds, Transform, Value,
+    ColorRange, Dodge, DodgeAnchor, GroupReducer, LegendPosition, MapReducer, Plot, Reducer,
+    Selector, StackOffset, Table, Thresholds, Transform, Value,
 };
 
 use crate::data;
@@ -319,6 +319,20 @@ pub fn examples() -> Vec<Example> {
             description: "The same cells as one lattice, each edge stroked once.",
             height: 440.,
             build: voronoi_mesh_plot,
+        },
+        Example {
+            title: "Grouped ranges",
+            section: "Transforms / groupX",
+            description: "An uneven set of monthly readings reduced to a bar between the lowest and the highest.",
+            height: 400.,
+            build: grouped_ranges,
+        },
+        Example {
+            title: "Grouped counts",
+            section: "Transforms / groupX",
+            description: "Rows folded into one bar per category, its height the number of readings it holds.",
+            height: 400.,
+            build: grouped_counts,
         },
     ]
 }
@@ -1191,5 +1205,33 @@ fn voronoi_mesh_plot() -> Plot {
         .subtitle("The cells' shared edges, each stroked once")
         .voronoi_mesh(|mark| mark.x("x").y("y").stroke_width(1.))
         .dot(|mark| mark.x("x").y("y").r(2.5))
+        .grid(false)
+}
+
+fn grouped_ranges() -> Plot {
+    let data = data::readings();
+    Plot::new(data)
+        .title("Monthly reading range")
+        .subtitle("Every reading a month holds, reduced to its lowest and highest")
+        .bar_y(|mark| {
+            mark.x("month")
+                .y1("reading")
+                .y2("reading")
+                .group_x()
+                .group_output("y1", GroupReducer::Min)
+                .group_output("y2", GroupReducer::Max)
+                .corner_radius(2.)
+        })
+        .y_zero(false)
+        .grid(false)
+}
+
+fn grouped_counts() -> Plot {
+    let data = data::readings();
+    Plot::new(data)
+        .title("Readings per month")
+        .subtitle("One bar per month, its height the readings that month holds")
+        .bar_y(|mark| mark.x("month").y("reading").group_x().corner_radius(2.))
+        .y_zero(true)
         .grid(false)
 }

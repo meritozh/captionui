@@ -50,7 +50,7 @@ pub mod ticks;
 pub mod transform;
 pub mod value;
 
-pub use mark::{Axis, MapConfig, MapReducer, SelectConfig, ShiftConfig};
+pub use mark::{Axis, GroupConfig, GroupOutput, MapConfig, MapReducer, SelectConfig, ShiftConfig};
 pub use scale::{
     BandScale, ColorRange, ColorScale, ContinuousScale, OrdinalScale, PointScale, PositionScale,
     Transform,
@@ -58,8 +58,8 @@ pub use scale::{
 pub use style::{ColorChannel, NumberChannel, Symbol};
 pub use table::{Channel, Dataset, IntoChannel, Table};
 pub use transform::{
-    Anchor, Bin, Dodge, DodgeAnchor, Reducer, Select, Selector, StackOffset, StackedPoint,
-    StackedSeries, Thresholds, WindowReducer,
+    Anchor, Bin, Dodge, DodgeAnchor, GroupReducer, Reducer, Select, Selector, StackOffset,
+    StackedPoint, StackedSeries, Thresholds, WindowReducer,
 };
 pub use value::{PlotKind, Value};
 

@@ -162,6 +162,33 @@ pub fn clusters() -> Vec<Table> {
     rows
 }
 
+/// Monthly readings from an uneven set of sensors, for the grouping transforms:
+/// several rows per month that a group reduces to one range and one count.
+pub fn readings() -> Vec<Table> {
+    const MONTHS: [&str; 8] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"];
+    let mut rng = Rng::new(37);
+    let mut rows = Vec::new();
+
+    for (month, name) in MONTHS.into_iter().enumerate() {
+        let drift = 40. + month as f64 * 4.;
+        // Sensors report in uneven numbers, so a count per month has a shape.
+        let sensors = 4 + (month * 2) % 5;
+        for sensor in 0..sensors {
+            rows.push(
+                Table::empty()
+                    .with("month", Value::text(name))
+                    .with("sensor", Value::Number(sensor as f64))
+                    .with(
+                        "reading",
+                        Value::Number(round1(drift + rng.next_in(-14., 14.))),
+                    ),
+            );
+        }
+    }
+
+    rows
+}
+
 /// Quarterly sales by region and channel, for the facet grid: two categorical
 /// fields to split the figure by, and a quantitative one to draw.
 pub fn faceted_sales() -> Vec<Table> {

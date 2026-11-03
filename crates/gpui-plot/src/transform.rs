@@ -105,6 +105,103 @@ impl Reducer {
     }
 }
 
+/// The reducer one grouped output applies, Plot's group output reducers.
+///
+/// Unlike [`Reducer`], which folds a single field, a group output also has the
+/// group's records: `find` picks a row by a predicate and returns that row's
+/// value, which is how a chart picks a series' reading by something other than
+/// its own extent.
+#[derive(Clone)]
+pub enum GroupReducer {
+    /// The number of rows in the group, Plot's `"count"`.
+    Count,
+    /// The number of distinct values, Plot's `"distinct"`.
+    Distinct,
+    /// The sum of the values, Plot's `"sum"`.
+    Sum,
+    /// The arithmetic mean, Plot's `"mean"`.
+    Mean,
+    /// The smallest value, Plot's `"min"`.
+    Min,
+    /// The largest value, Plot's `"max"`.
+    Max,
+    /// The median, Plot's `"median"`.
+    Median,
+    /// The standard deviation, Plot's `"deviation"`.
+    Deviation,
+    /// The group's first value, Plot's `"first"`.
+    First,
+    /// The group's last value, Plot's `"last"`.
+    Last,
+    /// The value at the first row the test accepts, Plot's `Plot.find`.
+    Find(std::rc::Rc<dyn Fn(&Table) -> bool>),
+}
+
+impl GroupReducer {
+    /// A reducer that returns the value of the first row matching `test`,
+    /// Plot's `Plot.find`.
+    pub fn find(test: impl Fn(&Table) -> bool + 'static) -> Self {
+        Self::Find(std::rc::Rc::new(test))
+    }
+
+    /// Reduce one group: its values, and the records they came from.
+    pub fn reduce(&self, values: &[Value], rows: &[&Table]) -> Value {
+        let simple = match self {
+            GroupReducer::Count => Some(Reducer::Count),
+            GroupReducer::Sum => Some(Reducer::Sum),
+            GroupReducer::Mean => Some(Reducer::Mean),
+            GroupReducer::Min => Some(Reducer::Min),
+            GroupReducer::Max => Some(Reducer::Max),
+            GroupReducer::Median => Some(Reducer::Median),
+            GroupReducer::Deviation => Some(Reducer::Deviation),
+            GroupReducer::First => Some(Reducer::First),
+            GroupReducer::Last => Some(Reducer::Last),
+            GroupReducer::Distinct | GroupReducer::Find(_) => None,
+        };
+        if let Some(reducer) = simple {
+            return reducer.reduce(values);
+        }
+        match self {
+            GroupReducer::Distinct => {
+                let mut seen: Vec<ValueKey> = Vec::new();
+                for value in values {
+                    let key = value.key();
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                    }
+                }
+                Value::Number(seen.len() as f64)
+            }
+            GroupReducer::Find(test) => values
+                .iter()
+                .zip(rows.iter())
+                .find(|(_, row)| test(row))
+                .map(|(value, _)| value.clone())
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
+        }
+    }
+}
+
+impl std::fmt::Debug for GroupReducer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            GroupReducer::Count => "Count",
+            GroupReducer::Distinct => "Distinct",
+            GroupReducer::Sum => "Sum",
+            GroupReducer::Mean => "Mean",
+            GroupReducer::Min => "Min",
+            GroupReducer::Max => "Max",
+            GroupReducer::Median => "Median",
+            GroupReducer::Deviation => "Deviation",
+            GroupReducer::First => "First",
+            GroupReducer::Last => "Last",
+            GroupReducer::Find(_) => "Find(..)",
+        };
+        f.write_str(name)
+    }
+}
+
 /// Group rows by `key` and reduce each group's `value` into a new field.
 ///
 /// This is Plot's `Plot.groupY`/`Plot.groupX` pair: the groups keep the order
