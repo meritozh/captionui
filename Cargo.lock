@@ -2122,6 +2122,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-plot-demo"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "gpui-kit",
+ "gpui-plot",
+]
+
+[[package]]
 name = "gpui-pre"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

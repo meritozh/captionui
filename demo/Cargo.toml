@@ -18,3 +18,11 @@ path = "src/main.rs"
 gpui-plot.workspace = true
 gpui-kit.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+# The headless renderer the snapshot example draws through. GPUI Kit's own
+# `test-support` feature would pull in a second dependency set that conflicts
+# with this workspace's, so the platform crates are depended on directly.
+gpui-pre = { version = "=0.3.10", package = "gpui-pre", features = ["test-support"] }
+gpui-pre-platform = { version = "=0.3.10", package = "gpui-pre-platform", features = ["test-support"] }
+image = "0.25"
