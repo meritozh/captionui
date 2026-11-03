@@ -1,0 +1,730 @@
+//! Data transforms: Plot's `Plot.transform` functions.
+//!
+//! Plot applies transforms between the data and the marks — binning for
+//! histograms and hexbins, stacking for areas and bars, grouping for
+//! aggregation, windowing for moving averages, and normalization. Each
+//! transform here reads a [`Dataset`] and returns a new one, so they compose
+//! the way Plot's do.
+
+use std::collections::BTreeMap;
+
+use gpui::SharedString;
+
+use crate::scale::dedup;
+use crate::table::{Dataset, Table};
+use crate::value::{Value, ValueKey};
+
+/// Aggregate a field across rows sharing a group, Plot's `groupY` and
+/// `groupX` with a reducer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Reducer {
+    /// The number of rows.
+    #[default]
+    Count,
+    /// The sum of the values.
+    Sum,
+    /// The arithmetic mean, ignoring nulls.
+    Mean,
+    /// The smallest value.
+    Min,
+    /// The largest value.
+    Max,
+    /// The first value, ignoring nulls.
+    First,
+    /// The last value, ignoring nulls.
+    Last,
+    /// The median of the values.
+    Median,
+    /// The standard deviation of the values.
+    Deviation,
+    /// The sum of squared values, for a root-mean-square.
+    SumOfSquares,
+}
+
+impl Reducer {
+    /// Reduce `values` to one value.
+    pub fn reduce(self, values: &[Value]) -> Value {
+        let numbers: Vec<f64> = values.iter().filter_map(Value::as_number).collect();
+        match self {
+            Reducer::Count => Value::Number(values.len() as f64),
+            Reducer::Sum => Value::Number(numbers.iter().sum()),
+            Reducer::Mean => {
+                if numbers.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Number(numbers.iter().sum::<f64>() / numbers.len() as f64)
+                }
+            }
+            Reducer::Min => numbers
+                .iter()
+                .copied()
+                .reduce(f64::min)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+            Reducer::Max => numbers
+                .iter()
+                .copied()
+                .reduce(f64::max)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+            Reducer::First => values
+                .iter()
+                .find(|v| !v.is_null())
+                .cloned()
+                .unwrap_or(Value::Null),
+            Reducer::Last => values
+                .iter()
+                .rev()
+                .find(|v| !v.is_null())
+                .cloned()
+                .unwrap_or(Value::Null),
+            Reducer::Median => {
+                if numbers.is_empty() {
+                    return Value::Null;
+                }
+                let mut sorted = numbers.clone();
+                sorted.sort_by(f64::total_cmp);
+                let mid = sorted.len() / 2;
+                Value::Number(if sorted.len().is_multiple_of(2) {
+                    (sorted[mid - 1] + sorted[mid]) / 2.
+                } else {
+                    sorted[mid]
+                })
+            }
+            Reducer::Deviation => {
+                if numbers.len() < 2 {
+                    return Value::Number(0.);
+                }
+                let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                let variance = numbers.iter().map(|n| (n - mean).powi(2)).sum::<f64>()
+                    / (numbers.len() - 1) as f64;
+                Value::Number(variance.sqrt())
+            }
+            Reducer::SumOfSquares => Value::Number(numbers.iter().map(|n| n * n).sum()),
+        }
+    }
+}
+
+/// Group rows by `key` and reduce each group's `value` into a new field.
+///
+/// This is Plot's `Plot.groupY`/`Plot.groupX` pair: the groups keep the order
+/// they first appear in, so a categorical axis reads in data order.
+pub fn group(data: &Dataset, key: &str, value: &str, reducer: Reducer, output: &str) -> Dataset {
+    let mut groups: Vec<(ValueKey, Value, Vec<Value>)> = Vec::new();
+    for row in data.rows() {
+        let group_value = row.value(key);
+        let group_key = group_value.key();
+        match groups.iter_mut().find(|(k, _, _)| *k == group_key) {
+            Some((_, _, values)) => values.push(row.value(value)),
+            None => groups.push((group_key, group_value, vec![row.value(value)])),
+        }
+    }
+
+    let rows: Vec<Table> = groups
+        .into_iter()
+        .map(|(_, group_value, values)| {
+            let reduced = reducer.reduce(&values);
+            Table::empty().with(key, group_value).with(output, reduced)
+        })
+        .collect();
+    Dataset::new(rows)
+}
+
+/// How a [`bin`] computes its bins, Plot's `thresholds` option.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum Thresholds {
+    /// About this many evenly spaced bins; Plot's `thresholds` number.
+    Count(usize),
+    /// One bin per tick of the scale's nice ticks, Plot's `thresholds` with a
+    /// tick generator.
+    #[default]
+    Auto,
+    /// Bins of this fixed width, Plot's `interval`.
+    Interval(f64),
+}
+
+/// A histogram bin: the interval `[x0, x1)` and the rows that fell in it.
+#[derive(Clone, Debug)]
+pub struct Bin {
+    pub x0: f64,
+    pub x1: f64,
+    pub rows: Vec<usize>,
+}
+
+impl Bin {
+    pub fn count(&self) -> f64 {
+        self.rows.len() as f64
+    }
+}
+
+/// Bin rows by a numeric field, Plot's `Plot.binX`/`Plot.binY`.
+///
+/// Returns the bins and the domain the bins span, so a mark can draw them
+/// without recomputing the extent.
+pub fn bin(data: &Dataset, field: &str, thresholds: Thresholds) -> (Vec<Bin>, [f64; 2]) {
+    let values: Vec<(usize, f64)> = data
+        .rows()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            row.get(field)
+                .and_then(Value::as_number)
+                .map(|v| (index, v))
+        })
+        .collect();
+
+    let Some(extent) = crate::scale::extent(values.iter().map(|(_, v)| Value::Number(*v))) else {
+        return (Vec::new(), [0., 1.]);
+    };
+
+    let [lo, hi] = extent;
+    let (lo, hi) = if lo == hi {
+        (lo - 0.5, hi + 0.5)
+    } else {
+        (lo, hi)
+    };
+    let count = match thresholds {
+        Thresholds::Count(count) => count.max(1),
+        Thresholds::Auto => 10,
+        Thresholds::Interval(width) => {
+            (((hi - lo) / width.max(f64::MIN_POSITIVE)).ceil() as usize).max(1)
+        }
+    };
+    let width = match thresholds {
+        Thresholds::Interval(width) => width.max(f64::MIN_POSITIVE),
+        _ => nice_bin_width((hi - lo) / count as f64),
+    };
+
+    let mut bins: Vec<Bin> = Vec::new();
+    let mut edge = lo;
+    while edge < hi {
+        bins.push(Bin {
+            x0: edge,
+            x1: edge + width,
+            rows: Vec::new(),
+        });
+        edge += width;
+    }
+    if bins.is_empty() {
+        bins.push(Bin {
+            x0: lo,
+            x1: hi,
+            rows: Vec::new(),
+        });
+    }
+
+    for (index, value) in values {
+        let slot = ((value - lo) / width).floor() as isize;
+        let slot = slot.clamp(0, bins.len() as isize - 1) as usize;
+        bins[slot].rows.push(index);
+    }
+
+    let domain = [bins[0].x0, bins[bins.len() - 1].x1];
+    (bins, domain)
+}
+
+fn nice_bin_width(rough: f64) -> f64 {
+    if rough <= 0. || !rough.is_finite() {
+        return 1.;
+    }
+    let exponent = rough.log10().floor();
+    let base = 10f64.powf(exponent);
+    let fraction = rough / base;
+    let nice = if fraction <= 1. {
+        1.
+    } else if fraction <= 2. {
+        2.
+    } else if fraction <= 5. {
+        5.
+    } else {
+        10.
+    };
+    nice * base
+}
+
+/// How stacked series are accumulated, Plot's `offset`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StackOffset {
+    /// Each series sits on the sum of the ones before it, from zero; d3's
+    /// `stackOffsetNone`.
+    #[default]
+    Zero,
+    /// Each series is normalized so the total is 1 at every x; d3's
+    /// `stackOffsetExpand`, which Plot uses for percentage charts.
+    Normalize,
+    /// Series are centered on the baseline, showing a divergence around zero;
+    /// d3's `stackOffsetSilhouette`.
+    Center,
+    /// Series overlap instead of stacking, Plot's `stack: false`.
+    None,
+}
+
+/// One stacked series.
+#[derive(Clone, Debug)]
+pub struct StackedSeries {
+    /// The series' key, in the order it appears in the data.
+    pub key: SharedString,
+    /// One point per x category: its lower and upper value.
+    pub points: Vec<StackedPoint>,
+}
+
+/// A stacked point: the x category and the series' extent at it.
+#[derive(Clone, Debug)]
+pub struct StackedPoint {
+    pub x: Value,
+    pub y0: f64,
+    pub y1: f64,
+}
+
+/// Stack a wide table: `x` names the category field and `keys` the fields that
+/// become series, each field's value stacking at that x.
+///
+/// This is Plot's `Plot.stackY` over a wide input, where each numeric column is
+/// a series.
+pub fn stack_wide(
+    data: &Dataset,
+    x: &str,
+    keys: &[&str],
+    offset: StackOffset,
+) -> Vec<StackedSeries> {
+    let categories: Vec<Value> = dedup(data.rows().iter().map(|row| row.value(x).key()))
+        .into_iter()
+        .map(|key| key.to_value())
+        .collect();
+
+    let mut series: Vec<StackedSeries> = keys
+        .iter()
+        .map(|key| StackedSeries {
+            key: (*key).into(),
+            points: Vec::new(),
+        })
+        .collect();
+
+    // A value per (series, category), summing rows that share both.
+    let mut grid: Vec<Vec<f64>> = vec![vec![0.; categories.len()]; keys.len()];
+    for row in data.rows() {
+        let x_value = row.value(x);
+        let Some(category) = categories.iter().position(|c| c.key() == x_value.key()) else {
+            continue;
+        };
+        for (series_index, key) in keys.iter().enumerate() {
+            if let Some(value) = row.number(key) {
+                grid[series_index][category] += value;
+            }
+        }
+    }
+
+    let totals: Vec<f64> = (0..categories.len())
+        .map(|category| grid.iter().map(|row| row[category]).sum())
+        .collect();
+
+    // The running total of the series drawn before this one, per category. It
+    // lives outside the series loop: each series sits on everything stacked
+    // under it, which is what stacking means.
+    let mut lower = vec![0.; categories.len()];
+    for (series_index, stacked) in series.iter_mut().enumerate() {
+        for (category, category_value) in categories.iter().enumerate() {
+            let value = grid[series_index][category];
+            let (y0, y1) = match offset {
+                StackOffset::Zero => (lower[category], lower[category] + value),
+                StackOffset::Normalize => {
+                    let total = totals[category];
+                    let base = if total == 0. {
+                        0.
+                    } else {
+                        lower[category] / total
+                    };
+                    let top = if total == 0. {
+                        0.
+                    } else {
+                        (lower[category] + value) / total
+                    };
+                    (base, top)
+                }
+                StackOffset::Center => {
+                    let total = totals[category];
+                    let base = -total / 2. + lower[category];
+                    (base, base + value)
+                }
+                StackOffset::None => (0., value),
+            };
+            lower[category] += value;
+            stacked.points.push(StackedPoint {
+                x: category_value.clone(),
+                y0,
+                y1,
+            });
+        }
+    }
+
+    series
+}
+
+/// Long-to-wide: Plot's `Plot.stackY` over long data, where one field names the
+/// series and another holds its value.
+pub fn stack_long(
+    data: &Dataset,
+    x: &str,
+    series_field: &str,
+    value_field: &str,
+    offset: StackOffset,
+) -> Vec<StackedSeries> {
+    let mut series_keys: Vec<ValueKey> = Vec::new();
+    let mut series_labels: Vec<SharedString> = Vec::new();
+    let mut categories: Vec<ValueKey> = Vec::new();
+
+    let mut grid: BTreeMap<(ValueKey, ValueKey), f64> = BTreeMap::new();
+    for row in data.rows() {
+        let x_value = row.value(x);
+        let series_value = row.value(series_field);
+        let Some(value) = row.number(value_field) else {
+            continue;
+        };
+        if !categories.contains(&x_value.key()) {
+            categories.push(x_value.key());
+        }
+        let series_key = series_value.key();
+        if !series_keys.contains(&series_key) {
+            series_keys.push(series_key.clone());
+            series_labels.push(series_value.label());
+        }
+        *grid.entry((series_key, x_value.key())).or_insert(0.) += value;
+    }
+
+    let categories: Vec<Value> = categories.into_iter().map(|key| key.to_value()).collect();
+
+    let mut series: Vec<StackedSeries> = series_labels
+        .into_iter()
+        .map(|key| StackedSeries {
+            key,
+            points: Vec::new(),
+        })
+        .collect();
+
+    let grid: Vec<Vec<f64>> = series_keys
+        .iter()
+        .map(|key| {
+            categories
+                .iter()
+                .map(|category| {
+                    grid.get(&(key.clone(), category.key()))
+                        .copied()
+                        .unwrap_or(0.)
+                })
+                .collect()
+        })
+        .collect();
+
+    let totals: Vec<f64> = (0..categories.len())
+        .map(|category| grid.iter().map(|row| row[category]).sum())
+        .collect();
+
+    // The running total of the series drawn before this one, per category. It
+    // lives outside the series loop: each series sits on everything stacked
+    // under it, which is what stacking means.
+    let mut lower = vec![0.; categories.len()];
+    for (series_index, stacked) in series.iter_mut().enumerate() {
+        for (category, category_value) in categories.iter().enumerate() {
+            let value = grid[series_index][category];
+            let (y0, y1) = match offset {
+                StackOffset::Zero => (lower[category], lower[category] + value),
+                StackOffset::Normalize => {
+                    let total = totals[category];
+                    let base = if total == 0. {
+                        0.
+                    } else {
+                        lower[category] / total
+                    };
+                    let top = if total == 0. {
+                        0.
+                    } else {
+                        (lower[category] + value) / total
+                    };
+                    (base, top)
+                }
+                StackOffset::Center => {
+                    let total = totals[category];
+                    let base = -total / 2. + lower[category];
+                    (base, base + value)
+                }
+                StackOffset::None => (0., value),
+            };
+            lower[category] += value;
+            stacked.points.push(StackedPoint {
+                x: category_value.clone(),
+                y0,
+                y1,
+            });
+        }
+    }
+
+    series
+}
+
+/// A window transform's reducer, Plot's `Plot.windowY` with a reducer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowReducer {
+    /// A moving mean.
+    #[default]
+    Mean,
+    /// A moving sum.
+    Sum,
+    /// A moving median.
+    Median,
+    /// The smallest value in the window.
+    Min,
+    /// The largest value in the window.
+    Max,
+    /// The cumulative mean.
+    CumulativeMean,
+    /// The difference between the current and previous value, Plot's `difference`.
+    Difference,
+    /// The value's change from the first value, Plot's `change`.
+    Change,
+    /// The percent change from the previous value.
+    PercentChange,
+}
+
+/// A window transform over a numeric field, Plot's `Plot.windowY`.
+///
+/// `k` is the window width; `None` centers the window, and `anchor` decides
+/// where a window sits when it cannot be centered (`center`, `start`, `end`).
+pub fn window(
+    data: &Dataset,
+    field: &str,
+    k: usize,
+    reducer: WindowReducer,
+    anchor: Anchor,
+) -> Dataset {
+    let values: Vec<Value> = data.values(field);
+    let numbers: Vec<Option<f64>> = values.iter().map(Value::as_number).collect();
+    let k = k.max(1);
+    let mut output = Vec::with_capacity(numbers.len());
+
+    for index in 0..numbers.len() {
+        let (start, end) = window_bounds(index, numbers.len(), k, anchor);
+        let slice: Vec<f64> = numbers[start..end].iter().filter_map(|v| *v).collect();
+        let result = match reducer {
+            WindowReducer::Mean => {
+                (!slice.is_empty()).then(|| slice.iter().sum::<f64>() / slice.len() as f64)
+            }
+            WindowReducer::Sum => (!slice.is_empty()).then(|| slice.iter().sum::<f64>()),
+            WindowReducer::Median => {
+                if slice.is_empty() {
+                    None
+                } else {
+                    let mut sorted = slice.clone();
+                    sorted.sort_by(f64::total_cmp);
+                    let mid = sorted.len() / 2;
+                    Some(if sorted.len().is_multiple_of(2) {
+                        (sorted[mid - 1] + sorted[mid]) / 2.
+                    } else {
+                        sorted[mid]
+                    })
+                }
+            }
+            WindowReducer::Min => slice.iter().copied().reduce(f64::min),
+            WindowReducer::Max => slice.iter().copied().reduce(f64::max),
+            WindowReducer::CumulativeMean => {
+                let slice: Vec<f64> = numbers[..=index].iter().filter_map(|v| *v).collect();
+                (!slice.is_empty()).then(|| slice.iter().sum::<f64>() / slice.len() as f64)
+            }
+            WindowReducer::Difference => {
+                let current = numbers[index];
+                let previous = index.checked_sub(1).and_then(|i| numbers[i]);
+                match (current, previous) {
+                    (Some(current), Some(previous)) => Some(current - previous),
+                    _ => None,
+                }
+            }
+            WindowReducer::Change => {
+                let current = numbers[index];
+                let first = numbers.iter().find_map(|v| *v);
+                match (current, first) {
+                    (Some(current), Some(first)) => Some(current - first),
+                    _ => None,
+                }
+            }
+            WindowReducer::PercentChange => {
+                let current = numbers[index];
+                let previous = index.checked_sub(1).and_then(|i| numbers[i]);
+                match (current, previous) {
+                    (Some(current), Some(previous)) if previous != 0. => {
+                        Some((current - previous) / previous)
+                    }
+                    _ => None,
+                }
+            }
+        };
+        output.push(result.map(Value::Number).unwrap_or(Value::Null));
+    }
+
+    Dataset::new(
+        data.rows()
+            .iter()
+            .cloned()
+            .zip(output)
+            .map(|(row, value)| row.with(field, value)),
+    )
+}
+
+/// Where a window sits when it cannot be centered on its point, Plot's
+/// `anchor`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Anchor {
+    /// Keep the point in the middle of the window. (Default.)
+    #[default]
+    Middle,
+    /// The window starts at the point.
+    Start,
+    /// The window ends at the point.
+    End,
+}
+
+fn window_bounds(index: usize, len: usize, k: usize, anchor: Anchor) -> (usize, usize) {
+    // A centered window reaches `left` back and `right` forward, so a window of
+    // three takes one neighbor on each side and one at the ends takes only what
+    // the data has — d3's partial rolling window.
+    let left = k / 2;
+    let right = k.saturating_sub(left + 1);
+    let (start, end) = match anchor {
+        Anchor::Middle => (index.saturating_sub(left), (index + right + 1).min(len)),
+        Anchor::Start => (index, (index + k).min(len)),
+        Anchor::End => (index.saturating_sub(k.saturating_sub(1)), index + 1),
+    };
+    (start, end)
+}
+
+/// Normalize a numeric field to `0..=1` across the dataset, Plot's
+/// `Plot.normalizeY` with `percent` off.
+pub fn normalize(data: &Dataset, field: &str) -> Dataset {
+    let extent = crate::scale::extent(data.values(field));
+    let Some([lo, hi]) = extent else {
+        return data.clone();
+    };
+    let span = hi - lo;
+    Dataset::new(data.rows().iter().cloned().map(|row| {
+        let normalized = row
+            .number(field)
+            .map(|value| if span == 0. { 0.5 } else { (value - lo) / span });
+        row.with(field, normalized.map(Value::Number).unwrap_or(Value::Null))
+    }))
+}
+
+/// Sort rows by a field, Plot's `Plot.sort`.
+pub fn sort_by(data: &Dataset, field: &str, descending: bool) -> Dataset {
+    let mut rows: Vec<Table> = data.rows().to_vec();
+    rows.sort_by(|a, b| {
+        let ordering = a.value(field).cmp(&b.value(field));
+        if descending {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    });
+    Dataset::new(rows)
+}
+
+/// Keep rows whose `field` satisfies `predicate`, Plot's `Plot.filter`.
+pub fn filter(data: &Dataset, field: &str, predicate: impl Fn(&Value) -> bool) -> Dataset {
+    Dataset::new(
+        data.rows()
+            .iter()
+            .filter(|row| predicate(&row.value(field)))
+            .cloned(),
+    )
+}
+
+/// Reverse row order, Plot's `Plot.reverse`.
+pub fn reverse(data: &Dataset) -> Dataset {
+    Dataset::new(data.rows().iter().rev().cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows() -> Dataset {
+        Dataset::new([
+            Table::empty()
+                .with("group", Value::text("a"))
+                .with("v", Value::Number(1.)),
+            Table::empty()
+                .with("group", Value::text("a"))
+                .with("v", Value::Number(3.)),
+            Table::empty()
+                .with("group", Value::text("b"))
+                .with("v", Value::Number(5.)),
+        ])
+    }
+
+    #[test]
+    fn group_reduces_per_category() {
+        let grouped = group(&rows(), "group", "v", Reducer::Sum, "sum");
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped.rows()[0].value("sum"), Value::Number(4.));
+        assert_eq!(grouped.rows()[1].value("sum"), Value::Number(5.));
+
+        let counted = group(&rows(), "group", "v", Reducer::Count, "count");
+        assert_eq!(counted.rows()[0].value("count"), Value::Number(2.));
+    }
+
+    #[test]
+    fn reducers_ignore_nulls() {
+        let values = vec![Value::Number(1.), Value::Null, Value::Number(3.)];
+        assert_eq!(Reducer::Mean.reduce(&values), Value::Number(2.));
+        assert_eq!(Reducer::Count.reduce(&values), Value::Number(3.));
+        assert_eq!(Reducer::Median.reduce(&values), Value::Number(2.));
+    }
+
+    #[test]
+    fn bins_cover_the_extent() {
+        let data = Dataset::new((0..10).map(|i| Table::empty().with("v", Value::Number(i as f64))));
+        let (bins, domain) = bin(&data, "v", Thresholds::Count(5));
+        assert_eq!(domain, [0., 10.]);
+        assert_eq!(bins.iter().map(Bin::count).sum::<f64>(), 10.);
+    }
+
+    #[test]
+    fn stack_normalizes_to_one() {
+        let data = Dataset::new([Table::empty()
+            .with("x", Value::text("a"))
+            .with("s1", Value::Number(1.))
+            .with("s2", Value::Number(3.))]);
+        let series = stack_wide(&data, "x", &["s1", "s2"], StackOffset::Normalize);
+        assert_eq!(series.len(), 2);
+        assert!((series[1].points[0].y1 - 1.).abs() < 1e-9);
+        assert!((series[0].points[0].y1 - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn window_mean_is_centered() {
+        let data = Dataset::new((0..5).map(|i| Table::empty().with("v", Value::Number(i as f64))));
+        let smoothed = window(&data, "v", 3, WindowReducer::Mean, Anchor::Middle);
+        let values: Vec<f64> = smoothed
+            .values("v")
+            .iter()
+            .filter_map(Value::as_number)
+            .collect();
+        assert_eq!(values, vec![0.5, 1., 2., 3., 3.5]);
+    }
+
+    #[test]
+    fn normalize_spans_zero_to_one() {
+        let normalized = normalize(&rows(), "v");
+        let values: Vec<f64> = normalized
+            .values("v")
+            .iter()
+            .filter_map(Value::as_number)
+            .collect();
+        assert_eq!(values, vec![0., 0.5, 1.]);
+    }
+
+    #[test]
+    fn sort_and_filter() {
+        let sorted = sort_by(&rows(), "v", true);
+        assert_eq!(sorted.rows()[0].value("v"), Value::Number(5.));
+        let filtered = filter(&rows(), "v", |v| v.as_number().is_some_and(|n| n > 2.));
+        assert_eq!(filtered.len(), 2);
+    }
+}

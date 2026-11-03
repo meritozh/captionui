@@ -30,10 +30,12 @@
 // `IntoPlot` derive spell GPUI paths the way the rest of the ecosystem does.
 extern crate gpui_kit as gpui;
 
+pub mod density;
 pub mod scale;
 pub mod style;
 pub mod table;
 pub mod ticks;
+pub mod transform;
 pub mod value;
 
 pub use scale::{
@@ -42,4 +44,7 @@ pub use scale::{
 };
 pub use style::{ColorChannel, NumberChannel, Symbol};
 pub use table::{Channel, Dataset, IntoChannel, Table};
+pub use transform::{
+    Anchor, Bin, Reducer, StackOffset, StackedPoint, StackedSeries, Thresholds, WindowReducer,
+};
 pub use value::{PlotKind, Value};
