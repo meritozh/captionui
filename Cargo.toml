@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/gpui-plot"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+gpui-plot = { path = "crates/gpui-plot" }
+gpui-kit = "0.8.1"
+chrono = "0.4"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

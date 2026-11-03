@@ -1,0 +1,11 @@
+[package]
+name = "gpui-plot"
+description = "A full-featured, Plot/Observable-style visualization library for GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+chrono.workspace = true
