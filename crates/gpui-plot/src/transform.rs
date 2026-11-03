@@ -640,6 +640,137 @@ pub fn reverse(data: &Dataset) -> Dataset {
     Dataset::new(data.rows().iter().rev().cloned())
 }
 
+/// Where a dodge places its points relative to the axis it packs along.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DodgeAnchor {
+    /// Pack from the low end of the axis. (Default for `dodge_x`.)
+    #[default]
+    Start,
+    /// Pack symmetrically around the axis's middle.
+    Middle,
+    /// Pack from the high end of the axis.
+    End,
+}
+
+/// A dodge transform's configuration.
+#[derive(Clone, Copy, Debug)]
+pub struct Dodge {
+    /// Where the points pack from.
+    pub anchor: DodgeAnchor,
+    /// The radius of each point, in the units of the packed axis. Plot's
+    /// default is the mark's dot radius.
+    pub radius: f32,
+    /// The gap between neighbouring points, Plot's `padding`.
+    pub padding: f32,
+}
+
+impl Default for Dodge {
+    fn default() -> Self {
+        Self {
+            anchor: DodgeAnchor::Start,
+            radius: 3.,
+            padding: 1.,
+        }
+    }
+}
+
+/// Pack one-dimensional points into a beeswarm, Plot's `dodgeX`/`dodgeY`.
+///
+/// Given the position `field` along the axis the data varies on, this computes
+/// the *other* axis so that no two points overlap: each point is placed at the
+/// nearest free offset from the baseline where a circle of `radius` fits.
+/// The result is written back under `output`, in the packed axis's units.
+///
+/// Plot runs this in pixel space, against the resolved scale; here the caller
+/// passes positions already projected, so the units are pixels throughout.
+pub fn dodge(
+    data: &Dataset,
+    positions: &[Option<f32>],
+    output: &str,
+    config: Dodge,
+    extent: [f32; 2],
+) -> Dataset {
+    let mut placed: Vec<f32> = vec![f32::NAN; data.rows().len()];
+
+    // Points already placed, as (low, high, offset) along the varying axis.
+    let mut occupied: Vec<(f32, f32, f32)> = Vec::new();
+    let (start, end) = (extent[0].min(extent[1]), extent[0].max(extent[1]));
+
+    for (index, position) in positions.iter().enumerate() {
+        let Some(position) = *position else {
+            continue;
+        };
+        let radius = config.radius;
+        let padding = config.padding;
+        let low = position - radius;
+        let high = position + radius;
+
+        // Candidate offsets: the baseline first, then the two places a circle
+        // can sit tangent to each already-placed circle that could overlap.
+        let mut candidates = vec![0.0_f32];
+        let mut neighbours = Vec::new();
+        for &(other_low, other_high, other_offset) in &occupied {
+            if other_high + padding < low - padding || other_low - padding > high + padding {
+                continue;
+            }
+            let centre = (other_low + other_high) / 2.;
+            let dx = position - centre;
+            let dr = 2. * radius + padding;
+            if dr * dr < dx * dx {
+                continue;
+            }
+            let dy = (dr * dr - dx * dx).sqrt();
+            candidates.push(other_offset - dy);
+            candidates.push(other_offset + dy);
+            neighbours.push((centre, other_offset));
+        }
+
+        // Nearest first, so the packed shape stays compact.
+        candidates.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
+
+        // Take the first candidate that does not overlap anything placed.
+        let needed = 2. * radius + padding;
+        let mut chosen = candidates[0];
+        'outer: for &candidate in &candidates {
+            for &(centre, other_offset) in &neighbours {
+                let gap = (candidate - other_offset).abs();
+                let across = (position - centre).abs();
+                if (gap * gap + across * across).sqrt() < needed - 1e-3 {
+                    continue 'outer;
+                }
+            }
+            chosen = candidate;
+            break;
+        }
+
+        placed[index] = chosen;
+        occupied.push((low, high, chosen));
+    }
+
+    // The packed offsets are already positions on the axis: the caller passes
+    // the extent in the axis's own coordinates, and `Start` packs from its low
+    // end, `End` from its high end, `Middle` outward from its centre.
+    let rows: Vec<Table> = data
+        .rows()
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let offset = placed[index];
+            if offset.is_nan() {
+                return row.clone();
+            }
+            let value = match config.anchor {
+                DodgeAnchor::Start => start + offset,
+                DodgeAnchor::End => end - offset,
+                DodgeAnchor::Middle => (start + end) / 2. + offset,
+            };
+            row.clone().with(output, Value::Number(value as f64))
+        })
+        .collect();
+
+    Dataset::new(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,5 +857,56 @@ mod tests {
         assert_eq!(sorted.rows()[0].value("v"), Value::Number(5.));
         let filtered = filter(&rows(), "v", |v| v.as_number().is_some_and(|n| n > 2.));
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn dodge_packs_overlapping_points_apart() {
+        // Three points at the same x, with a radius of 4: they cannot all sit
+        // on the baseline, so the dodge stacks them.
+        let data = Dataset::new((0..3).map(|_| Table::empty().with("v", Value::Number(1.))));
+        let packed = dodge(
+            &data,
+            &[Some(50.), Some(50.), Some(50.)],
+            "dodge",
+            Dodge {
+                anchor: DodgeAnchor::Start,
+                radius: 4.,
+                padding: 1.,
+            },
+            [0., 100.],
+        );
+        let offsets: Vec<f64> = packed
+            .values("dodge")
+            .iter()
+            .filter_map(Value::as_number)
+            .collect();
+        assert_eq!(offsets.len(), 3);
+        // The dodge writes the cross-axis coordinate, not the along-axis one:
+        // the first point keeps the baseline, and the others are pushed off it
+        // by at least a diameter so that no two overlap.
+        assert_eq!(offsets[0], 0.);
+        for pair in offsets.windows(2) {
+            assert!((pair[1] - pair[0]).abs() >= 8., "points {pair:?} overlap");
+        }
+    }
+
+    #[test]
+    fn dodge_leaves_separated_points_on_the_baseline() {
+        let data = Dataset::new((0..3).map(|_| Table::empty()));
+        let packed = dodge(
+            &data,
+            &[Some(10.), Some(50.), Some(90.)],
+            "dodge",
+            Dodge::default(),
+            [0., 100.],
+        );
+        let offsets: Vec<f64> = packed
+            .values("dodge")
+            .iter()
+            .filter_map(Value::as_number)
+            .collect();
+        // Far enough apart that every point fits where it already is, so each
+        // keeps the baseline of the axis it spreads along.
+        assert_eq!(offsets, vec![0., 0., 0.]);
     }
 }

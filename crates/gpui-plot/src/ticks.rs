@@ -89,7 +89,7 @@ fn log_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
 /// The cut-offs are d3's `tickIncrement`: the geometric midpoints between the
 /// candidates, so `0.25` rounds to `0.2` rather than `0.5` and a domain of
 /// `0..1` labels five intervals instead of two.
-fn nice_step(rough: f64) -> f64 {
+pub(crate) fn nice_step(rough: f64) -> f64 {
     if !rough.is_finite() || rough <= 0. {
         return 1.;
     }

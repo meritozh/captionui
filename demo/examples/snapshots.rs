@@ -23,15 +23,20 @@ use gpui_plot_demo::gallery;
 /// background, rebuilt every frame from its example's builder.
 struct Snapshot {
     build: fn() -> Plot,
+    height: f32,
 }
 
 impl Render for Snapshot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The container is the example's own height, so the captured image has
+        // no empty space below a short chart.
         div()
             .size_full()
             .bg(cx.theme().colors.background)
             .p_4()
-            .child((self.build)().height(440.))
+            // The plot element fills its container, so the container sets the
+            // height the chart is drawn at.
+            .child(div().h(px(self.height)).child((self.build)()))
     }
 }
 
@@ -70,6 +75,7 @@ fn main() {
                 |_, cx| {
                     cx.new(|_| Snapshot {
                         build: examples[0].build,
+                        height: examples[0].height,
                     })
                 },
             )
@@ -80,7 +86,10 @@ fn main() {
 
     for example in &examples {
         cx.update_window(handle, |_, window, cx| {
-            entity.update(cx, |snapshot, _| snapshot.build = example.build);
+            entity.update(cx, |snapshot, _| {
+                snapshot.build = example.build;
+                snapshot.height = example.height;
+            });
             // The first frame starts the appear animation; advancing the test
             // clock past it and drawing again captures the settled chart
             // rather than the first frame of the draw-in.
@@ -96,9 +105,21 @@ fn main() {
         })
         .expect("failed to render the snapshot frame");
 
-        let image = cx
+        let captured = cx
             .capture_screenshot(handle)
             .expect("offscreen rendering must be available");
+        // The capture covers the whole window; trim it to the height the
+        // example asked for, so a short chart's image is not mostly empty.
+        let scale = captured.width() as f32 / 760.;
+        let height = ((example.height + 32.) * scale).round() as u32;
+        let image = image::imageops::crop_imm(
+            &captured,
+            0,
+            0,
+            captured.width(),
+            height.min(captured.height()),
+        )
+        .to_image();
 
         let colors = distinct_colors(&image);
         let path = out_dir.join(format!("{}.png", slug(example.title)));
@@ -133,22 +154,41 @@ fn contact_sheet(dir: &Path, examples: &[gallery::Example], out: &Path) {
     const COLUMNS: u32 = 3;
     const TILE: (u32, u32) = (620, 424);
 
-    let rows = (examples.len() as u32).div_ceil(COLUMNS);
-    let mut sheet = image::RgbaImage::new(TILE.0 * COLUMNS, TILE.1 * rows);
-    for (index, example) in examples.iter().enumerate() {
-        let path = dir.join(format!("{}.png", slug(example.title)));
-        let Ok(image) = image::open(&path) else {
-            continue;
-        };
-        let tile = image::imageops::resize(
-            &image.to_rgba8(),
-            TILE.0,
-            TILE.1,
-            image::imageops::FilterType::Lanczos3,
-        );
-        let x = (index as u32 % COLUMNS) * TILE.0;
-        let y = (index as u32 / COLUMNS) * TILE.1;
-        image::imageops::overlay(&mut sheet, &tile, x as i64, y as i64);
+    // Every tile is scaled to the same width and then trimmed to its own
+    // height, so a short chart's tile is short rather than padded with blank
+    // space. Rows stack by their tallest tile.
+    let tiles: Vec<image::RgbaImage> = examples
+        .iter()
+        .map(|example| {
+            let path = dir.join(format!("{}.png", slug(example.title)));
+            let image = image::open(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let rgba = image.to_rgba8();
+            let height = (TILE.0 as f32 * rgba.height() as f32 / rgba.width() as f32).round() as u32;
+            image::imageops::resize(
+                &rgba,
+                TILE.0,
+                height.max(1),
+                image::imageops::FilterType::Lanczos3,
+            )
+        })
+        .collect();
+
+    let rows: Vec<&[image::RgbaImage]> = tiles.chunks(COLUMNS as usize).collect();
+    let row_heights: Vec<u32> = rows
+        .iter()
+        .map(|row| row.iter().map(|tile| tile.height()).max().unwrap_or(0))
+        .collect();
+    let sheet_height: u32 = row_heights.iter().sum();
+
+    let mut sheet = image::RgbaImage::new(TILE.0 * COLUMNS, sheet_height);
+    let mut y = 0;
+    for (row, row_height) in rows.iter().zip(&row_heights) {
+        for (column, tile) in row.iter().enumerate() {
+            let x = column as u32 * TILE.0;
+            image::imageops::overlay(&mut sheet, tile, x as i64, y as i64);
+        }
+        y += *row_height as i64;
     }
     sheet
         .save(out)

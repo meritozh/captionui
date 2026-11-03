@@ -55,7 +55,8 @@ pub use scale::{
 pub use style::{ColorChannel, NumberChannel, Symbol};
 pub use table::{Channel, Dataset, IntoChannel, Table};
 pub use transform::{
-    Anchor, Bin, Reducer, StackOffset, StackedPoint, StackedSeries, Thresholds, WindowReducer,
+    Anchor, Bin, Dodge, DodgeAnchor, Reducer, StackOffset, StackedPoint, StackedSeries, Thresholds,
+    WindowReducer,
 };
 pub use value::{PlotKind, Value};
 

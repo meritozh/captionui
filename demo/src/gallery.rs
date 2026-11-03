@@ -2,7 +2,10 @@
 //! sample data the way Plot's own examples are built.
 
 use gpui_plot::mark::Curve;
-use gpui_plot::{ColorRange, LegendPosition, Plot, StackOffset, Table, Transform, Value};
+use gpui_plot::{
+    ColorRange, Dodge, DodgeAnchor, LegendPosition, Plot, Reducer, StackOffset, Table, Thresholds,
+    Transform, Value,
+};
 
 use crate::data;
 
@@ -14,6 +17,8 @@ pub struct Example {
     pub section: &'static str,
     /// A sentence on what the example demonstrates.
     pub description: &'static str,
+    /// The height the example asks for, in pixels.
+    pub height: f32,
     /// Builds the plot.
     pub build: fn() -> Plot,
 }
@@ -25,109 +30,155 @@ pub fn examples() -> Vec<Example> {
             title: "Line chart",
             section: "Marks / line",
             description: "A daily temperature series over a year, with an area under it and a moving-average overlay.",
+            height: 440.,
             build: line_chart,
         },
         Example {
             title: "Dot plot",
             section: "Marks / dot",
             description: "Two economic series as dots, colored by a categorical series channel.",
+            height: 440.,
             build: dot_plot,
         },
         Example {
             title: "Bar chart",
             section: "Marks / barY",
             description: "Categorical sales as vertical bars, with a pinned zero baseline.",
+            height: 440.,
             build: bar_chart,
         },
         Example {
             title: "Horizontal bars",
             section: "Marks / barX",
             description: "The same sales as horizontal bars, which suits long category names.",
+            height: 440.,
             build: horizontal_bars,
         },
         Example {
             title: "Stacked bars",
             section: "Marks / stack",
             description: "Monthly traffic stacked by platform, with the stack normalized to a share of each month.",
+            height: 440.,
             build: stacked_bars,
         },
         Example {
             title: "Stacked area",
             section: "Marks / areaY",
             description: "A wide table stacked into an area chart, each column a series.",
+            height: 440.,
             build: stacked_area,
         },
         Example {
             title: "Histogram",
             section: "Transforms / bin",
             description: "A distribution binned into a histogram with the count reducer.",
+            height: 440.,
             build: histogram,
         },
         Example {
             title: "Heatmap",
             section: "Marks / cell",
             description: "Activity by hour and day as cells, colored by a continuous range.",
+            height: 440.,
             build: heatmap,
         },
         Example {
             title: "Box plot",
             section: "Marks / boxY",
             description: "Four treatment groups summarized as box-and-whisker plots.",
+            height: 440.,
             build: box_plot,
         },
         Example {
             title: "Violin plot",
             section: "Marks / violinY",
             description: "The same groups as kernel-density violins, showing the shape of each distribution.",
+            height: 440.,
             build: violin_plot,
         },
         Example {
             title: "Density",
             section: "Marks / densityX",
             description: "A kernel density estimate of the temperature series, with the raw ticks beneath.",
+            height: 440.,
             build: density_plot,
         },
         Example {
             title: "Hexbin",
             section: "Marks / hexbin",
             description: "A two-dimensional cloud binned into hexagons, a dot plot's answer for dense data.",
+            height: 440.,
             build: hexbin_plot,
         },
         Example {
             title: "Pie chart",
             section: "Marks / pie",
             description: "Market share by channel as a pie, the radial layout Plot's pie mark draws.",
+            height: 440.,
             build: pie_chart,
         },
         Example {
             title: "Waffle",
             section: "Marks / waffle",
             description: "The same shares as a unit-square waffle, one cell per percent.",
+            height: 440.,
             build: waffle_chart,
         },
         Example {
             title: "Rules and ticks",
             section: "Marks / ruleY, tickX",
             description: "Reference rules at round values, with ticks marking each datum.",
+            height: 440.,
             build: rules_and_ticks,
         },
         Example {
             title: "Log scale",
             section: "Scales / log",
             description: "A growth series on a logarithmic y scale, where equal ratios take equal heights.",
+            height: 440.,
             build: log_scale,
         },
         Example {
             title: "Moving average",
             section: "Transforms / window",
             description: "A noisy series smoothed by a centered window transform.",
+            height: 440.,
             build: moving_average,
         },
         Example {
             title: "Labels",
             section: "Marks / text",
             description: "Bars with their values drawn as labels above them.",
+            height: 440.,
             build: labelled_bars,
+        },
+        Example {
+            title: "Beeswarm",
+            section: "Transforms / dodge",
+            description: "One dot per reading, packed into a swarm by the dodgeX transform.",
+            height: 160.,
+            build: beeswarm,
+        },
+        Example {
+            title: "One-dimensional dots",
+            section: "Marks / dotX",
+            description: "A distribution laid along the x axis, its dots in the frame's middle.",
+            height: 160.,
+            build: one_dimensional_dots,
+        },
+        Example {
+            title: "Horizontal histogram",
+            section: "Marks / rectX",
+            description: "The same data binned into horizontal bars with rectX and bin.",
+            height: 440.,
+            build: horizontal_histogram,
+        },
+        Example {
+            title: "Nicened domain",
+            section: "Scales / nice",
+            description: "A domain widened to round values, so its axis reads 0, 25, 50.",
+            height: 440.,
+            build: nicened_domain,
         },
     ]
 }
@@ -250,8 +301,8 @@ fn histogram() -> Plot {
             mark.x("x")
                 .y1(Value::Number(0.))
                 .y2("x")
-                .bin(gpui_plot::Thresholds::Count(20))
-                .reduce(gpui_plot::Reducer::Count)
+                .bin(Thresholds::Count(20))
+                .reduce(Reducer::Count)
                 .corner_radius(2.)
         })
         .y_zero(true)
@@ -397,6 +448,70 @@ fn labelled_bars() -> Plot {
                 .stroke(theme_color(0.0, 0.0, 0.25, 1.))
         })
         .y_zero(true)
+        .grid(false)
+}
+
+fn beeswarm() -> Plot {
+    let data = data::noisy_series();
+    Plot::new(data)
+        .title("Values as a swarm")
+        .subtitle("One dot per reading, packed by dodgeX")
+        .dot_x(|mark| {
+            mark.x("value").r(3.).dodge(Dodge {
+                anchor: DodgeAnchor::Middle,
+                radius: 4.,
+                padding: 1.5,
+            })
+        })
+        .x_nice(true)
+        .y_axis(false)
+        .grid(false)
+}
+
+fn one_dimensional_dots() -> Plot {
+    let data = data::distributions();
+    Plot::new(data)
+        .title("Scores")
+        .subtitle("A one-dimensional distribution, all dots in the frame's middle")
+        .dot_x(|mark| mark.x("score").r(2.5).opacity(0.6))
+        .x_nice(true)
+        .y_axis(false)
+        .grid(false)
+}
+
+fn horizontal_histogram() -> Plot {
+    let data = data::cloud();
+    Plot::new(data)
+        .title("Distribution of x")
+        .subtitle("Binned into horizontal bars with rectX")
+        .rect_x(|mark| {
+            mark.x("x")
+                .x1(Value::Number(0.))
+                .x2("x")
+                .bin(Thresholds::Count(20))
+                .reduce(Reducer::Count)
+        })
+        .x_zero(true)
+        .grid(false)
+}
+
+fn nicened_domain() -> Plot {
+    // A series that runs from 3.4 to 96.2: the frame widens it to 0..100.
+    let data: Vec<Table> = (0..12)
+        .map(|index| {
+            let value = 3.4 + (index as f64) * (92.8 / 11.);
+            Table::empty()
+                .with("step", Value::Number(index as f64))
+                .with("value", Value::Number((value * 10.).round() / 10.))
+        })
+        .collect();
+    Plot::new(data)
+        .title("A nicened domain")
+        .subtitle("Data spans 3.4 to 96.2; the axis reads 0, 25, 50, 75, 100")
+        .bar_y(|mark| mark.x("step").y("value").corner_radius(3.))
+        .y_zero(true)
+        .y_nice(true)
+        .y_ticks(5)
         .grid(false)
 }
 

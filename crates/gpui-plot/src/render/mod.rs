@@ -10,8 +10,8 @@ pub(crate) mod radial;
 
 use gpui::{Hsla, SharedString};
 
-use crate::mark::{Channels, Mark, MarkKind};
-use crate::scale::Transform;
+use crate::frame::Frame;
+use crate::mark::{Channels, CrossAxis, Mark, MarkKind};
 use crate::table::{Dataset, Table};
 use crate::transform::{self, Anchor, Reducer, StackOffset, StackedSeries, Thresholds};
 use crate::value::Value;
@@ -21,6 +21,9 @@ use crate::value::Value;
 pub struct PreparedMark {
     pub mark: Mark,
     pub rows: Vec<PreparedRow>,
+    /// Whether a dodge packed this mark's rows along x, so its offsets are
+    /// vertical; meaningless when the mark does not dodge.
+    pub dodge_along_x: bool,
 }
 
 /// One datum's resolved channels.
@@ -46,6 +49,9 @@ pub struct PreparedRow {
     pub symbol: Option<crate::style::Symbol>,
     /// The row's opacity from its `opacity` channel, when it has one.
     pub opacity: Option<f32>,
+    /// Where the row sits across the axis a dodge packs along, in pixels from
+    /// that axis's start. Set by [`apply_dodge`] once the frame is known.
+    pub dodge_offset: Option<f32>,
 }
 
 impl PreparedRow {
@@ -140,6 +146,55 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     PreparedMark {
         mark: mark.clone(),
         rows,
+        dodge_along_x: false,
+    }
+}
+
+/// Pack a dodging mark's rows into a beeswarm, Plot's `dodgeX`/`dodgeY`.
+///
+/// The transform works in pixels, so it runs after the frame has resolved the
+/// scales: each row's position on the axis the data varies on becomes an
+/// offset across the other axis, which the mark then reads instead of its
+/// own cross-axis value.
+pub fn apply_dodge(prepared: &mut [PreparedMark], frame: &Frame) {
+    for mark in prepared.iter_mut() {
+        let Some(config) = mark.mark.dodge else {
+            continue;
+        };
+        // The dodge packs along the axis the mark's data varies on, and writes
+        // the offset across it: a `dotX` varies on x and spreads vertically,
+        // a `dotY` varies on y and spreads horizontally.
+        let along_x = mark.mark.kind.is_x_only();
+        // The positions come from the axis the data varies on; the packed
+        // offsets land on the *other* axis, so the extent is that one's.
+        let (scale, extent) = if along_x {
+            (&frame.x.scale, frame.plot.size.height.as_f32())
+        } else {
+            (&frame.y.scale, frame.plot.size.width.as_f32())
+        };
+        let positions: Vec<Option<f32>> = mark
+            .rows
+            .iter()
+            .map(|row| {
+                if along_x {
+                    scale.position(row.x_value())
+                } else {
+                    scale.position(row.y_value())
+                }
+            })
+            .collect();
+        let extent = [0., extent];
+        let packed = transform::dodge(
+            &Dataset::new(mark.rows.iter().map(|row| row.row.clone())),
+            &positions,
+            "dodge",
+            config,
+            extent,
+        );
+        for (row, packed_row) in mark.rows.iter_mut().zip(packed.rows()) {
+            row.dodge_offset = packed_row.number("dodge").map(|value| value as f32);
+        }
+        mark.dodge_along_x = along_x;
     }
 }
 
@@ -151,8 +206,8 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
             .unwrap_or(Value::Null)
     };
 
-    let x = read(&channels.x);
-    let y = read(&channels.y);
+    let mut x = read(&channels.x);
+    let mut y = read(&channels.y);
     let mut x1 = read(&channels.x1);
     let mut x2 = read(&channels.x2);
     let mut y1 = read(&channels.y1);
@@ -169,6 +224,19 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
             x1 = Value::Number(0.);
             x2 = x.clone();
         }
+        // `rectX`/`rectY` with one value channel is a bar: its interval runs
+        // from the baseline to the value, which is how Plot's implicit stack
+        // reads it.
+        MarkKind::RectY if y1.is_null() && y2.is_null() && !y.is_null() => {
+            y1 = Value::Number(0.);
+            y2 = y.clone();
+        }
+        // `rectX` grows along x from the baseline, so its *value* is the x
+        // interval's end and its cross axis is the index.
+        MarkKind::RectX if x1.is_null() && x2.is_null() && !x.is_null() => {
+            x1 = Value::Number(0.);
+            x2 = x.clone();
+        }
         MarkKind::Cell => {
             if x1.is_null() && !x.is_null() {
                 x1 = x.clone();
@@ -178,6 +246,15 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
             }
         }
         _ => {}
+    }
+
+    // A one-dimensional mark has no second position channel. Plot fills it
+    // with the datum's index for `lineX`/`rectX`, and leaves it unset for
+    // `dotX`, whose dots all sit in the frame's middle.
+    if mark.kind.is_x_only() && mark.kind.cross_axis() == CrossAxis::Index {
+        y = Value::Number(index as f64);
+    } else if mark.kind.is_y_only() && mark.kind.cross_axis() == CrossAxis::Index {
+        x = Value::Number(index as f64);
     }
 
     let z = channels
@@ -204,6 +281,7 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
             .filter(|symbol| symbol.is_some())
             .flatten(),
         opacity: channels.opacity.as_ref().map(|channel| channel.read(row)),
+        dodge_offset: None,
     }
 }
 
@@ -397,7 +475,14 @@ fn bin_rows(data: &Dataset, mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRo
     let Some(field) = field else {
         return rows.to_vec();
     };
-    let bin_x = mark.channels.x.is_some();
+    // A vertical mark bins along x and counts on y; a horizontal one the
+    // other way round. Plot picks this from the mark, not from which channel
+    // happens to be set — `rectX` names its field on x yet bins along y.
+    let bin_x = match mark.kind {
+        MarkKind::BarX | MarkKind::RectX => false,
+        MarkKind::BarY | MarkKind::RectY => true,
+        _ => mark.channels.x.is_some(),
+    };
 
     let (bins, _domain) = transform::bin(data, &field, bin.thresholds);
     bins.into_iter()
@@ -417,15 +502,22 @@ fn bin_rows(data: &Dataset, mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRo
                 r: None,
                 symbol: None,
                 opacity: None,
+                dodge_offset: None,
             });
-            row.x1 = Some(Value::Number(bin.x0));
-            row.x2 = Some(Value::Number(bin.x1));
-            row.x = Value::Null;
             if bin_x {
+                // The bin's interval is the x axis, the count is the y value.
+                row.x1 = Some(Value::Number(bin.x0));
+                row.x2 = Some(Value::Number(bin.x1));
+                row.x = Value::Null;
                 row.y = Value::Number(count);
                 row.y1 = Some(Value::Number(0.));
                 row.y2 = Some(Value::Number(count));
             } else {
+                // Binned along y: the interval is the y axis, the count grows
+                // along x.
+                row.y1 = Some(Value::Number(bin.x0));
+                row.y2 = Some(Value::Number(bin.x1));
+                row.y = Value::Null;
                 row.x = Value::Number(count);
                 row.x1 = Some(Value::Number(0.));
                 row.x2 = Some(Value::Number(count));
@@ -535,6 +627,7 @@ fn stack_rows_from_series(
                 r: None,
                 symbol: None,
                 opacity: None,
+                dodge_offset: None,
             });
             if group_by_y {
                 row.x1 = Some(Value::Number(point.y0));
@@ -562,11 +655,6 @@ pub fn channel_text(channel: &Option<crate::table::Channel>, row: &Table) -> Opt
 /// The default color of a mark at `index` in the mark list.
 pub fn mark_color(theme: &crate::theme::PlotTheme, index: usize) -> Hsla {
     theme.palette_color(index)
-}
-
-/// The transform a mark's length scale uses, for a bar's zero baseline.
-pub fn length_transform(mark: &Mark) -> Transform {
-    mark.transform
 }
 
 /// The tick count a mark wants on its value axis.

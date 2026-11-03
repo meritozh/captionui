@@ -7,18 +7,26 @@
 
 use gpui::{Hsla, SharedString};
 
-use crate::scale::Transform;
 use crate::style::{ColorChannel, NumberChannel, Symbol};
 use crate::table::{Channel, IntoChannel};
-use crate::transform::{Anchor, Reducer, StackOffset, Thresholds, WindowReducer};
+use crate::transform::{Anchor, Dodge, Reducer, StackOffset, Thresholds, WindowReducer};
 
 /// The mark types this library draws, matching Plot's mark set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MarkKind {
     /// A dot per datum, Plot's `dot`.
     Dot,
+    /// A dot at each x with no y, Plot's `dotX`: a one-dimensional
+    /// distribution, laid along the frame's middle.
+    DotX,
+    /// A dot at each y with no x, Plot's `dotY`.
+    DotY,
     /// A line through the data, grouped by `z`, Plot's `line`.
     Line,
+    /// A line at each x with no y, Plot's `lineX`.
+    LineX,
+    /// A line at each y with no x, Plot's `lineY`.
+    LineY,
     /// A filled area under a line, Plot's `areaY`.
     AreaY,
     /// A filled area left of a line, Plot's `areaX`.
@@ -29,6 +37,11 @@ pub enum MarkKind {
     BarX,
     /// A rectangle spanning two x values and two y values, Plot's `rect`.
     Rect,
+    /// A rectangle over one x with no y, Plot's `rectX`: a horizontal
+    /// histogram bar grown from zero.
+    RectX,
+    /// A rectangle over one y with no x, Plot's `rectY`.
+    RectY,
     /// A rectangle filling a band cell, Plot's `cell`.
     Cell,
     /// A vertical line at each x, Plot's `ruleX`.
@@ -74,12 +87,18 @@ impl MarkKind {
     pub fn name(self) -> &'static str {
         match self {
             MarkKind::Dot => "dot",
+            MarkKind::DotX => "dotX",
+            MarkKind::DotY => "dotY",
             MarkKind::Line => "line",
+            MarkKind::LineX => "lineX",
+            MarkKind::LineY => "lineY",
             MarkKind::AreaY => "areaY",
             MarkKind::AreaX => "areaX",
             MarkKind::BarY => "barY",
             MarkKind::BarX => "barX",
             MarkKind::Rect => "rect",
+            MarkKind::RectX => "rectX",
+            MarkKind::RectY => "rectY",
             MarkKind::Cell => "cell",
             MarkKind::RuleX => "ruleX",
             MarkKind::RuleY => "ruleY",
@@ -108,12 +127,18 @@ impl MarkKind {
         matches!(
             self,
             MarkKind::Dot
+                | MarkKind::DotX
+                | MarkKind::DotY
                 | MarkKind::Line
+                | MarkKind::LineX
+                | MarkKind::LineY
                 | MarkKind::AreaY
                 | MarkKind::AreaX
                 | MarkKind::BarY
                 | MarkKind::BarX
                 | MarkKind::Rect
+                | MarkKind::RectX
+                | MarkKind::RectY
                 | MarkKind::Cell
                 | MarkKind::RuleX
                 | MarkKind::RuleY
@@ -141,6 +166,40 @@ impl MarkKind {
             MarkKind::BarY | MarkKind::BarX | MarkKind::Pie | MarkKind::Arc | MarkKind::Waffle
         )
     }
+
+    /// Whether this mark lays its data out along the x axis only, with no y
+    /// channel of its own: Plot's `dotX`, `lineX`, `rectX`.
+    pub fn is_x_only(self) -> bool {
+        matches!(self, MarkKind::DotX | MarkKind::LineX | MarkKind::RectX)
+    }
+
+    /// Whether this mark lays its data out along the y axis only.
+    pub fn is_y_only(self) -> bool {
+        matches!(self, MarkKind::DotY | MarkKind::LineY | MarkKind::RectY)
+    }
+
+    /// How a mark with one position channel places itself across the axis it
+    /// does not read.
+    ///
+    /// Plot's `dotX` puts every dot in the frame's middle, so a one-dimensional
+    /// distribution reads as a row; `lineX` and `rectX` instead spread the
+    /// data across that axis by its index, so a line runs across the plot and
+    /// a histogram's bars each get a row.
+    pub fn cross_axis(self) -> CrossAxis {
+        match self {
+            MarkKind::DotX | MarkKind::DotY => CrossAxis::Anchor,
+            _ => CrossAxis::Index,
+        }
+    }
+}
+
+/// Where a one-dimensional mark puts itself on the axis it does not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrossAxis {
+    /// The frame's middle, Plot's `dotX`.
+    Anchor,
+    /// The datum's index, Plot's `lineX` and `rectX`.
+    Index,
 }
 
 /// How a mark's data is stacked, Plot's `stack` option.
@@ -262,7 +321,11 @@ pub struct MarkStyle {
     pub symbol: Symbol,
     /// How a line or area connects its points.
     pub curve: Curve,
-    /// The opacity of the mark.
+    /// The opacity of the mark's fills, Plot's `fillOpacity`.
+    pub fill_opacity: f32,
+    /// The opacity of the mark's strokes, Plot's `strokeOpacity`.
+    pub stroke_opacity: f32,
+    /// The opacity of the mark as a whole, Plot's `opacity`.
     pub opacity: f32,
     /// The corner radius of a bar or rect.
     pub corner_radius: f32,
@@ -307,6 +370,8 @@ impl Default for MarkStyle {
             radius: 3.5,
             symbol: Symbol::Circle,
             curve: Curve::Natural,
+            fill_opacity: 1.,
+            stroke_opacity: 1.,
             opacity: 1.,
             corner_radius: 0.,
             dx: 0.,
@@ -337,8 +402,8 @@ pub struct Mark {
     pub window: Option<(usize, WindowReducer, Anchor)>,
     /// A numeric transform of the mark's value, Plot's `normalize`.
     pub normalize: bool,
-    /// The transform of a length scale, Plot's `scale.type` on `length`.
-    pub transform: Transform,
+    /// How the mark dodges its points into a beeswarm, Plot's `dodgeX`/`dodgeY`.
+    pub dodge: Option<Dodge>,
     /// A mark-level title, Plot's `title`.
     pub title: Option<SharedString>,
 }
@@ -355,7 +420,7 @@ impl Mark {
             reduce: None,
             window: None,
             normalize: false,
-            transform: Transform::Linear,
+            dodge: None,
             title: None,
         }
     }
@@ -435,6 +500,18 @@ impl Mark {
     /// Set the opacity.
     pub fn opacity(mut self, opacity: impl Into<NumberChannel>) -> Self {
         self.channels.opacity = Some(opacity.into());
+        self
+    }
+
+    /// Set the opacity of the mark's fills, Plot's `fillOpacity`.
+    pub fn fill_opacity(mut self, opacity: f32) -> Self {
+        self.style.fill_opacity = opacity;
+        self
+    }
+
+    /// Set the opacity of the mark's strokes, Plot's `strokeOpacity`.
+    pub fn stroke_opacity(mut self, opacity: f32) -> Self {
+        self.style.stroke_opacity = opacity;
         self
     }
 
@@ -555,9 +632,9 @@ impl Mark {
         self
     }
 
-    /// Set the transform of the mark's length scale.
-    pub fn transform(mut self, transform: Transform) -> Self {
-        self.transform = transform;
+    /// Pack the mark's points into a beeswarm, Plot's `dodgeX`/`dodgeY`.
+    pub fn dodge(mut self, dodge: Dodge) -> Self {
+        self.dodge = Some(dodge);
         self
     }
 }
@@ -694,6 +771,18 @@ macro_rules! mark_builder {
                 self
             }
 
+            /// Set the opacity of the mark's fills, Plot's `fillOpacity`.
+            pub fn fill_opacity(mut self, opacity: f32) -> Self {
+                self.0 = self.0.fill_opacity(opacity);
+                self
+            }
+
+            /// Set the opacity of the mark's strokes, Plot's `strokeOpacity`.
+            pub fn stroke_opacity(mut self, opacity: f32) -> Self {
+                self.0 = self.0.stroke_opacity(opacity);
+                self
+            }
+
             /// Set a datum's tooltip title.
             pub fn tip_title(mut self, channel: impl IntoChannel) -> Self {
                 self.0 = self.0.tip_title(channel);
@@ -794,9 +883,9 @@ macro_rules! mark_builder {
                 self
             }
 
-            /// Set the transform of the mark's length scale.
-            pub fn transform(mut self, transform: Transform) -> Self {
-                self.0 = self.0.transform(transform);
+            /// Pack the mark's points into a beeswarm, Plot's `dodgeX`/`dodgeY`.
+            pub fn dodge(mut self, dodge: Dodge) -> Self {
+                self.0 = self.0.dodge(dodge);
                 self
             }
         }
@@ -814,9 +903,29 @@ mark_builder!(
     MarkKind::Dot
 );
 mark_builder!(
+    /// A dot at each x with no y, Plot's `dotX`.
+    DotXMark,
+    MarkKind::DotX
+);
+mark_builder!(
+    /// A dot at each y with no x, Plot's `dotY`.
+    DotYMark,
+    MarkKind::DotY
+);
+mark_builder!(
     /// A line mark, Plot's `line`: a polyline through the data, one per series.
     LineMark,
     MarkKind::Line
+);
+mark_builder!(
+    /// A line at each x with no y, Plot's `lineX`.
+    LineXMark,
+    MarkKind::LineX
+);
+mark_builder!(
+    /// A line at each y with no x, Plot's `lineY`.
+    LineYMark,
+    MarkKind::LineY
 );
 mark_builder!(
     /// A vertical area mark, Plot's `areaY`.
@@ -842,6 +951,16 @@ mark_builder!(
     /// A rectangle mark spanning two intervals, Plot's `rect`.
     RectMark,
     MarkKind::Rect
+);
+mark_builder!(
+    /// A rectangle over one x, Plot's `rectX`: a horizontal histogram bar.
+    RectXMark,
+    MarkKind::RectX
+);
+mark_builder!(
+    /// A rectangle over one y, Plot's `rectY`.
+    RectYMark,
+    MarkKind::RectY
 );
 mark_builder!(
     /// A cell mark filling one band of each axis, Plot's `cell`.

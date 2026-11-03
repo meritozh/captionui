@@ -53,10 +53,13 @@ supports (`x`, `y`, `x1`, `x2`, `y1`, `y2`, `z`, `fill`, `stroke`, `r`, `text`,
 | Mark | Builder | Notes |
 | --- | --- | --- |
 | dot | `.dot(…)` | radius (`r`), symbol, series color |
+| dotX / dotY | `.dot_x(…)` / `.dot_y(…)` | one-dimensional, dots in the frame's middle |
 | line | `.line(…)` | curves: natural, linear, step, step-after, step-before |
+| lineX / lineY | `.line_x(…)` / `.line_y(…)` | one-dimensional, spread by index |
 | areaY / areaX | `.area_y(…)` / `.area_x(…)` | interval-aware |
 | barY / barX | `.bar_y(…)` / `.bar_x(…)` | rounded corners, stacking |
 | rect | `.rect(…)` | spans `x1..x2`, `y1..y2` |
+| rectX / rectY | `.rect_x(…)` / `.rect_y(…)` | one interval grown from zero, the histogram form |
 | cell | `.cell(…)` | fills its band; band scales inferred |
 | ruleX / ruleY | `.rule_x(…)` / `.rule_y(…)` | reference lines |
 | tickX / tickY | `.tick_x(…)` / `.tick_y(…)` | Plot's "barcode" rug, full frame or one band |
@@ -82,8 +85,11 @@ supports (`x`, `y`, `x1`, `x2`, `y1`, `y2`, `z`, `fill`, `stroke`, `r`, `text`,
 `y_transform`); continuous, band and point scale kinds (`x_scale`, `y_scale`,
 inferred from the mark when not pinned); pinned domains (`x_domain`,
 `y_domain`); zero baselines (`x_zero`, `y_zero`); inset and padding
-(`inset`, `padding`). Ticks are d3-style "nice" values, calendar ticks on date
-axes, and log axes subdivide a single decade rather than labelling it once.
+(`inset`, `padding`). Domains can be widened to round values (`x_nice`,
+`y_nice`), positions clamped to the frame (`x_clamp`, `y_clamp`), and an axis
+reversed (`x_reverse`, `y_reverse`). Ticks are d3-style "nice" values, calendar
+ticks on date axes, and log axes subdivide a single decade rather than
+labelling it once.
 
 **Color.** Categorical palettes (`ColorRange::observable10()` — Plot's default,
 used automatically when a theme's chart colors are one hue ramp), continuous
@@ -94,7 +100,8 @@ a color per datum.
 **Transforms.** `group`, `bin` (with count and custom reducers), `stack`
 (zero, center, normalize; long and wide data), `window` (mean, sum, median,
 min, max, cumulative mean, difference, change, percent change; middle, start
-and end anchors), `normalize`, `sort`, `reverse`, and `filter` are available on
+and end anchors), `dodge` (`dodge_x`/`dodge_y` beeswarms, with anchor, radius
+and padding), `normalize`, `sort`, `reverse`, and `filter` are available on
 `Mark` or as functions in `gpui_plot::transform`.
 
 **Frame.** Titles and subtitles, a legend in five positions (top, bottom, left,
@@ -126,7 +133,7 @@ resolution.
 cargo run -p gpui-plot-demo --example snapshots
 ```
 
-renders all 18 gallery charts through GPUI's headless renderer, writes each to
+renders all 22 gallery charts through GPUI's headless renderer, writes each to
 `demo/snapshots/*.png`, and asserts each painted more than 12 distinct colors.
 This is the check that caught the defects unit tests could not: charts that
 painted nothing, legends over the title, clipped axis labels, stacked bars that
@@ -134,14 +141,33 @@ read pre-stack values, and a categorical palette that was one blue ramp.
 
 ## Coverage against Observable Plot
 
-Implemented: every mark type in Plot's mark reference, all channel types,
-the linear-family and ordinal scales, the transforms above, color ranges,
-legends, axes, grid, tooltips, and hover highlighting.
+Implemented: the basic marks, the statistical and radial marks, the one-
+dimensional variants (`dotX`/`dotY`, `lineX`/`lineY`, `rectX`/`rectY`), all
+channel types, the linear-family and ordinal scales with `nice`, `clamp`,
+`reverse` and pinned ranges, the transforms above (including `dodge`), color
+ranges, legends, axes, grid, tooltips, and hover highlighting.
 
-Not implemented: **faceting** (`fx`/`fy`), **projections** (geo marks),
-**annotations** (`tip` mark, `pointer` decorations beyond the tooltip),
-**animation** beyond the initial draw-in, and Plot's **legacy Mark
-combinators** (`Plot.plot`'s options object — this library uses typed builders
-instead). `arc` and `contour` are approximations: `arc` reads explicit angles
-but draws no rounded ring caps, and `contour` draws nested density rings rather
-than marching-squares isolines.
+Not implemented yet, in the order the work is planned:
+
+1. **Curves.** Five of Plot's twenty (`natural`, `linear`, `step`,
+   `step-after`, `step-before`); the `basis`, `cardinal`, `catmull-rom`,
+   `monotone` and `bump` families and the `tension` option are missing.
+2. **Legends.** One per categorical color only — no size, opacity or symbol
+   legends, no legend title, no multi-column layout.
+3. **Annotations.** The `tip` mark and the `pointer` transforms; the hover
+   tooltip exists but nothing can be pinned to the plot.
+4. **Axis and grid marks.** `axisX`/`axisY` and `gridX`/`gridY` as marks
+   (axes and grid are currently only plot-level options), and `frame`.
+5. **More transforms.** `select` (min/max per group), `shift`, `map`,
+   `groupX`/`groupY`, `find`, `shuffle`.
+6. **More marks.** `linearRegression`, `bollinger`, `difference`, `image`,
+   `raster`, `hexgrid`, `cellX`/`cellY`, `textX`/`textY`,
+   `vectorX`/`vectorY`/`spike`/`arrow`, `waffleX`/`waffleY`.
+7. **Faceting** (`fx`/`fy`), which needs a nested-figure layout.
+8. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
+9. **Geo projections**, which are out of scope for a desktop chart library
+   with no basemap ecosystem.
+
+`arc` and `contour` are approximations: `arc` reads explicit angles but draws
+no rounded ring caps, and `contour` draws nested density rings rather than
+marching-squares isolines.

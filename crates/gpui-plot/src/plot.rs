@@ -190,6 +190,26 @@ impl Plot {
         self
     }
 
+    /// Add a dot mark along x only, Plot's `dotX`.
+    pub fn dot_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::DotXMark) -> crate::mark::DotXMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::DotXMark::new()).into());
+        self
+    }
+
+    /// Add a dot mark along y only, Plot's `dotY`.
+    pub fn dot_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::DotYMark) -> crate::mark::DotYMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::DotYMark::new()).into());
+        self
+    }
+
     /// Add a line mark.
     pub fn line(
         mut self,
@@ -197,6 +217,26 @@ impl Plot {
     ) -> Self {
         self.marks
             .push(configure(crate::mark::LineMark::new()).into());
+        self
+    }
+
+    /// Add a line mark along x only, Plot's `lineX`.
+    pub fn line_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::LineXMark) -> crate::mark::LineXMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::LineXMark::new()).into());
+        self
+    }
+
+    /// Add a line mark along y only, Plot's `lineY`.
+    pub fn line_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::LineYMark) -> crate::mark::LineYMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::LineYMark::new()).into());
         self
     }
 
@@ -247,6 +287,26 @@ impl Plot {
     ) -> Self {
         self.marks
             .push(configure(crate::mark::RectMark::new()).into());
+        self
+    }
+
+    /// Add a rectangle over one x, Plot's `rectX`.
+    pub fn rect_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::RectXMark) -> crate::mark::RectXMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::RectXMark::new()).into());
+        self
+    }
+
+    /// Add a rectangle over one y, Plot's `rectY`.
+    pub fn rect_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::RectYMark) -> crate::mark::RectYMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::RectYMark::new()).into());
         self
     }
 
@@ -511,6 +571,43 @@ impl Plot {
     /// Include zero in the y domain, as a bar chart does.
     pub fn y_zero(mut self, zero: bool) -> Self {
         self.frame_options.y_zero = zero;
+        self
+    }
+
+    /// Widen the x domain to round values, Plot's `x.nice`.
+    pub fn x_nice(mut self, nice: bool) -> Self {
+        self.frame_options.x_nice = nice;
+        self
+    }
+
+    /// Widen the y domain to round values, Plot's `y.nice`.
+    pub fn y_nice(mut self, nice: bool) -> Self {
+        self.frame_options.y_nice = nice;
+        self
+    }
+
+    /// Clamp x positions outside the domain to the plot's edge, Plot's
+    /// `x.clamp`.
+    pub fn x_clamp(mut self, clamp: bool) -> Self {
+        self.frame_options.x_clamp = clamp;
+        self
+    }
+
+    /// Clamp y positions outside the domain to the plot's edge.
+    pub fn y_clamp(mut self, clamp: bool) -> Self {
+        self.frame_options.y_clamp = clamp;
+        self
+    }
+
+    /// Reverse the x axis, Plot's `x.reverse`.
+    pub fn x_reverse(mut self, reverse: bool) -> Self {
+        self.frame_options.x_reverse = reverse;
+        self
+    }
+
+    /// Reverse the y axis, Plot's `y.reverse`.
+    pub fn y_reverse(mut self, reverse: bool) -> Self {
+        self.frame_options.y_reverse = reverse;
         self
     }
 
@@ -818,6 +915,16 @@ impl Plot {
         if options.y_kind.is_none() && marks_use_band(prepared, false) {
             options.y_kind = Some(ScaleKind::Band);
         }
+        // A plot may ask for its own height, Plot's `height`. The element fills
+        // its container, so the request shrinks the figure to that height
+        // rather than growing it: a barcode or a swarm wants a short frame.
+        let bounds = match self.height {
+            Some(height) if height > 0. => Bounds {
+                size: gpui::size(bounds.size.width, px(height)),
+                ..bounds
+            },
+            _ => bounds,
+        };
         Frame::resolve(
             bounds,
             &options,
@@ -882,18 +989,19 @@ impl PlotTrait for Plot {
         let prepared = render::prepare(&self.data, &self.marks);
         let frame = self.resolve_frame(bounds, &theme, window, &prepared);
         self.frame_cache = Some(frame);
-        let _ = self.height;
         vec![]
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let theme = PlotTheme::from_theme(cx.theme());
 
-        let prepared = render::prepare(&self.data, &self.marks);
+        let mut prepared = render::prepare(&self.data, &self.marks);
         let frame = self
             .frame_cache
             .clone()
             .unwrap_or_else(|| self.resolve_frame(bounds, &theme, window, &prepared));
+        // A dodge works in pixels, so it needs the frame resolved first.
+        render::apply_dodge(&mut prepared, &frame);
 
         let appear = self.appear_progress;
 
@@ -980,7 +1088,8 @@ impl PlotTrait for Plot {
             return None;
         }
         let frame = self.frame_cache.clone()?;
-        let prepared = render::prepare(&self.data, &self.marks);
+        let mut prepared = render::prepare(&self.data, &self.marks);
+        render::apply_dodge(&mut prepared, &frame);
 
         // Ignore the axis gutters: hovering a label shows nothing.
         let absolute = position + bounds.origin;

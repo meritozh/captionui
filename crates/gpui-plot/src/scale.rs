@@ -141,6 +141,11 @@ impl ContinuousScale {
         self.range
     }
 
+    /// Whether positions are clamped to the range.
+    pub fn is_clamped(&self) -> bool {
+        self.clamp
+    }
+
     /// The position of `value` in the range.
     pub fn position(&self, value: f64) -> Option<f32> {
         let (a, b) = (
@@ -208,6 +213,43 @@ impl ContinuousScale {
             crate::ticks::format_time_tick(value, self.domain)
         } else {
             SharedString::from(crate::value::format_number(value))
+        }
+    }
+
+    /// The scale's domain widened to round values, Plot's `nice`.
+    ///
+    /// A domain of `0.3..97` becomes `0..100`, so its axis labels sit on round
+    /// numbers and the marks stop short of the frame's edge by the amount the
+    /// rounding added. The transform decides what counts as round: a log scale
+    /// rounds to powers of ten, the others to a nice step.
+    pub fn nice(&self, count: usize) -> Self {
+        let [lo, hi] = self.domain;
+        let (lo, hi) = match self.transform {
+            Transform::Log => {
+                let lo = if lo > 0. { lo.log10().floor() } else { lo };
+                let hi = if hi > 0. { hi.log10().ceil() } else { hi };
+                (10f64.powf(lo), 10f64.powf(hi))
+            }
+            _ => {
+                let step = crate::ticks::nice_step((hi - lo) / (count.max(2) - 1) as f64);
+                if step <= 0. || !step.is_finite() {
+                    (lo, hi)
+                } else {
+                    ((lo / step).floor() * step, (hi / step).ceil() * step)
+                }
+            }
+        };
+        Self {
+            domain: [lo, hi],
+            ..self.clone()
+        }
+    }
+
+    /// The scale with its range reversed, Plot's `reverse`.
+    pub fn reversed(&self) -> Self {
+        Self {
+            range: [self.range[1], self.range[0]],
+            ..self.clone()
         }
     }
 }
@@ -711,6 +753,34 @@ mod tests {
         let scale = ContinuousScale::new(Transform::Symlog, [-100., 100.], [0., 100.]);
         assert_eq!(scale.position(0.), Some(50.));
         assert!(scale.position(-100.).unwrap() < 50.);
+    }
+
+    #[test]
+    fn nice_rounds_the_domain_outward() {
+        let scale = ContinuousScale::new(Transform::Linear, [0.3, 97.], [0., 100.]);
+        let nice = scale.nice(5);
+        assert_eq!(nice.domain(), [0., 100.]);
+
+        // A log domain rounds to powers of ten.
+        let scale = ContinuousScale::new(Transform::Log, [3., 60.], [0., 100.]);
+        assert_eq!(scale.nice(5).domain(), [1., 100.]);
+    }
+
+    #[test]
+    fn clamp_pins_out_of_domain_positions() {
+        let scale = ContinuousScale::new(Transform::Linear, [0., 10.], [0., 100.]);
+        assert_eq!(scale.position(20.), Some(200.));
+        let clamped = scale.clamped(true);
+        assert_eq!(clamped.position(20.), Some(100.));
+        assert_eq!(clamped.position(-5.), Some(0.));
+    }
+
+    #[test]
+    fn reverse_flips_the_range() {
+        let scale = ContinuousScale::new(Transform::Linear, [0., 10.], [0., 100.]);
+        let reversed = scale.reversed();
+        assert_eq!(reversed.range(), [100., 0.]);
+        assert_eq!(reversed.position(0.), Some(100.));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::frame::Frame;
-use crate::mark::{Curve, MarkKind};
+use crate::mark::{CrossAxis, Curve, MarkKind};
 use crate::paint::{self, Label};
 use crate::render::{PreparedMark, PreparedRow};
 use crate::scale::{ColorScale, PositionScale};
@@ -109,10 +109,15 @@ impl DrawContext<'_> {
         }
     }
 
-    /// The opacity a row paints at: the mark's, unless the row's `opacity`
-    /// channel overrides it.
-    pub fn row_opacity(&self, prepared: &PreparedMark, row: &PreparedRow) -> f32 {
-        row.opacity.unwrap_or(prepared.mark.style.opacity)
+    /// The opacity a row paints its fill at: the mark's `opacity`, then its
+    /// `fillOpacity`, then the row's own `opacity` channel.
+    pub fn row_fill_opacity(&self, prepared: &PreparedMark, row: &PreparedRow) -> f32 {
+        row.opacity.unwrap_or(prepared.mark.style.opacity) * prepared.mark.style.fill_opacity
+    }
+
+    /// The opacity a row paints its stroke at.
+    pub fn row_stroke_opacity(&self, prepared: &PreparedMark, row: &PreparedRow) -> f32 {
+        row.opacity.unwrap_or(prepared.mark.style.opacity) * prepared.mark.style.stroke_opacity
     }
 }
 
@@ -212,13 +217,13 @@ impl Colors {
 /// Paint one prepared mark.
 pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     match prepared.mark.kind {
-        MarkKind::Dot => draw_dots(prepared, ctx),
-        MarkKind::Line => draw_lines(prepared, ctx),
+        MarkKind::Dot | MarkKind::DotX | MarkKind::DotY => draw_dots(prepared, ctx),
+        MarkKind::Line | MarkKind::LineX | MarkKind::LineY => draw_lines(prepared, ctx),
         MarkKind::AreaY => draw_areas_y(prepared, ctx),
         MarkKind::AreaX => draw_areas_x(prepared, ctx),
         MarkKind::BarY => draw_bars_y(prepared, ctx),
         MarkKind::BarX => draw_bars_x(prepared, ctx),
-        MarkKind::Rect => draw_rects(prepared, ctx),
+        MarkKind::Rect | MarkKind::RectX | MarkKind::RectY => draw_rects(prepared, ctx),
         MarkKind::Cell => draw_cells(prepared, ctx),
         MarkKind::RuleX => draw_rules_x(prepared, ctx),
         MarkKind::RuleY => draw_rules_y(prepared, ctx),
@@ -237,7 +242,7 @@ fn draw_dots(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
 
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let Some(position) = position(ctx.frame, row) else {
+            let Some(position) = position(prepared, ctx, row) else {
                 continue;
             };
             let r = row.r.unwrap_or(radius) * ctx.appear;
@@ -249,9 +254,8 @@ fn draw_dots(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             // The hovered dot grows toward 1.6× its radius; the rest keep
             // theirs, so the hover reads as a lift rather than a redraw.
             let r = r * (1. + 0.6 * emphasis);
-            let opacity = ctx.row_opacity(prepared, row);
-            let fill = paint::alpha(colors.fill(index), opacity);
-            let stroke = paint::alpha(colors.stroke(index), opacity);
+            let fill = paint::alpha(colors.fill(index), ctx.row_fill_opacity(prepared, row));
+            let stroke = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
             paint_symbol(
                 ctx,
                 position,
@@ -343,7 +347,7 @@ fn draw_lines(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         for (group_index, group) in groups.iter().enumerate() {
             let mut points: Vec<Point<Pixels>> = group
                 .iter()
-                .filter_map(|(index, row)| position(ctx.frame, row).map(|p| (index, p)))
+                .filter_map(|(index, row)| position(prepared, ctx, row).map(|p| (index, p)))
                 .map(|(_, p)| ctx.absolute(p))
                 .collect();
             if points.len() < 2 {
@@ -505,7 +509,7 @@ fn draw_bars_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             paint::paint_rect(
                 rect,
                 prepared.mark.style.corner_radius,
-                paint::alpha(color, ctx.row_opacity(prepared, row)),
+                paint::alpha(color, ctx.row_fill_opacity(prepared, row)),
                 ctx.window,
             );
             if prepared.mark.channels.stroke.is_some() {
@@ -549,7 +553,7 @@ fn draw_bars_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             paint::paint_rect(
                 rect,
                 prepared.mark.style.corner_radius,
-                paint::alpha(color, ctx.row_opacity(prepared, row)),
+                paint::alpha(color, ctx.row_fill_opacity(prepared, row)),
                 ctx.window,
             );
             if prepared.mark.channels.stroke.is_some() {
@@ -595,7 +599,7 @@ fn draw_rects(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             paint::paint_rect(
                 rect,
                 prepared.mark.style.corner_radius,
-                paint::alpha(color, ctx.row_opacity(prepared, row)),
+                paint::alpha(color, ctx.row_fill_opacity(prepared, row)),
                 ctx.window,
             );
             if prepared.mark.channels.stroke.is_some() {
@@ -633,7 +637,7 @@ fn draw_cells(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             paint::paint_rect(
                 rect,
                 0.,
-                paint::alpha(color, ctx.row_opacity(prepared, row)),
+                paint::alpha(color, ctx.row_fill_opacity(prepared, row)),
                 ctx.window,
             );
         }
@@ -664,7 +668,7 @@ fn draw_rules_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             };
             let start = ctx.absolute(point(px(x), px(0.)));
             let end = ctx.absolute(point(px(x), px(height)));
-            let color = paint::alpha(colors.stroke(index), ctx.row_opacity(prepared, row));
+            let color = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
             paint::paint_stroke(&[start, end], width, color, ctx.window);
         }
     });
@@ -681,7 +685,7 @@ fn draw_rules_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             };
             let start = ctx.absolute(point(px(0.), px(y)));
             let end = ctx.absolute(point(px(width), px(y)));
-            let color = paint::alpha(colors.stroke(index), ctx.row_opacity(prepared, row));
+            let color = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
             paint::paint_stroke(&[start, end], stroke_width, color, ctx.window);
         }
     });
@@ -700,7 +704,7 @@ fn draw_texts(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     // overhangs the plot's edge, and Plot draws it whole. Clipping it to the
     // plot would cut the label in half.
     for (index, row) in prepared.rows.iter().enumerate() {
-        let Some(position) = position(ctx.frame, row) else {
+        let Some(position) = position(prepared, ctx, row) else {
             continue;
         };
         let color = if prepared.mark.channels.fill.is_some() {
@@ -749,7 +753,7 @@ fn draw_ticks_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             let (y0, y1) = tick_span(ctx.frame, row.y_value(), true, height);
             let start = ctx.absolute(point(px(x), px(y0)));
             let end = ctx.absolute(point(px(x), px(y1)));
-            let color = paint::alpha(colors.stroke(index), ctx.row_opacity(prepared, row));
+            let color = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
             paint::paint_stroke(&[start, end], width, color, ctx.window);
         }
     });
@@ -767,7 +771,7 @@ fn draw_ticks_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             let (x0, x1) = tick_span(ctx.frame, row.x_value(), false, width_px);
             let start = ctx.absolute(point(px(x0), px(y)));
             let end = ctx.absolute(point(px(x1), px(y)));
-            let color = paint::alpha(colors.stroke(index), ctx.row_opacity(prepared, row));
+            let color = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
             paint::paint_stroke(&[start, end], width, color, ctx.window);
         }
     });
@@ -894,8 +898,38 @@ fn draw_links(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
 }
 
 /// The plot-relative position of a row.
-fn position(frame: &Frame, row: &PreparedRow) -> Option<Point<Pixels>> {
-    frame.point(row.x_value(), row.y_value())
+///
+/// A one-dimensional mark has no value on its cross axis, so it sits where its
+/// kind says: `dotX` in the frame's middle, everything else by its index.
+pub fn position(
+    prepared: &PreparedMark,
+    ctx: &DrawContext<'_>,
+    row: &PreparedRow,
+) -> Option<Point<Pixels>> {
+    let frame = ctx.frame;
+    let placed = if prepared.mark.kind.is_x_only()
+        && prepared.mark.kind.cross_axis() == CrossAxis::Anchor
+    {
+        let x = frame.x.scale.position(row.x_value())?;
+        Some(point(px(x), px(frame.plot.size.height.as_f32() / 2.)))
+    } else if prepared.mark.kind.is_y_only() && prepared.mark.kind.cross_axis() == CrossAxis::Anchor
+    {
+        let y = frame.y.scale.position(row.y_value())?;
+        Some(point(px(frame.plot.size.width.as_f32() / 2.), px(y)))
+    } else {
+        frame.point(row.x_value(), row.y_value())
+    }?;
+
+    // A dodged row carries its packed position across the axis it spreads
+    // along, which replaces that coordinate rather than offsetting it.
+    let Some(across) = row.dodge_offset else {
+        return Some(placed);
+    };
+    Some(if prepared.dodge_along_x {
+        gpui::point(placed.x, px(across))
+    } else {
+        gpui::point(px(across), placed.y)
+    })
 }
 
 /// Rows grouped by their `z` series, in first-occurrence order.

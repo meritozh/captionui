@@ -79,6 +79,24 @@ pub struct FrameOptions {
     pub x_zero: bool,
     /// Whether the y domain includes zero, as Plot's bar charts do.
     pub y_zero: bool,
+    /// Whether the x domain is widened to round values, Plot's `nice`.
+    pub x_nice: bool,
+    /// Whether the y domain is widened to round values.
+    pub y_nice: bool,
+    /// Whether x positions outside the domain clamp to the frame's edge,
+    /// Plot's `clamp`.
+    pub x_clamp: bool,
+    /// Whether y positions outside the domain clamp to the frame's edge.
+    pub y_clamp: bool,
+    /// A pinned x range in pixels, replacing the plot's own extent, Plot's
+    /// `range`.
+    pub x_range: Option<[f32; 2]>,
+    /// A pinned y range in pixels.
+    pub y_range: Option<[f32; 2]>,
+    /// Whether to reverse the x range, Plot's `reverse`.
+    pub x_reverse: bool,
+    /// Whether to reverse the y range.
+    pub y_reverse: bool,
     /// The inset between a band scale's range and the plot's edge, Plot's
     /// `inset`.
     pub inset: f32,
@@ -107,6 +125,14 @@ impl Default for FrameOptions {
             y_domain: None,
             x_zero: false,
             y_zero: false,
+            x_nice: false,
+            y_nice: false,
+            x_clamp: false,
+            y_clamp: false,
+            x_range: None,
+            y_range: None,
+            x_reverse: false,
+            y_reverse: false,
             inset: 0.,
             // Plot's band scale pads 0.1 inside and outside, so bars have a
             // gap between them and a margin at the plot's edges.
@@ -176,31 +202,43 @@ impl Frame {
 
         let x = resolve_axis(
             x_values,
-            options.x_kind,
-            options.x_transform,
-            options.x_exponent,
-            options.x_domain,
-            options.x_zero,
-            options.inset,
-            options.padding,
-            options.padding_outer,
-            [0., plot_width],
-            options.x_tick_count,
-            true,
+            &AxisOptions {
+                kind: options.x_kind,
+                transform: options.x_transform,
+                exponent: options.x_exponent,
+                pinned: options.x_domain,
+                zero: options.x_zero,
+                nice: options.x_nice,
+                clamp: options.x_clamp,
+                pinned_range: options.x_range,
+                reverse: options.x_reverse,
+                inset: options.inset,
+                padding: options.padding,
+                padding_outer: options.padding_outer,
+                tick_count: options.x_tick_count,
+                range: [0., plot_width],
+                axis: AxisSide::X,
+            },
         );
         let y = resolve_axis(
             y_values,
-            options.y_kind,
-            options.y_transform,
-            options.y_exponent,
-            options.y_domain,
-            options.y_zero,
-            options.inset,
-            options.padding,
-            options.padding_outer,
-            [plot_height, 0.],
-            options.y_tick_count,
-            false,
+            &AxisOptions {
+                kind: options.y_kind,
+                transform: options.y_transform,
+                exponent: options.y_exponent,
+                pinned: options.y_domain,
+                zero: options.y_zero,
+                nice: options.y_nice,
+                clamp: options.y_clamp,
+                pinned_range: options.y_range,
+                reverse: options.y_reverse,
+                inset: options.inset,
+                padding: options.padding,
+                padding_outer: options.padding_outer,
+                tick_count: options.y_tick_count,
+                range: [plot_height, 0.],
+                axis: AxisSide::Y,
+            },
         );
 
         Self { bounds, plot, x, y }
@@ -221,21 +259,52 @@ impl Frame {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn resolve_axis(
-    values: &[crate::value::Value],
+/// How one axis resolves its scale, the per-axis half of [`FrameOptions`].
+struct AxisOptions {
     kind: Option<ScaleKind>,
     transform: Transform,
     exponent: f64,
     pinned: Option<[f64; 2]>,
     zero: bool,
+    nice: bool,
+    clamp: bool,
+    pinned_range: Option<[f32; 2]>,
+    reverse: bool,
     inset: f32,
     padding: f32,
     padding_outer: f32,
-    range: [f32; 2],
     tick_count: usize,
-    is_x: bool,
-) -> Axis {
+    range: [f32; 2],
+    /// Which axis this is, for tick placement.
+    axis: AxisSide,
+}
+
+/// Which axis a resolved scale belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AxisSide {
+    X,
+    Y,
+}
+
+fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
+    let AxisOptions {
+        kind,
+        transform,
+        exponent,
+        pinned,
+        zero,
+        nice,
+        clamp,
+        pinned_range,
+        reverse,
+        inset,
+        padding,
+        padding_outer,
+        tick_count,
+        range,
+        axis,
+    } = *options;
+    let is_x = axis == AxisSide::X;
     let inferred = values
         .iter()
         .find(|v| !v.is_null())
@@ -243,7 +312,9 @@ fn resolve_axis(
         .unwrap_or(PlotKind::Null);
     let kind = kind.unwrap_or_else(|| ScaleKind::for_kind(inferred));
     let temporal = inferred == PlotKind::Date;
+    let range = pinned_range.unwrap_or(range);
     let range = [range[0] + inset, range[1] - inset];
+    let range = if reverse { [range[1], range[0]] } else { range };
 
     match kind {
         ScaleKind::Continuous => {
@@ -255,7 +326,14 @@ fn resolve_axis(
                 domain[0] = domain[0].min(0.);
                 domain[1] = domain[1].max(0.);
             }
-            let scale = ContinuousScale::new(transform, domain, range).with_exponent(exponent);
+            let mut scale = ContinuousScale::new(transform, domain, range).with_exponent(exponent);
+            if nice {
+                scale = scale.nice(tick_count);
+            }
+            if clamp {
+                scale = scale.clamped(true);
+            }
+            let domain = scale.domain();
             let ticks = if temporal {
                 let millis = scale.time_ticks(tick_count);
                 millis
