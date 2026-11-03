@@ -181,6 +181,13 @@ pub fn examples() -> Vec<Example> {
             build: nicened_domain,
         },
         Example {
+            title: "Sized dots",
+            section: "Legends / size",
+            description: "Two series as dots whose radius encodes a value, with a size legend beside them.",
+            height: 440.,
+            build: sized_dots,
+        },
+        Example {
             title: "Curves",
             section: "Features / curves",
             description: "The same points through Plot's spline families, from basis to bundle.",
@@ -520,6 +527,38 @@ fn nicened_domain() -> Plot {
         .y_nice(true)
         .y_ticks(5)
         .grid(false)
+}
+
+fn sized_dots() -> Plot {
+    let data = data::economics();
+    let long: Vec<Table> = data
+        .iter()
+        .flat_map(|row| {
+            ["unemployment", "inflation"]
+                .into_iter()
+                .filter_map(|field| {
+                    let value = row.number(field)?;
+                    Some(
+                        Table::empty()
+                            .with("date", row.value("date"))
+                            .with("value", Value::Number(value))
+                            .with("series", Value::text(field)),
+                    )
+                })
+        })
+        .collect();
+
+    Plot::new(long)
+        .title("Economic indicators")
+        .subtitle("Dot size encodes the reading's distance from 5")
+        .dot(|mark| {
+            mark.x("date").y("value").z("series").r(|row: &Table| {
+                let value = row.number("value").unwrap_or(0.);
+                (1.5 + (value - 5.).abs() * 0.7) as f32
+            })
+        })
+        .legend(LegendPosition::Right)
+        .y_axis(true)
 }
 
 fn curves() -> Plot {

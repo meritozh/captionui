@@ -182,7 +182,13 @@ fn contact_sheet(dir: &Path, examples: &[gallery::Example], out: &Path) {
         .collect();
     let sheet_height: u32 = row_heights.iter().sum();
 
-    let mut sheet = image::RgbaImage::new(TILE.0 * COLUMNS, sheet_height);
+    // Short tiles leave gaps under a row's taller ones, so the sheet starts
+    // from an opaque background rather than transparent black.
+    let mut sheet = image::RgbaImage::from_pixel(
+        TILE.0 * COLUMNS,
+        sheet_height,
+        image::Rgba([255, 255, 255, 255]),
+    );
     let mut y = 0;
     for (row, row_height) in rows.iter().zip(&row_heights) {
         for (column, tile) in row.iter().enumerate() {

@@ -23,6 +23,7 @@ use crate::mark::{Mark, MarkKind};
 use crate::paint::{self, Label};
 use crate::render::{self, PreparedMark, basic::DrawContext};
 use crate::scale::{ColorRange, ColorScale, Transform};
+use crate::style::NumberChannel;
 use crate::table::{Dataset, Table};
 use crate::theme::PlotTheme;
 use crate::value::{PlotKind, Value};
@@ -746,12 +747,14 @@ impl Plot {
         let legend_entries = self.legend_entries(theme, prepared);
         if self.legend != LegendPosition::None && !legend_entries.is_empty() {
             // A heading above the entries takes one more row on a top or
-            // bottom legend, and one more row of height on a side one.
-            let band = if self.legend_title.is_some() {
-                LEGEND_BAND * 2.
-            } else {
-                LEGEND_BAND
-            };
+            // bottom legend, and one more row of height on a side one; a
+            // legend that wraps or lists several quantities takes more.
+            let band = LEGEND_BAND * (1. + self.legend_rows(theme, window, &legend_entries) as f32)
+                + if self.legend_title.is_some() {
+                    LEGEND_BAND
+                } else {
+                    0.
+                };
             match self.legend {
                 LegendPosition::Top => insets.top += band,
                 LegendPosition::Bottom => insets.bottom += band,
@@ -766,6 +769,49 @@ impl Plot {
         }
 
         insets
+    }
+
+    /// How many rows a top or bottom legend's entries take once they wrap at
+    /// the figure's width. A side legend is a column, so it needs one row.
+    fn legend_rows(
+        &self,
+        theme: &PlotTheme,
+        window: &mut Window,
+        entries: &[LegendEntry],
+    ) -> usize {
+        if matches!(self.legend, LegendPosition::Left | LegendPosition::Right) {
+            return entries.len().saturating_sub(1);
+        }
+        // The figure's width, which the frame's insets are about to reduce by
+        // the width this legend reserves.
+        let width = self.legend_band_width() - LEGEND_MARGIN * 2.;
+        let mut rows: usize = 1;
+        let mut x = 0.;
+        let mut previous_quantity = false;
+        for entry in entries {
+            if entry.swatch.is_quantity() && !previous_quantity {
+                rows += 1;
+                x = 0.;
+            }
+            previous_quantity = entry.swatch.is_quantity();
+            let label = paint::measure(&entry.label, theme.label_size, window)
+                .width
+                .as_f32();
+            let advance = LEGEND_SWATCH_GAP + label + 14.;
+            if x + advance > width && x > 0. {
+                rows += 1;
+                x = 0.;
+            }
+            x += advance;
+        }
+        rows.saturating_sub(1)
+    }
+
+    /// The width a top or bottom legend has to lay its entries out in. The
+    /// plot does not know the figure's width until it is laid out, so this
+    /// uses the same 640px the legend has always assumed.
+    fn legend_band_width(&self) -> f32 {
+        640.
     }
 
     /// The width a side legend needs: its widest label plus its swatch.
@@ -870,11 +916,11 @@ impl Plot {
                     }
                 }
             }
+            let shape = legend_shape(mark.mark.kind);
             if !series.is_empty() {
-                let shape = legend_shape(mark.mark.kind);
                 entries.extend(series.into_iter().map(|(label, color)| LegendEntry {
                     label,
-                    color,
+                    swatch: LegendSwatch::Color(color),
                     shape,
                 }));
             } else if let Some(title) = &mark.mark.title {
@@ -891,12 +937,84 @@ impl Plot {
                     .unwrap_or_else(|| theme.palette_color(index));
                 entries.push(LegendEntry {
                     label: title.clone(),
-                    color,
-                    shape: legend_shape(mark.mark.kind),
+                    swatch: LegendSwatch::Color(color),
+                    shape,
                 });
+            }
+            // A `r` or `opacity` accessor is a third dimension the color
+            // legend cannot show, so it gets a legend of its own: the smallest
+            // and largest value, and the middle one when the range is wide.
+            if let Some(channel) = &mark.mark.channels.r {
+                let values = numbers(mark, channel);
+                entries.extend(quantity_entries("r", &values, |value| {
+                    LegendSwatch::Size(value.max(1.))
+                }));
+            }
+            if let Some(channel) = &mark.mark.channels.opacity {
+                let values = numbers(mark, channel);
+                entries.extend(quantity_entries("opacity", &values, |value| {
+                    LegendSwatch::Opacity(value.clamp(0., 1.))
+                }));
             }
         }
         entries
+    }
+}
+
+/// Every distinct value a numeric channel reads, in reading order.
+fn numbers(mark: &PreparedMark, channel: &NumberChannel) -> Vec<f32> {
+    let mut values: Vec<f32> = Vec::new();
+    for row in mark.rows.iter() {
+        let value = channel.read(&row.row);
+        if value.is_finite() && !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    values
+}
+
+/// The legend entries for a numeric channel: its ends and, when the range is
+/// wide enough to matter, a middle value. A channel with a single value draws
+/// no legend, the same way a constant color draws none.
+fn quantity_entries(
+    name: &str,
+    values: &[f32],
+    swatch: impl Fn(f32) -> LegendSwatch,
+) -> Vec<LegendEntry> {
+    let (Some(min), Some(max)) = (
+        values.iter().copied().reduce(f32::min),
+        values.iter().copied().reduce(f32::max),
+    ) else {
+        return Vec::new();
+    };
+    if min == max {
+        return Vec::new();
+    }
+    let middle = (min + max) / 2.;
+    let mut ticks = vec![min];
+    if middle != min && middle != max {
+        ticks.push(middle);
+    }
+    ticks.push(max);
+    ticks
+        .into_iter()
+        .map(|value| LegendEntry {
+            label: format!("{name} {}", trim_number(value)).into(),
+            swatch: swatch(value),
+            shape: LegendShape::Circle,
+        })
+        .collect()
+}
+
+/// A number without its trailing zeros, so a legend reads `r 2` not `r 2.0`.
+fn trim_number(value: f32) -> String {
+    if value.fract() == 0. {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 
@@ -926,10 +1044,41 @@ fn hover_targets(prepared: &[PreparedMark]) -> Vec<(usize, usize)> {
 #[derive(Clone, Debug)]
 struct LegendEntry {
     label: SharedString,
-    color: Hsla,
+    /// What the swatch shows: a color, a size or an opacity. Plot gives each
+    /// varying channel its own legend, so a dot plot that encodes a value in
+    /// its radius says so in the legend rather than in the caption.
+    swatch: LegendSwatch,
     /// The shape of the entry's swatch, so a line's legend reads as a line and
     /// a dot's as a dot rather than every mark sharing one square.
     shape: LegendShape,
+}
+
+/// The quantity a legend swatch stands for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LegendSwatch {
+    /// A color, which the swatch draws in the mark's shape.
+    Color(Hsla),
+    /// A radius in pixels, for a `r` channel: the swatch is a circle of it.
+    Size(f32),
+    /// An opacity, for an `opacity` channel: the swatch is a faded circle.
+    Opacity(f32),
+}
+
+impl LegendSwatch {
+    /// The color a swatch draws, for the swatches that are colors. A size or
+    /// opacity swatch draws in the theme's label color instead.
+    fn color(&self) -> Option<Hsla> {
+        match self {
+            LegendSwatch::Color(color) => Some(*color),
+            LegendSwatch::Size(_) | LegendSwatch::Opacity(_) => None,
+        }
+    }
+
+    /// Whether the swatch stands for a size or an opacity rather than a
+    /// color, which decides where its list of entries starts.
+    fn is_quantity(&self) -> bool {
+        !matches!(self, LegendSwatch::Color(_))
+    }
 }
 
 /// The shape a legend swatch draws.
@@ -1410,30 +1559,57 @@ impl Plot {
             x = LEGEND_MARGIN;
         }
 
-        for entry in entries {
+        for (index, entry) in entries.iter().enumerate() {
+            // A size or opacity legend is a separate list from the color one,
+            // so it starts on a fresh row rather than running on from it.
+            if !vertical
+                && index > 0
+                && entry.swatch.is_quantity()
+                && !entries[index - 1].swatch.is_quantity()
+            {
+                x = LEGEND_MARGIN;
+                y += LEGEND_BAND;
+            }
             let centre = point(origin.x + px(x + 4.), origin.y + px(y + 6.));
-            match entry.shape {
-                LegendShape::Square => paint::paint_rect(
-                    Bounds::new(
-                        point(origin.x + px(x), origin.y + px(y + 2.)),
-                        gpui::size(swatch, swatch),
-                    ),
-                    2.,
-                    entry.color,
-                    window,
-                ),
-                LegendShape::Line => paint::paint_stroke(
-                    &[
-                        point(px(centre.x.as_f32() - 5.), centre.y),
-                        point(px(centre.x.as_f32() + 5.), centre.y),
-                    ],
-                    2.,
-                    entry.color,
-                    window,
-                ),
-                LegendShape::Circle => {
-                    paint::paint_fill(&paint::circle_points(centre, 4., 20), entry.color, window)
+            // A size or opacity swatch draws in the theme's label color: it
+            // shows how big or how faint a mark is, not which series it is.
+            let color = entry.swatch.color().unwrap_or(theme.label);
+            match entry.swatch {
+                LegendSwatch::Size(radius) => {
+                    let radius = radius.min(6.);
+                    paint::paint_fill(&paint::circle_points(centre, radius, 20), color, window)
                 }
+                LegendSwatch::Opacity(opacity) => paint::paint_fill(
+                    &paint::circle_points(centre, 4., 20),
+                    Hsla {
+                        a: opacity,
+                        ..color
+                    },
+                    window,
+                ),
+                _ => match entry.shape {
+                    LegendShape::Square => paint::paint_rect(
+                        Bounds::new(
+                            point(origin.x + px(x), origin.y + px(y + 2.)),
+                            gpui::size(swatch, swatch),
+                        ),
+                        2.,
+                        color,
+                        window,
+                    ),
+                    LegendShape::Line => paint::paint_stroke(
+                        &[
+                            point(px(centre.x.as_f32() - 5.), centre.y),
+                            point(px(centre.x.as_f32() + 5.), centre.y),
+                        ],
+                        2.,
+                        color,
+                        window,
+                    ),
+                    LegendShape::Circle => {
+                        paint::paint_fill(&paint::circle_points(centre, 4., 20), color, window)
+                    }
+                },
             }
             let label = Label::new(
                 entry.label.clone(),
