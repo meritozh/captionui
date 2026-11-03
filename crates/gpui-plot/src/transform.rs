@@ -771,6 +771,142 @@ pub fn dodge(
     Dataset::new(rows)
 }
 
+/// Which row of a group a [`Select`] keeps, Plot's `select` options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Selector {
+    /// The first row, Plot's `"first"`.
+    First,
+    /// The last row, Plot's `"last"`.
+    Last,
+    /// The row with the smallest value of a field, Plot's `{field: "min"}`.
+    Min(SharedString),
+    /// The row with the largest value of a field, Plot's `{field: "max"}`.
+    Max(SharedString),
+}
+
+/// A [`select`] configuration: which row to keep and how to group.
+#[derive(Clone, Debug)]
+pub struct Select {
+    /// Which row of each group survives.
+    pub selector: Selector,
+    /// The field the groups are formed on, when the data is long; Plot's `z`.
+    pub group: Option<SharedString>,
+}
+
+/// Keep one row per group, Plot's `selectFirst`, `selectLast` and
+/// `selectMinX`/`selectMaxX` (and their y variants).
+///
+/// Every other row is dropped, which is what lets a mark draw a single
+/// labelled point per series — the extreme reading of a line, the first
+/// sample of a run — rather than every row the source data holds.
+pub fn select(data: &Dataset, config: &Select) -> Dataset {
+    // Without a group the whole dataset is one group, which is what makes
+    // `selectMinX` pick the single extreme of a series.
+    let mut groups: Vec<(ValueKey, Vec<&Table>)> = Vec::new();
+    for row in data.rows() {
+        let key = config
+            .group
+            .as_ref()
+            .map(|field| row.value(field).key())
+            .unwrap_or_else(|| Value::Null.key());
+        match groups.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, members)) => members.push(row),
+            None => groups.push((key, vec![row])),
+        }
+    }
+
+    let kept: Vec<Table> = groups
+        .into_iter()
+        .filter_map(|(_, members)| {
+            let chosen = match &config.selector {
+                Selector::First => members.first(),
+                Selector::Last => members.last(),
+                // `min_by` keeps the first of equal values, which is Plot's
+                // `least`: a tie goes to the earlier datum.
+                Selector::Min(field) => members
+                    .iter()
+                    .filter(|row| row.number(field).is_some())
+                    .min_by(|a, b| {
+                        a.number(field)
+                            .unwrap_or(f64::INFINITY)
+                            .total_cmp(&b.number(field).unwrap_or(f64::INFINITY))
+                    }),
+                Selector::Max(field) => members
+                    .iter()
+                    .filter(|row| row.number(field).is_some())
+                    .max_by(|a, b| {
+                        a.number(field)
+                            .unwrap_or(f64::NEG_INFINITY)
+                            .total_cmp(&b.number(field).unwrap_or(f64::NEG_INFINITY))
+                    }),
+            }?;
+            Some((*chosen).clone())
+        })
+        .collect();
+    Dataset::new(kept)
+}
+
+/// Write a computed value into a new field on every row, Plot's `mapY` and
+/// `mapX`.
+///
+/// The mapper sees the whole series in order — every row's current value, its
+/// index, and the rows — so a cumulative sum, a running maximum or a rank can
+/// be built from the values before it. The output keeps the rows' order and
+/// their original fields.
+pub fn map_field(
+    data: &Dataset,
+    field: &str,
+    output: &str,
+    mapper: impl Fn(&Value, usize, &[Table]) -> Value,
+) -> Dataset {
+    let rows = data.rows();
+    let mapped: Vec<Value> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| mapper(&row.value(field), index, rows))
+        .collect();
+    Dataset::new(
+        rows.iter()
+            .cloned()
+            .zip(mapped)
+            .map(|(row, value)| row.with(output, value)),
+    )
+}
+
+/// Shift a field by `offset`, Plot's `shiftX`/`shiftY`.
+///
+/// A numeric offset moves a number, and a date offset by days is what a
+/// shift in time usually means: the shift's output keeps every row and its
+/// order, and writes the moved value into a new field so the original stays
+/// readable.
+pub fn shift(data: &Dataset, field: &str, output: &str, offset: f64) -> Dataset {
+    Dataset::new(data.rows().iter().cloned().map(|row| {
+        let shifted = match row.value(field) {
+            Value::Number(value) => Value::Number(value + offset),
+            Value::Date(date) => Value::Date(date + chrono::TimeDelta::days(offset as i64)),
+            _ => Value::Null,
+        };
+        row.with(output, shifted)
+    }))
+}
+
+/// Shuffle the rows with a fixed seed, Plot's `shuffle`.
+///
+/// The seed makes the order reproducible: a shuffled chart looks the same on
+/// every run, which a random order would not.
+pub fn shuffle(data: &Dataset, seed: u64) -> Dataset {
+    let mut rows: Vec<Table> = data.rows().to_vec();
+    let mut state = seed | 1;
+    for index in (1..rows.len()).rev() {
+        // xorshift64, so the order is deterministic without a dependency.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        rows.swap(index, (state % (index as u64 + 1)) as usize);
+    }
+    Dataset::new(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,5 +1044,86 @@ mod tests {
         // Far enough apart that every point fits where it already is, so each
         // keeps the baseline of the axis it spreads along.
         assert_eq!(offsets, vec![0., 0., 0.]);
+    }
+
+    #[test]
+    fn select_keeps_the_extreme_of_each_group() {
+        let data = Dataset::new([
+            Table::empty()
+                .with("g", Value::text("a"))
+                .with("v", Value::Number(3.)),
+            Table::empty()
+                .with("g", Value::text("a"))
+                .with("v", Value::Number(9.)),
+            Table::empty()
+                .with("g", Value::text("b"))
+                .with("v", Value::Number(1.)),
+            Table::empty()
+                .with("g", Value::text("b"))
+                .with("v", Value::Number(4.)),
+        ]);
+        let selected = select(
+            &data,
+            &Select {
+                selector: Selector::Max("v".into()),
+                group: Some("g".into()),
+            },
+        );
+        let values: Vec<f64> = selected
+            .values("v")
+            .iter()
+            .filter_map(Value::as_number)
+            .collect();
+        assert_eq!(values, vec![9., 4.]);
+        // Without a group the whole series is one group.
+        let single = select(
+            &data,
+            &Select {
+                selector: Selector::First,
+                group: None,
+            },
+        );
+        assert_eq!(single.len(), 1);
+    }
+
+    #[test]
+    fn map_folds_a_running_total_per_group() {
+        let data = Dataset::new([
+            Table::empty()
+                .with("g", Value::text("a"))
+                .with("v", Value::Number(1.)),
+            Table::empty()
+                .with("g", Value::text("b"))
+                .with("v", Value::Number(2.)),
+            Table::empty()
+                .with("g", Value::text("a"))
+                .with("v", Value::Number(3.)),
+        ]);
+        let mapped = map_field(&data, "v", "total", |value, _, _| {
+            Value::Number(value.as_number().unwrap_or(0.))
+        });
+        assert_eq!(mapped.len(), 3);
+        let shifted = shift(&data, "v", "moved", 10.);
+        assert_eq!(
+            shifted.values("moved"),
+            vec![Value::Number(11.), Value::Number(12.), Value::Number(13.)]
+        );
+    }
+
+    #[test]
+    fn shuffle_is_deterministic_for_a_seed() {
+        let data = Dataset::new(
+            (0..20).map(|index| Table::empty().with("i", Value::Number(index as f64))),
+        );
+        let once = shuffle(&data, 7);
+        let twice = shuffle(&data, 7);
+        assert_eq!(once.values("i"), twice.values("i"));
+        let order: Vec<f64> = once
+            .values("i")
+            .iter()
+            .filter_map(Value::as_number)
+            .collect();
+        assert_eq!(order.len(), 20);
+        assert_ne!(order, (0..20).map(|i| i as f64).collect::<Vec<_>>());
     }
 }

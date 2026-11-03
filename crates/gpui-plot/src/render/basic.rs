@@ -102,6 +102,19 @@ impl DrawContext<'_> {
             self.theme.mark_color
         }
     }
+
+    /// The color of one row's series, for a mark that paints per group rather
+    /// than per row: a line's stroke follows its `z` value through the plot's
+    /// shared ordinal scale, the same one the legend reads.
+    pub fn series_color(&self, prepared: &PreparedMark, row: &PreparedRow) -> Hsla {
+        if let Some(channel) = prepared.mark.channels.stroke.as_ref() {
+            return channel.read(&row.row);
+        }
+        match row.z.as_ref().and_then(|z| self.ordinal_scale().color(z)) {
+            Some(color) => color,
+            None => self.default_stroke(prepared),
+        }
+    }
 }
 
 impl DrawContext<'_> {
@@ -364,11 +377,17 @@ fn draw_lines(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             if points.len() < 2 {
                 continue;
             }
-            let color = colors
-                .stroke
-                .as_ref()
-                .and_then(|colors| group.first().map(|(index, _)| colors[*index]))
-                .unwrap_or_else(|| ctx.default_stroke(prepared));
+            // A line's color is its series': a chart drawn as one line per
+            // series has a `z` value on every row, and each line takes that
+            // series' color rather than the mark's one palette entry.
+            let color = match group.first() {
+                Some((index, row)) => colors
+                    .stroke
+                    .as_ref()
+                    .and_then(|colors| colors.get(*index).copied())
+                    .unwrap_or_else(|| ctx.series_color(prepared, row)),
+                None => continue,
+            };
             let _ = group_index;
             let path = curve_path(&points, curve, width, ctx.appear);
             paint::paint_path(path, color, ctx.window);

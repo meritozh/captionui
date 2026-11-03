@@ -3,8 +3,8 @@
 
 use gpui_plot::mark::Curve;
 use gpui_plot::{
-    ColorRange, Dodge, DodgeAnchor, LegendPosition, Plot, Reducer, StackOffset, Table, Thresholds,
-    Transform, Value,
+    ColorRange, Dodge, DodgeAnchor, LegendPosition, MapReducer, Plot, Reducer, Selector,
+    StackOffset, Table, Thresholds, Transform, Value,
 };
 
 use crate::data;
@@ -186,6 +186,20 @@ pub fn examples() -> Vec<Example> {
             description: "A line with tips pinned to its highest and lowest readings.",
             height: 440.,
             build: annotated_peaks,
+        },
+        Example {
+            title: "Selected extremes",
+            section: "Transforms / select",
+            description: "One dot per series at its highest reading, picked by selectMaxY.",
+            height: 440.,
+            build: selected_extremes,
+        },
+        Example {
+            title: "Cumulative total",
+            section: "Transforms / map",
+            description: "A running total folded by mapY, over a series of daily readings.",
+            height: 440.,
+            build: cumulative_total,
         },
         Example {
             title: "Frame and grid marks",
@@ -541,6 +555,68 @@ fn nicened_domain() -> Plot {
         .y_nice(true)
         .y_ticks(5)
         .grid(false)
+}
+
+fn selected_extremes() -> Plot {
+    let data = data::economics();
+    let long: Vec<Table> = data
+        .iter()
+        .flat_map(|row| {
+            ["unemployment", "inflation"]
+                .into_iter()
+                .filter_map(|field| {
+                    let value = row.number(field)?;
+                    Some(
+                        Table::empty()
+                            .with("date", row.value("date"))
+                            .with("value", Value::Number(value))
+                            .with("series", Value::text(field)),
+                    )
+                })
+        })
+        .collect();
+
+    Plot::new(long)
+        .title("Economic indicators")
+        .subtitle("The highest reading of each series, picked by selectMaxY")
+        .line(|mark| mark.x("date").y("value").z("series").stroke_width(1.))
+        .dot(|mark| {
+            mark.x("date")
+                .y("value")
+                .z("series")
+                .r(5.)
+                .select(Selector::Max("value".into()), Some("series"))
+        })
+        .text(|mark| {
+            mark.x("date")
+                .y("value")
+                .text("value")
+                .dy(-14.)
+                .dx(-6.)
+                .select(Selector::Max("value".into()), Some("series"))
+        })
+        .inset(0.04)
+        .legend(LegendPosition::Top)
+        .y_axis(true)
+}
+
+fn cumulative_total() -> Plot {
+    let data = data::noisy_series();
+    Plot::new(data)
+        .title("Noisy series")
+        .subtitle("A running total, folded by mapY")
+        .area_y(|mark| {
+            mark.x("date")
+                .y("total")
+                .map("value", "total", MapReducer::Sum)
+                .stroke_width(0.)
+        })
+        .line(|mark| {
+            mark.x("date")
+                .y("total")
+                .map("value", "total", MapReducer::Sum)
+        })
+        .y_zero(true)
 }
 
 fn furniture_marks() -> Plot {

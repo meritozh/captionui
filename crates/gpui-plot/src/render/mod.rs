@@ -11,9 +11,9 @@ pub(crate) mod radial;
 use gpui::{Hsla, SharedString};
 
 use crate::frame::Frame;
-use crate::mark::{Channels, CrossAxis, Mark, MarkKind};
+use crate::mark::{Axis, Channels, CrossAxis, MapReducer, Mark, MarkKind};
 use crate::table::{Dataset, Table};
-use crate::transform::{self, Anchor, Reducer, StackOffset, StackedSeries, Thresholds};
+use crate::transform::{self, Anchor, Reducer, Selector, StackOffset, StackedSeries, Thresholds};
 use crate::value::Value;
 
 /// A mark whose channels have been resolved against the data.
@@ -116,7 +116,96 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         };
     }
     let channels = &mark.channels;
-    let mut rows: Vec<PreparedRow> = data
+
+    // The data transforms rewrite the records themselves, so they run before
+    // any row is resolved: `select` drops rows, and `map`/`shift` add fields
+    // the channels may read. Plot applies them to the mark's data in the same
+    // order, and a mark's `shuffle` is only a reordering of what is left.
+    let mut source = data.clone();
+    if let Some(config) = &mark.select {
+        let group = config.group.as_deref().map(|field| field.to_string());
+        let selector = match (&config.selector, config.axis) {
+            // A select over an axis reads that axis's channel, which may be a
+            // field name or an accessor; only the field form can be expressed
+            // here, and an accessor's extreme falls back to the first row.
+            (Selector::Min(_), Some(Axis::X)) => Selector::Min("x".into()),
+            (Selector::Max(_), Some(Axis::X)) => Selector::Max("x".into()),
+            (Selector::Min(_), Some(Axis::Y)) => Selector::Min("y".into()),
+            (Selector::Max(_), Some(Axis::Y)) => Selector::Max("y".into()),
+            (selector, _) => selector.clone(),
+        };
+        source = transform::select(
+            &source,
+            &transform::Select {
+                selector,
+                group: group.map(Into::into),
+            },
+        );
+    }
+    if let Some(config) = &mark.map {
+        let rows = source.rows();
+        let mut running: Vec<(String, f64, f64, usize)> = Vec::new();
+        let mut output: Vec<Value> = Vec::with_capacity(rows.len());
+        for row in rows.iter() {
+            let key = config
+                .group
+                .as_ref()
+                .map(|field| row.value(field).label().to_string())
+                .unwrap_or_default();
+            let value = row.value(&config.input).as_number().unwrap_or(f64::NAN);
+            let slot = match running.iter().position(|(existing, ..)| *existing == key) {
+                Some(index) => index,
+                None => {
+                    running.push((key, 0., f64::NAN, 0));
+                    running.len() - 1
+                }
+            };
+            let (_, total, extreme, count) = &mut running[slot];
+            *count += 1;
+            let mapped = match config.reducer {
+                MapReducer::Rank => Value::Number((*count - 1) as f64),
+                MapReducer::Sum => {
+                    *total += value;
+                    Value::Number(*total)
+                }
+                MapReducer::Min => {
+                    *extreme = if extreme.is_nan() {
+                        value
+                    } else {
+                        extreme.min(value)
+                    };
+                    Value::Number(*extreme)
+                }
+                MapReducer::Max => {
+                    *extreme = if extreme.is_nan() {
+                        value
+                    } else {
+                        extreme.max(value)
+                    };
+                    Value::Number(*extreme)
+                }
+                MapReducer::Mean => {
+                    *total += value;
+                    Value::Number(*total / *count as f64)
+                }
+            };
+            output.push(mapped);
+        }
+        source = Dataset::new(
+            rows.iter()
+                .cloned()
+                .zip(output)
+                .map(|(row, value)| row.with(&config.output, value)),
+        );
+    }
+    if let Some(config) = &mark.shift {
+        source = transform::shift(&source, &config.input, &config.output, config.offset);
+    }
+    if let Some(seed) = mark.shuffle {
+        source = transform::shuffle(&source, seed);
+    }
+
+    let mut rows: Vec<PreparedRow> = source
         .rows()
         .iter()
         .enumerate()

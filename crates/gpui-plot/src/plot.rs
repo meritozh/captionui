@@ -956,7 +956,7 @@ impl Plot {
 
     /// The legend's entries: one per series or one per categorical value.
     fn legend_entries(&self, theme: &PlotTheme, prepared: &[PreparedMark]) -> Vec<LegendEntry> {
-        let mut entries = Vec::new();
+        let mut entries: Vec<LegendEntry> = Vec::new();
         // The color scale spans every mark's `z` values, the way Plot's is one
         // scale for the whole plot: a chart drawn as one line per series has a
         // `z` value in each mark, and each mark's own domain would give every
@@ -980,12 +980,19 @@ impl Plot {
                 }
             }
             let shape = legend_shape(mark.mark.kind);
+            // One legend entry per series, however many marks draw it: a line
+            // with a labelled dot at its peak is one series, not three.
             if !series.is_empty() {
-                entries.extend(series.into_iter().map(|(label, color)| LegendEntry {
-                    label,
-                    swatch: LegendSwatch::Color(color),
-                    shape,
-                }));
+                for (label, color) in series {
+                    if entries.iter().any(|entry| entry.label == label) {
+                        continue;
+                    }
+                    entries.push(LegendEntry {
+                        label,
+                        swatch: LegendSwatch::Color(color),
+                        shape,
+                    });
+                }
             } else if let Some(title) = &mark.mark.title {
                 // A titled mark's swatch is the color it draws in, which for a
                 // line is its stroke: a mark with only a stroke channel is

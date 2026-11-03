@@ -9,7 +9,7 @@ use gpui::{Hsla, SharedString};
 
 use crate::style::{ColorChannel, NumberChannel, Symbol};
 use crate::table::{Channel, IntoChannel};
-use crate::transform::{Anchor, Dodge, Reducer, StackOffset, Thresholds, WindowReducer};
+use crate::transform::{Anchor, Dodge, Reducer, Selector, StackOffset, Thresholds, WindowReducer};
 
 /// The mark types this library draws, matching Plot's mark set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -489,6 +489,75 @@ pub struct Mark {
     pub dodge: Option<Dodge>,
     /// A mark-level title, Plot's `title`.
     pub title: Option<SharedString>,
+    /// Keep one row per group before drawing, Plot's `select`.
+    pub select: Option<SelectConfig>,
+    /// Write a computed value into a new field, Plot's `mapX`/`mapY`.
+    pub map: Option<MapConfig>,
+    /// Move a field by an offset, Plot's `shiftX`/`shiftY`.
+    pub shift: Option<ShiftConfig>,
+    /// Draw the rows in a shuffled order, Plot's `shuffle`.
+    pub shuffle: Option<u64>,
+}
+
+/// A [`Mark::select`] configuration, Plot's `select`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelectConfig {
+    /// Which row of each group the mark keeps.
+    pub selector: Selector,
+    /// The field that forms the groups, Plot's `z`.
+    pub group: Option<SharedString>,
+    /// The axis the selector reads, for `selectMinX`/`selectMaxX`: `None`
+    /// picks the first or last row rather than an extreme.
+    pub axis: Option<Axis>,
+}
+
+/// Which axis a select's extreme reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    /// The x channel.
+    X,
+    /// The y channel.
+    Y,
+}
+
+/// A [`Mark::map`] configuration, Plot's `mapX`/`mapY`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapConfig {
+    /// The channel the mapper reads: `"x"`, `"y"` or a field name.
+    pub input: SharedString,
+    /// The field the mapped value is written to.
+    pub output: SharedString,
+    /// How the series is folded: the running total, the running extreme, the
+    /// running mean or the datum's rank.
+    pub reducer: MapReducer,
+    /// The field that restarts the fold, Plot's `z`.
+    pub group: Option<SharedString>,
+}
+
+/// How [`MapConfig`] folds a series.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapReducer {
+    /// The running total.
+    Sum,
+    /// The smallest value so far.
+    Min,
+    /// The largest value so far.
+    Max,
+    /// The mean of every value so far.
+    Mean,
+    /// The datum's position in the series, from zero.
+    Rank,
+}
+
+/// A [`Mark::shift`] configuration, Plot's `shiftX`/`shiftY`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShiftConfig {
+    /// The channel the shift reads: `"x"`, `"y"` or a field name.
+    pub input: SharedString,
+    /// The field the shifted value is written to.
+    pub output: SharedString,
+    /// How far to move it: a number of units, or days for a date.
+    pub offset: f64,
 }
 
 impl Mark {
@@ -505,6 +574,10 @@ impl Mark {
             normalize: false,
             dodge: None,
             title: None,
+            select: None,
+            map: None,
+            shift: None,
+            shuffle: None,
         }
     }
 
@@ -718,6 +791,67 @@ impl Mark {
     /// Pack the mark's points into a beeswarm, Plot's `dodgeX`/`dodgeY`.
     pub fn dodge(mut self, dodge: Dodge) -> Self {
         self.dodge = Some(dodge);
+        self
+    }
+
+    /// Keep only the first, last or extreme row of each group, Plot's
+    /// `select`. A mark that draws one labelled point per series uses it.
+    pub fn select(mut self, selector: Selector, group: Option<impl Into<SharedString>>) -> Self {
+        let axis = match &selector {
+            Selector::Min(field) | Selector::Max(field) if &**field == "x" => Some(Axis::X),
+            Selector::Min(field) | Selector::Max(field) if &**field == "y" => Some(Axis::Y),
+            _ => None,
+        };
+        self.select = Some(SelectConfig {
+            selector,
+            group: group.map(Into::into),
+            axis,
+        });
+        self
+    }
+
+    /// Fold the mark's value into a new field, Plot's `mapX`/`mapY`.
+    pub fn map(
+        mut self,
+        input: impl Into<SharedString>,
+        output: impl Into<SharedString>,
+        reducer: MapReducer,
+    ) -> Self {
+        self.map = Some(MapConfig {
+            input: input.into(),
+            output: output.into(),
+            reducer,
+            group: None,
+        });
+        self
+    }
+
+    /// Restart the mark's fold at each series, Plot's `mapX` with a `z`.
+    pub fn map_group(mut self, group: impl Into<SharedString>) -> Self {
+        if let Some(map) = &mut self.map {
+            map.group = Some(group.into());
+        }
+        self
+    }
+
+    /// Move the mark's value by an offset, Plot's `shiftX`/`shiftY`.
+    pub fn shift(
+        mut self,
+        input: impl Into<SharedString>,
+        output: impl Into<SharedString>,
+        offset: f64,
+    ) -> Self {
+        self.shift = Some(ShiftConfig {
+            input: input.into(),
+            output: output.into(),
+            offset,
+        });
+        self
+    }
+
+    /// Draw the rows in a shuffled order, Plot's `shuffle`.
+    pub fn shuffle(mut self, seed: u64) -> Self {
+        self.shuffle = Some(seed);
         self
     }
 }
@@ -969,6 +1103,50 @@ macro_rules! mark_builder {
             /// Pack the mark's points into a beeswarm, Plot's `dodgeX`/`dodgeY`.
             pub fn dodge(mut self, dodge: Dodge) -> Self {
                 self.0 = self.0.dodge(dodge);
+                self
+            }
+
+            /// Keep one row per group, Plot's `select`.
+            pub fn select(
+                mut self,
+                selector: Selector,
+                group: Option<impl Into<SharedString>>,
+            ) -> Self {
+                self.0 = self.0.select(selector, group);
+                self
+            }
+
+            /// Fold the mark's value into a new field, Plot's `mapX`/`mapY`.
+            pub fn map(
+                mut self,
+                input: impl Into<SharedString>,
+                output: impl Into<SharedString>,
+                reducer: MapReducer,
+            ) -> Self {
+                self.0 = self.0.map(input, output, reducer);
+                self
+            }
+
+            /// Restart the mark's fold at each series.
+            pub fn map_group(mut self, group: impl Into<SharedString>) -> Self {
+                self.0 = self.0.map_group(group);
+                self
+            }
+
+            /// Move the mark's value by an offset, Plot's `shiftX`/`shiftY`.
+            pub fn shift(
+                mut self,
+                input: impl Into<SharedString>,
+                output: impl Into<SharedString>,
+                offset: f64,
+            ) -> Self {
+                self.0 = self.0.shift(input, output, offset);
+                self
+            }
+
+            /// Draw the rows in a shuffled order, Plot's `shuffle`.
+            pub fn shuffle(mut self, seed: u64) -> Self {
+                self.0 = self.0.shuffle(seed);
                 self
             }
         }
