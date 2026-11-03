@@ -94,6 +94,43 @@ pub enum MarkKind {
     GridY,
     /// The frame's outline drawn as a mark, Plot's `frame`.
     Frame,
+    /// A text label at each x with no y, Plot's `textX`.
+    TextX,
+    /// A text label at each y with no x, Plot's `textY`.
+    TextY,
+    /// A cell over one x with no y, Plot's `cellX`.
+    CellX,
+    /// A cell over one y with no x, Plot's `cellY`.
+    CellY,
+    /// A vector at each x, Plot's `vectorX`.
+    VectorX,
+    /// A vector at each y, Plot's `vectorY`.
+    VectorY,
+    /// A triangular marker at a datum, Plot's `spike`.
+    Spike,
+    /// A curved arrow between two points, Plot's `arrow`.
+    Arrow,
+    /// A waffle bar along x, Plot's `waffleX`.
+    WaffleX,
+    /// A waffle bar along y, Plot's `waffleY`.
+    WaffleY,
+    /// A static hexagonal grid, Plot's `hexgrid`.
+    Hexgrid,
+    /// A grid of pixels colored from the data, Plot's `raster` and `image`.
+    Raster,
+    /// Two areas clipped to the sign of their difference, Plot's
+    /// `differenceX`.
+    DifferenceX,
+    /// The y-axis form of `differenceX`, Plot's `differenceY`.
+    DifferenceY,
+    /// A least-squares fit of x on y, Plot's `linearRegressionX`.
+    LinearRegressionX,
+    /// A least-squares fit of y on x, Plot's `linearRegressionY`.
+    LinearRegressionY,
+    /// A moving mean with deviation bands along x, Plot's `bollingerX`.
+    BollingerX,
+    /// The y-axis form of `bollingerX`, Plot's `bollingerY`.
+    BollingerY,
 }
 
 impl MarkKind {
@@ -138,6 +175,24 @@ impl MarkKind {
             MarkKind::GridX => "gridX",
             MarkKind::GridY => "gridY",
             MarkKind::Frame => "frame",
+            MarkKind::TextX => "textX",
+            MarkKind::TextY => "textY",
+            MarkKind::CellX => "cellX",
+            MarkKind::CellY => "cellY",
+            MarkKind::VectorX => "vectorX",
+            MarkKind::VectorY => "vectorY",
+            MarkKind::Spike => "spike",
+            MarkKind::Arrow => "arrow",
+            MarkKind::WaffleX => "waffleX",
+            MarkKind::WaffleY => "waffleY",
+            MarkKind::Hexgrid => "hexgrid",
+            MarkKind::Raster => "raster",
+            MarkKind::DifferenceX => "differenceX",
+            MarkKind::DifferenceY => "differenceY",
+            MarkKind::LinearRegressionX => "linearRegressionX",
+            MarkKind::LinearRegressionY => "linearRegressionY",
+            MarkKind::BollingerX => "bollingerX",
+            MarkKind::BollingerY => "bollingerY",
         }
     }
 
@@ -199,12 +254,28 @@ impl MarkKind {
     /// Whether this mark lays its data out along the x axis only, with no y
     /// channel of its own: Plot's `dotX`, `lineX`, `rectX`.
     pub fn is_x_only(self) -> bool {
-        matches!(self, MarkKind::DotX | MarkKind::LineX | MarkKind::RectX)
+        matches!(
+            self,
+            MarkKind::DotX
+                | MarkKind::LineX
+                | MarkKind::RectX
+                | MarkKind::TextX
+                | MarkKind::CellX
+                | MarkKind::VectorX
+        )
     }
 
     /// Whether this mark lays its data out along the y axis only.
     pub fn is_y_only(self) -> bool {
-        matches!(self, MarkKind::DotY | MarkKind::LineY | MarkKind::RectY)
+        matches!(
+            self,
+            MarkKind::DotY
+                | MarkKind::LineY
+                | MarkKind::RectY
+                | MarkKind::TextY
+                | MarkKind::CellY
+                | MarkKind::VectorY
+        )
     }
 
     /// How a mark with one position channel places itself across the axis it
@@ -216,7 +287,14 @@ impl MarkKind {
     /// a histogram's bars each get a row.
     pub fn cross_axis(self) -> CrossAxis {
         match self {
-            MarkKind::DotX | MarkKind::DotY => CrossAxis::Anchor,
+            // A one-dimensional dot, label or vector sits in the frame's
+            // middle, the way Plot anchors a mark that names one axis.
+            MarkKind::DotX
+            | MarkKind::DotY
+            | MarkKind::TextX
+            | MarkKind::TextY
+            | MarkKind::VectorX
+            | MarkKind::VectorY => CrossAxis::Anchor,
             _ => CrossAxis::Index,
         }
     }
@@ -229,6 +307,18 @@ pub enum CrossAxis {
     Anchor,
     /// The datum's index, Plot's `lineX` and `rectX`.
     Index,
+}
+
+/// How a vector sits against its datum, Plot's `anchor`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VectorAnchor {
+    /// The vector starts at the datum.
+    Start,
+    /// The vector is centred on the datum. (Default.)
+    #[default]
+    Middle,
+    /// The vector ends at the datum.
+    End,
 }
 
 /// How a mark's data is stacked, Plot's `stack` option.
@@ -362,6 +452,31 @@ pub struct MarkStyle {
     pub dx: f32,
     /// The vertical offset of a text label, Plot's `dy`, in pixels.
     pub dy: f32,
+    /// The bend of an arrow, in degrees, Plot's `bend`.
+    pub bend: f32,
+    /// The angle between an arrow's wings, in degrees, Plot's `headAngle`.
+    pub head_angle: f32,
+    /// The length of an arrow's wings, in pixels, Plot's `headLength`.
+    pub head_length: f32,
+    /// The length of a spike or vector, in pixels, Plot's `length`.
+    pub length: f32,
+    /// A vector's rotation, Plot's `rotate`, in degrees clockwise.
+    pub rotate: f32,
+    /// How a vector sits against its datum, Plot's `anchor`.
+    pub anchor: VectorAnchor,
+    /// The confidence level of a regression's band, Plot's `ci`; zero
+    /// suppresses the band.
+    pub ci: f32,
+    /// The window a Bollinger band averages over, Plot's `n`.
+    pub window: usize,
+    /// The band's multiplier, Plot's `k`.
+    pub k: f32,
+    /// The width of a `hexgrid`'s hexagons, Plot's `binWidth`, in pixels.
+    pub bin_width: f32,
+    /// The value a `waffle` cell stands for, Plot's `unit`.
+    pub unit: f32,
+    /// The gap between a waffle's cells, Plot's `gap`, in pixels.
+    pub gap: f32,
 }
 
 /// How a line or area connects its points, Plot's `curve`.
@@ -459,6 +574,18 @@ impl Default for MarkStyle {
             corner_radius: 0.,
             dx: 0.,
             dy: 0.,
+            bend: 0.,
+            head_angle: 60.,
+            head_length: 8.,
+            length: 12.,
+            rotate: 0.,
+            anchor: VectorAnchor::Middle,
+            ci: 0.95,
+            window: 20,
+            k: 2.,
+            bin_width: 20.,
+            unit: 1.,
+            gap: 1.,
         }
     }
 }
@@ -497,6 +624,10 @@ pub struct Mark {
     pub shift: Option<ShiftConfig>,
     /// Draw the rows in a shuffled order, Plot's `shuffle`.
     pub shuffle: Option<u64>,
+    /// A vector's or spike's length per datum, Plot's `length` channel.
+    pub length: Option<NumberChannel>,
+    /// A vector's rotation per datum, Plot's `rotate` channel, in degrees.
+    pub rotate: Option<NumberChannel>,
 }
 
 /// A [`Mark::select`] configuration, Plot's `select`.
@@ -562,10 +693,22 @@ pub struct ShiftConfig {
 
 impl Mark {
     pub fn new(kind: MarkKind) -> Self {
+        let mut style = MarkStyle::default();
+        // Plot's own defaults for the marks that differ from the shared ones:
+        // a hexgrid is a faint underlay, and a spike is a thin, translucent
+        // triangle rising from its datum.
+        if kind == MarkKind::Hexgrid {
+            style.stroke_opacity = 0.1;
+        }
+        if kind == MarkKind::Spike {
+            style.stroke_width = 1.;
+            style.fill_opacity = 0.3;
+            style.anchor = VectorAnchor::Start;
+        }
         Self {
             kind,
             channels: Channels::default(),
-            style: MarkStyle::default(),
+            style,
             stack: None,
             bin: None,
             sort: None,
@@ -578,6 +721,8 @@ impl Mark {
             map: None,
             shift: None,
             shuffle: None,
+            length: None,
+            rotate: None,
         }
     }
 
@@ -852,6 +997,73 @@ impl Mark {
     /// Draw the rows in a shuffled order, Plot's `shuffle`.
     pub fn shuffle(mut self, seed: u64) -> Self {
         self.shuffle = Some(seed);
+        self
+    }
+
+    /// Curve an arrow by `bend` degrees, Plot's `bend`.
+    pub fn bend(mut self, degrees: f32) -> Self {
+        self.style.bend = degrees;
+        self
+    }
+
+    /// Set the angle between an arrow's wings, Plot's `headAngle`.
+    pub fn head_angle(mut self, degrees: f32) -> Self {
+        self.style.head_angle = degrees;
+        self
+    }
+
+    /// Set the length of an arrow's wings, Plot's `headLength`.
+    pub fn head_length(mut self, pixels: f32) -> Self {
+        self.style.head_length = pixels;
+        self
+    }
+
+    /// Set a spike's or vector's length, Plot's `length`.
+    pub fn length(mut self, pixels: impl Into<NumberChannel>) -> Self {
+        self.length = Some(pixels.into());
+        self
+    }
+
+    /// Set a vector's rotation, Plot's `rotate`, in degrees clockwise.
+    pub fn rotate(mut self, degrees: impl Into<NumberChannel>) -> Self {
+        self.rotate = Some(degrees.into());
+        self
+    }
+
+    /// Set how a vector is anchored at its datum, Plot's `anchor`.
+    pub fn anchor(mut self, anchor: VectorAnchor) -> Self {
+        self.style.anchor = anchor;
+        self
+    }
+
+    /// Set a regression's confidence level; zero draws the line alone.
+    pub fn ci(mut self, level: f32) -> Self {
+        self.style.ci = level;
+        self
+    }
+
+    /// Set a Bollinger band's window and multiplier.
+    pub fn bollinger(mut self, window: usize, k: f32) -> Self {
+        self.style.window = window;
+        self.style.k = k;
+        self
+    }
+
+    /// Set a hexgrid's hexagon width, Plot's `binWidth`.
+    pub fn bin_width(mut self, pixels: f32) -> Self {
+        self.style.bin_width = pixels;
+        self
+    }
+
+    /// Set the value one waffle cell stands for, Plot's `unit`.
+    pub fn unit(mut self, unit: f32) -> Self {
+        self.style.unit = unit;
+        self
+    }
+
+    /// Set the gap between a waffle's cells, Plot's `gap`.
+    pub fn gap(mut self, pixels: f32) -> Self {
+        self.style.gap = pixels;
         self
     }
 }
@@ -1149,6 +1361,72 @@ macro_rules! mark_builder {
                 self.0 = self.0.shuffle(seed);
                 self
             }
+
+            /// Curve an arrow by `bend` degrees, Plot's `bend`.
+            pub fn bend(mut self, degrees: f32) -> Self {
+                self.0 = self.0.bend(degrees);
+                self
+            }
+
+            /// Set the angle between an arrow's wings, Plot's `headAngle`.
+            pub fn head_angle(mut self, degrees: f32) -> Self {
+                self.0 = self.0.head_angle(degrees);
+                self
+            }
+
+            /// Set the length of an arrow's wings, Plot's `headLength`.
+            pub fn head_length(mut self, pixels: f32) -> Self {
+                self.0 = self.0.head_length(pixels);
+                self
+            }
+
+            /// Set a spike's or vector's length, Plot's `length`.
+            pub fn length(mut self, pixels: impl Into<NumberChannel>) -> Self {
+                self.0 = self.0.length(pixels);
+                self
+            }
+
+            /// Set a vector's rotation, Plot's `rotate`, in degrees clockwise.
+            pub fn rotate(mut self, degrees: impl Into<NumberChannel>) -> Self {
+                self.0 = self.0.rotate(degrees);
+                self
+            }
+
+            /// Set how a vector is anchored at its datum, Plot's `anchor`.
+            pub fn anchor(mut self, anchor: VectorAnchor) -> Self {
+                self.0 = self.0.anchor(anchor);
+                self
+            }
+
+            /// Set a regression's confidence level; zero draws the line alone.
+            pub fn ci(mut self, level: f32) -> Self {
+                self.0 = self.0.ci(level);
+                self
+            }
+
+            /// Set a Bollinger band's window and multiplier.
+            pub fn bollinger(mut self, window: usize, k: f32) -> Self {
+                self.0 = self.0.bollinger(window, k);
+                self
+            }
+
+            /// Set a hexgrid's hexagon width, Plot's `binWidth`.
+            pub fn bin_width(mut self, pixels: f32) -> Self {
+                self.0 = self.0.bin_width(pixels);
+                self
+            }
+
+            /// Set the value one waffle cell stands for, Plot's `unit`.
+            pub fn unit(mut self, unit: f32) -> Self {
+                self.0 = self.0.unit(unit);
+                self
+            }
+
+            /// Set the gap between a waffle's cells, Plot's `gap`.
+            pub fn gap(mut self, pixels: f32) -> Self {
+                self.0 = self.0.gap(pixels);
+                self
+            }
         }
     };
 }
@@ -1400,4 +1678,95 @@ mark_builder!(
     /// The frame's outline, Plot's `frame`.
     FrameMark,
     MarkKind::Frame
+);
+
+mark_builder!(
+    /// A text label at each x, Plot's `textX`.
+    TextXMark,
+    MarkKind::TextX
+);
+mark_builder!(
+    /// A text label at each y, Plot's `textY`.
+    TextYMark,
+    MarkKind::TextY
+);
+mark_builder!(
+    /// A cell over one x, Plot's `cellX`.
+    CellXMark,
+    MarkKind::CellX
+);
+mark_builder!(
+    /// A cell over one y, Plot's `cellY`.
+    CellYMark,
+    MarkKind::CellY
+);
+mark_builder!(
+    /// A vector at each x, Plot's `vectorX`.
+    VectorXMark,
+    MarkKind::VectorX
+);
+mark_builder!(
+    /// A vector at each y, Plot's `vectorY`.
+    VectorYMark,
+    MarkKind::VectorY
+);
+mark_builder!(
+    /// A triangular marker, Plot's `spike`.
+    SpikeMark,
+    MarkKind::Spike
+);
+mark_builder!(
+    /// A curved arrow, Plot's `arrow`.
+    ArrowMark,
+    MarkKind::Arrow
+);
+mark_builder!(
+    /// A waffle bar along x, Plot's `waffleX`.
+    WaffleXMark,
+    MarkKind::WaffleX
+);
+mark_builder!(
+    /// A waffle bar along y, Plot's `waffleY`.
+    WaffleYMark,
+    MarkKind::WaffleY
+);
+mark_builder!(
+    /// A static hex grid, Plot's `hexgrid`.
+    HexgridMark,
+    MarkKind::Hexgrid
+);
+mark_builder!(
+    /// A pixel grid, Plot's `raster`.
+    RasterMark,
+    MarkKind::Raster
+);
+mark_builder!(
+    /// A difference chart along x, Plot's `differenceX`.
+    DifferenceXMark,
+    MarkKind::DifferenceX
+);
+mark_builder!(
+    /// A difference chart along y, Plot's `differenceY`.
+    DifferenceYMark,
+    MarkKind::DifferenceY
+);
+mark_builder!(
+    /// A regression of x on y, Plot's `linearRegressionX`.
+    LinearRegressionXMark,
+    MarkKind::LinearRegressionX
+);
+mark_builder!(
+    /// A regression of y on x, Plot's `linearRegressionY`.
+    LinearRegressionYMark,
+    MarkKind::LinearRegressionY
+);
+mark_builder!(
+    /// A moving mean with deviation bands along x, Plot's `bollingerX`.
+    BollingerXMark,
+    MarkKind::BollingerX
+);
+mark_builder!(
+    /// A moving mean with deviation bands along y, Plot's `bollingerY`.
+    BollingerYMark,
+    MarkKind::BollingerY
 );

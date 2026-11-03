@@ -242,13 +242,31 @@ pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         MarkKind::BarY => draw_bars_y(prepared, ctx),
         MarkKind::BarX => draw_bars_x(prepared, ctx),
         MarkKind::Rect | MarkKind::RectX | MarkKind::RectY => draw_rects(prepared, ctx),
-        MarkKind::Cell => draw_cells(prepared, ctx),
+        MarkKind::Cell | MarkKind::CellX | MarkKind::CellY => draw_cells(prepared, ctx),
+        MarkKind::DifferenceX | MarkKind::DifferenceY => draw_differences(prepared, ctx),
+        MarkKind::WaffleX | MarkKind::WaffleY => draw_waffle_bars(prepared, ctx),
+        MarkKind::Hexgrid => draw_hexgrid(prepared, ctx),
+        MarkKind::Raster => draw_raster(prepared, ctx),
+        MarkKind::LinearRegressionX | MarkKind::LinearRegressionY => {
+            crate::render::stat::draw_linear_regression(
+                prepared,
+                ctx,
+                prepared.mark.kind == MarkKind::LinearRegressionX,
+            )
+        }
+        MarkKind::BollingerX | MarkKind::BollingerY => crate::render::stat::draw_bollinger(
+            prepared,
+            ctx,
+            prepared.mark.kind == MarkKind::BollingerX,
+        ),
         MarkKind::RuleX => draw_rules_x(prepared, ctx),
         MarkKind::RuleY => draw_rules_y(prepared, ctx),
-        MarkKind::Text => draw_texts(prepared, ctx),
+        MarkKind::Text | MarkKind::TextX | MarkKind::TextY => draw_texts(prepared, ctx),
         MarkKind::TickX => draw_ticks_x(prepared, ctx),
         MarkKind::TickY => draw_ticks_y(prepared, ctx),
-        MarkKind::Vector => draw_vectors(prepared, ctx),
+        MarkKind::Vector | MarkKind::VectorX | MarkKind::VectorY => draw_vectors(prepared, ctx),
+        MarkKind::Spike => draw_spikes(prepared, ctx),
+        MarkKind::Arrow => draw_arrows(prepared, ctx),
         MarkKind::Link => draw_links(prepared, ctx),
         MarkKind::Tip => draw_tips(prepared, ctx),
         MarkKind::AxisX => draw_axis_x(prepared, ctx),
@@ -649,19 +667,51 @@ fn draw_cells(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let (Some(x0), Some(y0)) = (
-                ctx.frame.x.scale.position(row.x_value()),
-                ctx.frame.y.scale.position(row.y_value()),
-            ) else {
-                continue;
+            // A one-dimensional cell covers the whole frame across the axis
+            // it does not read, since that axis has no bands to fill. Its
+            // extent starts at the frame's edge, not at the datum's index.
+            let (x0, y0, width, height) = match prepared.mark.kind {
+                MarkKind::CellX => {
+                    let Some(x) = ctx.frame.x.scale.position(row.x_value()) else {
+                        continue;
+                    };
+                    (
+                        x,
+                        0.,
+                        cell_extent(&ctx.frame.x.scale),
+                        ctx.frame.plot.size.height.as_f32(),
+                    )
+                }
+                MarkKind::CellY => {
+                    let Some(y) = ctx.frame.y.scale.position(row.y_value()) else {
+                        continue;
+                    };
+                    (
+                        0.,
+                        y,
+                        ctx.frame.plot.size.width.as_f32(),
+                        cell_extent(&ctx.frame.y.scale),
+                    )
+                }
+                _ => {
+                    let (Some(x), Some(y)) = (
+                        ctx.frame.x.scale.position(row.x_value()),
+                        ctx.frame.y.scale.position(row.y_value()),
+                    ) else {
+                        continue;
+                    };
+                    (
+                        x,
+                        y,
+                        cell_extent(&ctx.frame.x.scale),
+                        cell_extent(&ctx.frame.y.scale),
+                    )
+                }
             };
-            let (width, height) = (
-                cell_extent(&ctx.frame.x.scale),
-                cell_extent(&ctx.frame.y.scale),
-            );
+            // A band's position is its center, so the cell straddles it.
             let rect = paint::rect_between(
-                ctx.absolute(point(px(x0), px(y0))),
-                ctx.absolute(point(px(x0 + width), px(y0 + height))),
+                ctx.absolute(point(px(x0 - width / 2.), px(y0 - height / 2.))),
+                ctx.absolute(point(px(x0 + width / 2.), px(y0 + height / 2.))),
             );
             let color = colors.fill(index);
             paint::paint_rect(
@@ -827,32 +877,47 @@ fn tick_span(frame: &Frame, value: &Value, vertical: bool, full: f32) -> (f32, f
     }
 }
 
+/// Plot's `vector`: a stem of `length` pixels through the datum, rotated by
+/// `rotate`, pointing up the frame's y axis.
 fn draw_vectors(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
-    let width = prepared.mark.style.stroke_width.max(1.);
+    let style = &prepared.mark.style;
+    let width = style.stroke_width.max(1.);
+
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let (Some(x0), Some(x1)) = (
-                ctx.frame
-                    .x
-                    .scale
-                    .position(&row.x1.clone().unwrap_or(Value::Number(0.))),
-                ctx.frame.x.scale.position(row.x_value()),
-            ) else {
+            let Some(centre) = position(prepared, ctx, row) else {
                 continue;
             };
-            let (Some(y0), Some(y1)) = (
-                ctx.frame
-                    .y
-                    .scale
-                    .position(&row.y1.clone().unwrap_or(Value::Number(0.))),
-                ctx.frame.y.scale.position(row.y_value()),
-            ) else {
-                continue;
-            };
-            let from = ctx.absolute(point(px(x0), px(y0)));
-            let to = ctx.absolute(point(px(x1), px(y1)));
+            let length = prepared
+                .mark
+                .length
+                .as_ref()
+                .map(|channel| channel.read(&row.row))
+                .unwrap_or(style.length);
+            let rotate = prepared
+                .mark
+                .rotate
+                .as_ref()
+                .map(|channel| channel.read(&row.row))
+                .unwrap_or(style.rotate);
             let color = colors.stroke(index);
+            // The stem's ends, before rotation: the vector points up, so the
+            // start is below the centre.
+            let (start, end) = match style.anchor {
+                crate::mark::VectorAnchor::Start => (0., -length),
+                crate::mark::VectorAnchor::Middle => (length / 2., -length / 2.),
+                crate::mark::VectorAnchor::End => (length, 0.),
+            };
+            let (sin, cos) = rotate.to_radians().sin_cos();
+            let turn = |x: f32, y: f32| {
+                point(
+                    px(centre.x.as_f32() + x * cos - y * sin),
+                    px(centre.y.as_f32() + x * sin + y * cos),
+                )
+            };
+            let from = ctx.absolute(turn(0., start));
+            let to = ctx.absolute(turn(0., end));
             paint::paint_stroke(&[from, to], width, color, ctx.window);
             paint_arrow_head(ctx, from, to, width, color);
         }
@@ -1636,4 +1701,514 @@ fn luminance(color: Hsla) -> f32 {
         }
     };
     0.2126 * channel(rgba.r) + 0.7152 * channel(rgba.g) + 0.0722 * channel(rgba.b)
+}
+
+/// Plot's `spike`: a triangle whose point sits at the datum, `length` tall.
+/// Plot's `spike`: a vector preset that draws a triangle at the datum rather
+/// than a stem with a head.
+fn draw_spikes(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let colors = Colors::resolve(prepared, ctx);
+    let style = &prepared.mark.style;
+
+    ctx.clipped(|ctx| {
+        for (index, row) in prepared.rows.iter().enumerate() {
+            let Some(centre) = position(prepared, ctx, row) else {
+                continue;
+            };
+            let length = prepared
+                .mark
+                .length
+                .as_ref()
+                .map(|channel| channel.read(&row.row))
+                .unwrap_or(style.length);
+            let color = colors.stroke(index);
+            // Plot's spike shape: an apex `length` above the datum, with a base
+            // half as wide as a dot's radius each side.
+            let half = style.radius;
+            let apex = ctx.absolute(point(px(centre.x.as_f32()), px(centre.y.as_f32() - length)));
+            let left = ctx.absolute(point(px(centre.x.as_f32() - half), px(centre.y.as_f32())));
+            let right = ctx.absolute(point(px(centre.x.as_f32() + half), px(centre.y.as_f32())));
+            paint::paint_fill(
+                &[apex, left, right],
+                paint::alpha(color, style.fill_opacity * ctx.appear),
+                ctx.window,
+            );
+            paint::paint_stroke(&[left, apex, right], style.stroke_width, color, ctx.window);
+        }
+    });
+}
+
+fn draw_arrows(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let colors = Colors::resolve(prepared, ctx);
+    let style = &prepared.mark.style;
+    let width = style.stroke_width.max(1.);
+    let bend = style.bend.clamp(-90., 90.);
+    // Plot's head: two wings of `head_length` pixels, `head_angle` degrees
+    // apart, drawn from the tip.
+    let wing_angle = (style.head_angle * std::f32::consts::PI / 180.) / 2.;
+    let wing_scale = style.head_length / 1.5;
+
+    ctx.clipped(|ctx| {
+        for (index, row) in prepared.rows.iter().enumerate() {
+            let (start_x, start_y) = (
+                row.x1.clone().unwrap_or_else(|| row.x_value().clone()),
+                row.y1.clone().unwrap_or_else(|| row.y_value().clone()),
+            );
+            let (end_x, end_y) = (
+                row.x2.clone().unwrap_or_else(|| row.x_value().clone()),
+                row.y2.clone().unwrap_or_else(|| row.y_value().clone()),
+            );
+            let (Some(from), Some(to)) = (
+                ctx.frame.point(&start_x, &start_y),
+                ctx.frame.point(&end_x, &end_y),
+            ) else {
+                continue;
+            };
+            let from = ctx.absolute(from);
+            let to = ctx.absolute(to);
+            let color = colors.stroke(index);
+            let line = (to.x.as_f32() - from.x.as_f32()).hypot(to.y.as_f32() - from.y.as_f32());
+            if line < 1. {
+                continue;
+            }
+
+            let points = if bend != 0. {
+                arc_points(from, to, bend)
+            } else {
+                vec![from, to]
+            };
+            paint::paint_stroke(&points, width, color, ctx.window);
+            // The head points along the path where it arrives, so a bent arrow
+            // carries a head tangent to its arc.
+            let last = &points[points.len() - 1];
+            let previous = &points[points.len() - 2];
+            let end_angle = (last.y.as_f32() - previous.y.as_f32())
+                .atan2(last.x.as_f32() - previous.x.as_f32());
+
+            // The wings are never longer than a third of the shaft, so a short
+            // arrow keeps a proportional head.
+            let head = (wing_scale * width).min(line / 3.);
+            if head <= 0. {
+                continue;
+            }
+            let tip = to;
+            let wing = |side: f32| {
+                let angle = end_angle + side * wing_angle;
+                point(
+                    px(tip.x.as_f32() - head * angle.cos()),
+                    px(tip.y.as_f32() - head * angle.sin()),
+                )
+            };
+            // One path through the tip, so the two wings meet there rather
+            // than joining each other across the head.
+            let wings = [wing(-1.), tip, wing(1.)];
+            paint::paint_stroke(&wings, width, color, ctx.window);
+        }
+    });
+}
+
+/// The points of the circular arc from `from` to `to` that leaves `from` at
+/// `bend` degrees to the chord.
+///
+/// Plot's arrow bends by sweeping a circle through both ends: the arc's radius
+/// follows from the bend angle, and a positive angle curves clockwise on
+/// screen.
+fn arc_points(from: Point<Pixels>, to: Point<Pixels>, bend: f32) -> Vec<Point<Pixels>> {
+    let (ax, ay) = (from.x.as_f32(), from.y.as_f32());
+    let (bx, by) = (to.x.as_f32(), to.y.as_f32());
+    let (dx, dy) = (bx - ax, by - ay);
+    let chord = dx.hypot(dy);
+    let bend_angle = bend.to_radians();
+    // The radius of the circle whose tangent leaves `from` at `bend_angle` to
+    // the chord: `hypot(chord / tan(bend_angle), chord) / 2`.
+    let radius = (chord / bend_angle.tan()).hypot(chord) / 2.;
+    // The circle's centre, on the side the bend curves towards.
+    let sign = if bend_angle > 0. { 1. } else { -1. };
+    let k = sign * (radius * radius - chord * chord / 4.).max(0.).sqrt() / chord;
+    let centre = ((ax + bx) / 2. - dy * k, (ay + by) / 2. + dx * k);
+
+    let start_angle = (ay - centre.1).atan2(ax - centre.0);
+    let end_angle = (by - centre.1).atan2(bx - centre.0);
+    // Sweep the short way round, in the direction the bend asks for.
+    let mut delta = (end_angle - start_angle).rem_euclid(std::f32::consts::TAU);
+    if sign < 0. {
+        delta -= std::f32::consts::TAU;
+    }
+
+    let steps = 24;
+    (0..=steps)
+        .map(|step| {
+            let angle = start_angle + delta * step as f32 / steps as f32;
+            point(
+                px(centre.0 + radius * angle.cos()),
+                px(centre.1 + radius * angle.sin()),
+            )
+        })
+        .collect()
+}
+
+/// Plot's `differenceX`/`differenceY`: the gap between two series as two
+/// areas, one filled where the second is above the first and one where it is
+/// below, with a line along the second.
+fn draw_differences(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    // `differenceY` compares two y values across x, so it runs along x; its
+    // `differenceX` twin compares two x values down the y axis.
+    let along_x = prepared.mark.kind == MarkKind::DifferenceY;
+    // Plot's own fills: green where the second series is above the first,
+    // blue where it is below.
+    let opacity = prepared.mark.style.fill_opacity * ctx.appear;
+    let positive = paint::alpha(crate::scale::hsla_from_hex(0x3ca951), opacity);
+    let negative = paint::alpha(crate::scale::hsla_from_hex(0x4269d0), opacity);
+    let line = ctx.default_stroke(prepared);
+    let width = prepared.mark.style.stroke_width.max(1.);
+
+    // Each row is one position with two values: the point on the axis the
+    // mark runs along, and the two series' positions across it.
+    let placed: Vec<(f32, f32, f32)> = prepared
+        .rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                position_along(ctx, row, along_x)?,
+                position_across(ctx, row, along_x, true)?,
+                position_across(ctx, row, along_x, false)?,
+            ))
+        })
+        .collect();
+
+    // A span is positive where the second series is the larger one. The two
+    // axes invert differently on screen: a larger value sits *higher* on y and
+    // further right on x, so the comparison flips with the axis.
+    let sign =
+        |(_, first, second): &(f32, f32, f32)| difference_is_positive(along_x, *first, *second);
+
+    let origin = ctx.frame.plot.origin;
+    ctx.clipped(|ctx| {
+        let at = |along: f32, across: f32| {
+            origin
+                + if along_x {
+                    point(px(along), px(across))
+                } else {
+                    point(px(across), px(along))
+                }
+        };
+
+        // Consecutive spans of one sign are one area, so a run of them fills as
+        // a single path: filling each span on its own leaves a seam where two
+        // quads meet.
+        let mut start = 0;
+        while start + 1 < placed.len() {
+            let positive_run = sign(&placed[start + 1]);
+            let mut end = start + 1;
+            while end + 1 < placed.len() && sign(&placed[end + 1]) == positive_run {
+                end += 1;
+            }
+            let color = if positive_run { positive } else { negative };
+            let mut polygon: Vec<Point<Pixels>> = (start..=end)
+                .map(|index| at(placed[index].0, placed[index].1))
+                .collect();
+            polygon.extend(
+                (start..=end)
+                    .rev()
+                    .map(|index| at(placed[index].0, placed[index].2)),
+            );
+            paint::paint_fill(&polygon, color, ctx.window);
+            start = end;
+        }
+
+        // The second series' line runs over the areas, as one path so it has no
+        // breaks at the sign changes.
+        let line_path: Vec<Point<Pixels>> = placed
+            .iter()
+            .map(|(along, _, second)| at(*along, *second))
+            .collect();
+        paint::paint_stroke(&line_path, width, line, ctx.window);
+    });
+}
+
+/// Whether a difference span's second series is the larger one, given both
+/// series' positions across the axis the mark runs along.
+///
+/// The screen inverts the axes differently: a larger value sits higher on y but
+/// further right on x, so the same comparison reads opposite on each.
+fn difference_is_positive(along_x: bool, first: f32, second: f32) -> bool {
+    if along_x {
+        second < first
+    } else {
+        second > first
+    }
+}
+
+/// A row's position along the axis a difference mark runs along.
+fn position_along(ctx: &DrawContext<'_>, row: &PreparedRow, along_x: bool) -> Option<f32> {
+    if along_x {
+        ctx.frame.x.scale.position(row.x_value())
+    } else {
+        ctx.frame.y.scale.position(row.y_value())
+    }
+}
+
+/// A row's first or second value, on the axis across the difference.
+fn position_across(
+    ctx: &DrawContext<'_>,
+    row: &PreparedRow,
+    along_x: bool,
+    first: bool,
+) -> Option<f32> {
+    let value = if along_x {
+        if first {
+            row.y1.clone().or_else(|| Some(row.y_value().clone()))
+        } else {
+            row.y2.clone().or_else(|| Some(row.y_value().clone()))
+        }
+    } else if first {
+        row.x1.clone().or_else(|| Some(row.x_value().clone()))
+    } else {
+        row.x2.clone().or_else(|| Some(row.x_value().clone()))
+    };
+    let scale = if along_x {
+        &ctx.frame.y.scale
+    } else {
+        &ctx.frame.x.scale
+    };
+    scale.position(value.as_ref()?)
+}
+
+/// Plot's `waffleX`/`waffleY`: a bar's interval divided into unit cells, so a
+/// value reads as a count of squares rather than as a length.
+///
+/// The cells wrap: the bar's thickness sets how many fit across it, and the
+/// interval's length fills rows (or columns) of that many cells. A bar whose
+/// value is not a whole number of cells ends with a partial row.
+fn draw_waffle_bars(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let colors = Colors::resolve(prepared, ctx);
+    let style = &prepared.mark.style;
+    let along_x = prepared.mark.kind == MarkKind::WaffleX;
+    let unit = style.unit.max(f32::MIN_POSITIVE);
+    let gap = style.gap;
+
+    ctx.clipped(|ctx| {
+        for (index, row) in prepared.rows.iter().enumerate() {
+            let Some(centre) = (if along_x {
+                ctx.frame.y.scale.position(row.y_value())
+            } else {
+                ctx.frame.x.scale.position(row.x_value())
+            }) else {
+                continue;
+            };
+            let interval = if along_x {
+                row.x_interval()
+            } else {
+                row.y_interval()
+            };
+            let Some((start, end)) = interval else {
+                continue;
+            };
+            let (Some(a), Some(b)) = (
+                if along_x {
+                    ctx.frame.x.scale.position(&start)
+                } else {
+                    ctx.frame.y.scale.position(&start)
+                },
+                if along_x {
+                    ctx.frame.x.scale.position(&end)
+                } else {
+                    ctx.frame.y.scale.position(&end)
+                },
+            ) else {
+                continue;
+            };
+
+            // One unit along the value axis, in pixels: the interval's
+            // pixel length divided by how many units it spans.
+            let span = (end.as_number().unwrap_or(0.) - start.as_number().unwrap_or(0.)).abs();
+            let scale = (b - a).abs() / (span / unit as f64) as f32;
+            if !scale.is_finite() || scale <= 0. {
+                continue;
+            }
+            let bar = if along_x {
+                bar_width_x(ctx.frame, prepared)
+            } else {
+                bar_width_y(ctx.frame, prepared)
+            };
+            // How many cells fit across the bar, Plot's `multiple`: the bar
+            // stays roughly as wide as its cells are tall.
+            let across = ((bar / scale).sqrt().floor() as usize).max(1);
+            // A cell is as wide as the bar allows and one row tall, where a
+            // row holds `across` units.
+            let cell_width = (bar / across as f32).min(scale * across as f32);
+            let cell_height = scale * across as f32;
+            let low = a.min(b);
+            let count = ((b - a).abs() / scale).round().max(1.) as usize;
+            let color = colors.fill(index);
+
+            for step in 0..count {
+                let line = step / across;
+                let column = step % across;
+                let (x, y, w, h) = if along_x {
+                    (
+                        low + line as f32 * cell_height,
+                        centre - bar / 2. + column as f32 * cell_width,
+                        cell_width - gap,
+                        cell_height - gap,
+                    )
+                } else {
+                    (
+                        centre - bar / 2. + column as f32 * cell_width,
+                        low + line as f32 * cell_height,
+                        cell_width - gap,
+                        cell_height - gap,
+                    )
+                };
+                let rect = paint::rect_between(
+                    ctx.absolute(point(px(x), px(y))),
+                    ctx.absolute(point(px(x + w), px(y + h))),
+                );
+                paint::paint_rect(
+                    rect,
+                    style.corner_radius,
+                    paint::alpha(color, ctx.row_fill_opacity(prepared, row)),
+                    ctx.window,
+                );
+            }
+        }
+    });
+}
+
+/// Plot's `hexgrid`: a static lattice of hexagons under the data, so a hexbin
+/// chart's bins sit on a visible grid. The mark reads no data.
+fn draw_hexgrid(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let style = &prepared.mark.style;
+    let plot = ctx.frame.plot;
+    let color = style.stroke;
+    // A pointy-top hexagon: `binWidth` is its horizontal width, twice its
+    // circumradius.
+    let rx = style.bin_width.max(1.) / 2.;
+    let ry = rx * (2. / 3f32.sqrt());
+    let wx = rx * 2.;
+    let wy = ry * 1.5;
+    // The lattice's origin, half a pixel across: the same offset `hexbin` bins
+    // on, so the two marks' hexagons coincide.
+    let (ox, oy) = (0.5_f32, 0.0_f32);
+    let origin = ctx.absolute(gpui::point(px(0.), px(0.)));
+    let width = plot.size.width.as_f32();
+    let height = plot.size.height.as_f32();
+    let columns = (width / wx).ceil() as i32 + 2;
+    let rows = (height / wy).ceil() as i32 + 2;
+
+    ctx.clipped(|ctx| {
+        for row in -1..rows {
+            for column in -1..columns {
+                let cx = column as f32 * wx + (row & 1) as f32 * rx + ox;
+                let cy = row as f32 * wy + oy;
+                // Plot strokes the hexagon's top, right and bottom edges, not
+                // the left: the neighbour to the left draws that edge, so every
+                // edge is painted exactly once and the lattice reads evenly.
+                let points = [
+                    gpui::point(origin.x + px(cx), origin.y + px(cy - ry)),
+                    gpui::point(origin.x + px(cx + rx), origin.y + px(cy - ry / 2.)),
+                    gpui::point(origin.x + px(cx + rx), origin.y + px(cy + ry / 2.)),
+                    gpui::point(origin.x + px(cx), origin.y + px(cy + ry)),
+                ];
+                paint::paint_stroke(
+                    &points,
+                    style.stroke_width,
+                    paint::alpha(color, style.stroke_opacity),
+                    ctx.window,
+                );
+            }
+        }
+    });
+}
+
+/// Plot's `raster`: a dense pixel grid, one rectangle per datum, colored from
+/// its fill. The grid comes from each row's position and the nearest gap
+/// between positions, so a row's rectangle covers the cell around it.
+fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let colors = Colors::resolve(prepared, ctx);
+    if prepared.rows.is_empty() {
+        return;
+    }
+
+    // The raster's cells are the gaps between adjacent positions on each
+    // axis; a single row spans the frame.
+    let cell = |values: Vec<Option<f32>>, extent: f32| -> f32 {
+        let mut positions: Vec<f32> = values.into_iter().flatten().collect();
+        positions.sort_by(f32::total_cmp);
+        let gap = positions
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .filter(|gap| *gap > 0.)
+            .reduce(f32::min)
+            .unwrap_or(extent);
+        gap.max(1.)
+    };
+    let width = cell(
+        prepared
+            .rows
+            .iter()
+            .map(|row| ctx.frame.x.scale.position(row.x_value()))
+            .collect(),
+        ctx.frame.plot.size.width.as_f32(),
+    );
+    let height = cell(
+        prepared
+            .rows
+            .iter()
+            .map(|row| ctx.frame.y.scale.position(row.y_value()))
+            .collect(),
+        ctx.frame.plot.size.height.as_f32(),
+    );
+
+    ctx.clipped(|ctx| {
+        for (index, row) in prepared.rows.iter().enumerate() {
+            let (Some(x), Some(y)) = (
+                ctx.frame.x.scale.position(row.x_value()),
+                ctx.frame.y.scale.position(row.y_value()),
+            ) else {
+                continue;
+            };
+            let rect = paint::rect_between(
+                ctx.absolute(point(px(x - width / 2.), px(y - height / 2.))),
+                ctx.absolute(point(px(x + width / 2.), px(y + height / 2.))),
+            );
+            paint::paint_rect(
+                rect,
+                0.,
+                paint::alpha(colors.fill(index), ctx.row_fill_opacity(prepared, row)),
+                ctx.window,
+            );
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_difference_fills_where_the_second_series_leads() {
+        // A larger value is higher on y and further right on x, so "the second
+        // series is larger" is the smaller screen position on y and the larger
+        // one on x.
+        assert!(difference_is_positive(true, 300., 200.));
+        assert!(!difference_is_positive(true, 200., 300.));
+        assert!(difference_is_positive(false, 100., 200.));
+        assert!(!difference_is_positive(false, 200., 100.));
+    }
+
+    #[test]
+    fn a_waffle_wraps_its_cells_across_the_bar() {
+        // Plot's layout: the number of cells across is the largest square that
+        // fits the bar's thickness, and the cell is no wider than that square.
+        let across = ((60_f32 / 10_f32).sqrt().floor() as usize).max(1);
+        assert_eq!(across, 2);
+        let cell_width = (60_f32 / across as f32).min(10_f32 * across as f32);
+        assert_eq!(cell_width, 20.);
+        let cell_height = 10_f32 * across as f32;
+        assert_eq!(cell_height, 20.);
+        // A value of 5 units fills two rows of two cells and a partial third.
+        let count = (50_f32 / 10_f32).round() as usize;
+        assert_eq!(count, 5);
+    }
 }

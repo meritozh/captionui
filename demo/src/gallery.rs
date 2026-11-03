@@ -222,6 +222,69 @@ pub fn examples() -> Vec<Example> {
             height: 440.,
             build: curves,
         },
+        Example {
+            title: "Regression",
+            section: "Marks / linearRegression",
+            description: "A least-squares fit through a noisy series, with its 95% confidence band.",
+            height: 440.,
+            build: regression,
+        },
+        Example {
+            title: "Bollinger bands",
+            section: "Marks / bollinger",
+            description: "A 20-day moving mean with bands at two standard deviations.",
+            height: 440.,
+            build: bollinger_bands,
+        },
+        Example {
+            title: "Difference chart",
+            section: "Marks / difference",
+            description: "Two series filled green or blue by which one leads on each day.",
+            height: 440.,
+            build: difference_chart,
+        },
+        Example {
+            title: "Waffle bars",
+            section: "Marks / waffle",
+            description: "Bars divided into unit cells, so a value reads as a count of squares.",
+            height: 440.,
+            build: waffle_bars,
+        },
+        Example {
+            title: "Hexgrid",
+            section: "Marks / hexgrid",
+            description: "Hexagonal bins drawn on a static hexgrid, so every bin's cell is visible.",
+            height: 440.,
+            build: hexgrid_plot,
+        },
+        Example {
+            title: "Cell bands",
+            section: "Marks / cellX",
+            description: "A one-dimensional cell over each date, spanning the frame.",
+            height: 300.,
+            build: cell_bands,
+        },
+        Example {
+            title: "Vector field",
+            section: "Marks / vector",
+            description: "A vector at each step, plus arrows between two series' points.",
+            height: 440.,
+            build: vector_field,
+        },
+        Example {
+            title: "Spikes and arrows",
+            section: "Marks / spike, arrow",
+            description: "Spikes marking each peak, with a bent arrow annotating the gap between them.",
+            height: 440.,
+            build: spikes_and_arrows,
+        },
+        Example {
+            title: "Raster",
+            section: "Marks / raster",
+            description: "A grid of pixels, one per datum, colored by its value.",
+            height: 360.,
+            build: raster_plot,
+        },
     ]
 }
 
@@ -785,4 +848,237 @@ pub fn range_by_name(name: &str) -> ColorRange {
         "blue-red" => ColorRange::blue_red(),
         _ => ColorRange::observable10(),
     }
+}
+
+fn regression() -> Plot {
+    let data = data::noisy_series();
+    Plot::new(data)
+        .title("Noisy series")
+        .subtitle("A least-squares fit with its 95% band")
+        .dot(|mark| mark.x("date").y("value").r(2.).opacity(0.35))
+        .linear_regression_y(|mark| {
+            mark.x("date")
+                .y("value")
+                .ci(0.95)
+                .fill(theme_color(0.55, 0.6, 0.55, 0.16))
+                .stroke(theme_color(0.55, 0.7, 0.42, 1.))
+                .stroke_width(2.)
+        })
+        .y_axis(true)
+}
+
+fn bollinger_bands() -> Plot {
+    let data = data::noisy_series();
+    Plot::new(data)
+        .title("Noisy series")
+        .subtitle("A 20-day mean with bands at two standard deviations")
+        .line(|mark| mark.x("date").y("value").stroke_width(1.).opacity(0.4))
+        .bollinger_y(|mark| {
+            mark.x("date")
+                .y("value")
+                .bollinger(20, 2.)
+                .fill(theme_color(0.58, 0.65, 0.6, 1.))
+                .fill_opacity(0.2)
+                .stroke(theme_color(0.58, 0.7, 0.45, 1.))
+                .stroke_width(1.5)
+        })
+        .y_axis(true)
+}
+
+fn difference_chart() -> Plot {
+    let data = data::economics();
+    // The actual series and a straight trend through it: the gap between them
+    // flips sign often, so both fills show.
+    let rows: Vec<Table> = data
+        .iter()
+        .enumerate()
+        .map(|(month, row)| {
+            Table::empty()
+                .with("date", row.value("date"))
+                .with("actual", row.value("gdp"))
+                .with("trend", Value::Number(1800. + month as f64 * 8.))
+        })
+        .collect();
+    Plot::new(rows)
+        .title("GDP against its trend")
+        .subtitle("Green where the trend runs above the actual, blue where below")
+        .difference_y(|mark| mark.x("date").y1("actual").y2("trend"))
+        .y_axis(true)
+        .grid(false)
+}
+
+fn waffle_bars() -> Plot {
+    let data = data::sales();
+    Plot::new(data)
+        .title("Sales by region")
+        .subtitle("Each square is 10 units, stacked across the bar")
+        .waffle_y(|mark| {
+            mark.x("region")
+                .y("sales")
+                .unit(10.)
+                .gap(2.)
+                .corner_radius(2.)
+        })
+        .y_zero(true)
+        .grid(false)
+}
+
+fn hexgrid_plot() -> Plot {
+    let data = data::cloud();
+    Plot::new(data)
+        .title("Two clusters")
+        .subtitle("Hexbin on a visible hexgrid")
+        .hexgrid(|mark| mark.bin_width(20.))
+        .hexbin(|mark| mark.x("x").y("y"))
+        .grid(false)
+}
+
+fn cell_bands() -> Plot {
+    // A background strip of monthly cells, with the month's mean drawn over
+    // it: `cellX` fills the frame's height, so it reads as a calendar band.
+    let data = data::temperature();
+    let mut months: Vec<(String, f64, usize)> = Vec::new();
+    for row in data.iter() {
+        let Some(month) = row
+            .value("date")
+            .as_date()
+            .map(|date| date.format("%Y-%m").to_string())
+        else {
+            continue;
+        };
+        let temperature = row.number("temperature").unwrap_or(0.);
+        match months.iter_mut().find(|(name, ..)| *name == month) {
+            Some((_, total, count)) => {
+                *total += temperature;
+                *count += 1;
+            }
+            None => months.push((month, temperature, 1)),
+        }
+    }
+    let cells: Vec<Table> = months
+        .into_iter()
+        .map(|(month, total, count)| {
+            Table::empty()
+                .with("month", Value::text(month))
+                .with("mean", Value::Number(total / count as f64))
+        })
+        .collect();
+
+    Plot::new(cells)
+        .title("Temperature by month")
+        .subtitle("A cell per month, with the monthly mean over it")
+        .cell_x(|mark| {
+            mark.x("month").fill(|row: &Table| {
+                let index = row
+                    .text("month")
+                    .and_then(|month| month.chars().last())
+                    .and_then(|digit| digit.to_digit(10))
+                    .unwrap_or(0);
+                theme_color(index as f32 / 12. * 0.5 + 0.5, 0.45, 0.7, 0.3)
+            })
+        })
+        .line(|mark| {
+            mark.x("month")
+                .y("mean")
+                .curve(Curve::Linear)
+                .stroke_width(2.)
+                .stroke(theme_color(0.58, 0.7, 0.42, 1.))
+        })
+        .dot(|mark| {
+            mark.x("month")
+                .y("mean")
+                .r(4.)
+                .stroke(theme_color(0.58, 0.7, 0.4, 1.))
+        })
+        .grid(false)
+        .y_axis(true)
+}
+
+fn vector_field() -> Plot {
+    let data = data::economics();
+    let rows: Vec<Table> = data
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let date = row.value("date");
+            let gdp = row.number("gdp")?;
+            Some(
+                Table::empty()
+                    .with("index", Value::Number(index as f64))
+                    .with("date", date)
+                    .with("gdp", Value::Number(gdp))
+                    .with("length", Value::Number(6. + gdp.sqrt() * 0.4)),
+            )
+        })
+        .collect();
+    Plot::new(rows)
+        .title("Growth")
+        .subtitle("A vector at each reading, its length scaled by the value")
+        .dot(|mark| mark.x("date").y("gdp").r(1.5).opacity(0.5))
+        .vector(|mark| {
+            mark.x("date")
+                .y("gdp")
+                .length(|row: &Table| row.number("length").unwrap_or(12.) as f32)
+        })
+        .y_axis(true)
+}
+
+fn spikes_and_arrows() -> Plot {
+    let data = data::curve_points();
+    // One annotation row carries the arrow's two ends; the spikes read the
+    // series rows and skip the row that has no x or y.
+    let mut rows = data.clone();
+    rows.push(
+        Table::empty()
+            .with("x1", Value::Number(0.5))
+            .with("y1", Value::Number(20.))
+            .with("x2", Value::Number(10.5))
+            .with("y2", Value::Number(72.)),
+    );
+
+    Plot::new(rows)
+        .title("Spikes and an arrow")
+        .subtitle("A spike at each reading, and an arrow bent between two points")
+        .line(|mark| mark.x("step").y("value").curve(Curve::Linear))
+        .dot(|mark| mark.x("step").y("value").r(2.5))
+        .spike(|mark| mark.x("step").y("value").length(22.))
+        .arrow(|mark| {
+            mark.x1("x1")
+                .y1("y1")
+                .x2("x2")
+                .y2("y2")
+                .bend(-24.)
+                .stroke_width(1.5)
+        })
+        .y_axis(true)
+        .grid(false)
+}
+
+fn raster_plot() -> Plot {
+    let data = data::heatmap();
+    // A cell per (day, hour), colored by activity: a raster is a cell with no
+    // gap and no rounding.
+    let cells: Vec<Table> = data
+        .iter()
+        .map(|row| {
+            let activity = row.number("activity").unwrap_or(0.);
+            Table::empty()
+                .with("day", row.value("day"))
+                .with("hour", row.value("hour"))
+                .with("activity", Value::Number(activity))
+                .with("fill", Value::Number(activity / 60.))
+        })
+        .collect();
+    Plot::new(cells)
+        .title("Activity by hour and day")
+        .subtitle("One raster cell per reading, colored by its value")
+        .raster(|mark| {
+            mark.x("day")
+                .y("hour")
+                .fill(|row: &Table| ramp(row.number("fill").unwrap_or(0.)))
+        })
+        .x_scale(gpui_plot::frame::ScaleKind::Band)
+        .y_scale(gpui_plot::frame::ScaleKind::Band)
+        .grid(false)
+        .legend(LegendPosition::None)
 }

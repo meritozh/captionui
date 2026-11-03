@@ -398,6 +398,186 @@ impl Plot {
         self
     }
 
+    /// Add a `textX` mark, Plot's `textX`: A text label at each x with no y.
+    pub fn text_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::TextXMark) -> crate::mark::TextXMark,
+    ) -> Self {
+        let builder = configure(crate::mark::TextXMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `textY` mark, Plot's `textY`: A text label at each y with no x.
+    pub fn text_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::TextYMark) -> crate::mark::TextYMark,
+    ) -> Self {
+        let builder = configure(crate::mark::TextYMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `cellX` mark, Plot's `cellX`: A cell over one x with no y.
+    pub fn cell_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::CellXMark) -> crate::mark::CellXMark,
+    ) -> Self {
+        let builder = configure(crate::mark::CellXMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `cellY` mark, Plot's `cellY`: A cell over one y with no x.
+    pub fn cell_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::CellYMark) -> crate::mark::CellYMark,
+    ) -> Self {
+        let builder = configure(crate::mark::CellYMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `vectorX` mark, Plot's `vectorX`: A vector at each x.
+    pub fn vector_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::VectorXMark) -> crate::mark::VectorXMark,
+    ) -> Self {
+        let builder = configure(crate::mark::VectorXMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `vectorY` mark, Plot's `vectorY`: A vector at each y.
+    pub fn vector_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::VectorYMark) -> crate::mark::VectorYMark,
+    ) -> Self {
+        let builder = configure(crate::mark::VectorYMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `spike` mark, Plot's `spike`: A triangular marker at each datum.
+    pub fn spike(
+        mut self,
+        configure: impl FnOnce(crate::mark::SpikeMark) -> crate::mark::SpikeMark,
+    ) -> Self {
+        let builder = configure(crate::mark::SpikeMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `arrow` mark, Plot's `arrow`: A curved arrow between two points.
+    pub fn arrow(
+        mut self,
+        configure: impl FnOnce(crate::mark::ArrowMark) -> crate::mark::ArrowMark,
+    ) -> Self {
+        let builder = configure(crate::mark::ArrowMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `waffleX` mark, Plot's `waffleX`: A waffle bar along x.
+    pub fn waffle_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::WaffleXMark) -> crate::mark::WaffleXMark,
+    ) -> Self {
+        let builder = configure(crate::mark::WaffleXMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `waffleY` mark, Plot's `waffleY`: A waffle bar along y.
+    pub fn waffle_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::WaffleYMark) -> crate::mark::WaffleYMark,
+    ) -> Self {
+        let builder = configure(crate::mark::WaffleYMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `hexgrid` mark, Plot's `hexgrid`: A static hexagonal grid.
+    pub fn hexgrid(
+        mut self,
+        configure: impl FnOnce(crate::mark::HexgridMark) -> crate::mark::HexgridMark,
+    ) -> Self {
+        let builder = configure(crate::mark::HexgridMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `raster` mark, Plot's `raster`: A pixel grid colored from the data.
+    pub fn raster(
+        mut self,
+        configure: impl FnOnce(crate::mark::RasterMark) -> crate::mark::RasterMark,
+    ) -> Self {
+        let builder = configure(crate::mark::RasterMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `differenceX` mark, Plot's `differenceX`: A difference chart along x.
+    pub fn difference_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::DifferenceXMark) -> crate::mark::DifferenceXMark,
+    ) -> Self {
+        let builder = configure(crate::mark::DifferenceXMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `differenceY` mark, Plot's `differenceY`: A difference chart along y.
+    pub fn difference_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::DifferenceYMark) -> crate::mark::DifferenceYMark,
+    ) -> Self {
+        let builder = configure(crate::mark::DifferenceYMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `linearRegressionX` mark, Plot's `linearRegressionX`: A least-squares fit of x on y.
+    pub fn linear_regression_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::LinearRegressionXMark) -> crate::mark::LinearRegressionXMark,
+    ) -> Self {
+        let builder = configure(crate::mark::LinearRegressionXMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `linearRegressionY` mark, Plot's `linearRegressionY`: A least-squares fit of y on x.
+    pub fn linear_regression_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::LinearRegressionYMark) -> crate::mark::LinearRegressionYMark,
+    ) -> Self {
+        let builder = configure(crate::mark::LinearRegressionYMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `bollingerX` mark, Plot's `bollingerX`: A moving mean with deviation bands along x.
+    pub fn bollinger_x(
+        mut self,
+        configure: impl FnOnce(crate::mark::BollingerXMark) -> crate::mark::BollingerXMark,
+    ) -> Self {
+        let builder = configure(crate::mark::BollingerXMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
+    /// Add a `bollingerY` mark, Plot's `bollingerY`: A moving mean with deviation bands along y.
+    pub fn bollinger_y(
+        mut self,
+        configure: impl FnOnce(crate::mark::BollingerYMark) -> crate::mark::BollingerYMark,
+    ) -> Self {
+        let builder = configure(crate::mark::BollingerYMark::new());
+        self.marks.push(builder.into_mark());
+        self
+    }
+
     pub fn rule_y(
         mut self,
         configure: impl FnOnce(crate::mark::RuleYMark) -> crate::mark::RuleYMark,
@@ -1228,8 +1408,8 @@ fn marks_use_band(prepared: &[PreparedMark], along_x: bool) -> bool {
         }
         match prepared.mark.kind {
             // A bar's width and a cell's extent fill a band.
-            MarkKind::BarY | MarkKind::Cell if along_x => true,
-            MarkKind::BarX | MarkKind::Cell if !along_x => true,
+            MarkKind::BarY | MarkKind::Cell | MarkKind::WaffleY if along_x => true,
+            MarkKind::BarX | MarkKind::Cell | MarkKind::WaffleX if !along_x => true,
             // A band `y` is the ordinal secondary axis of tickX, and the
             // category axis of the box and violin marks.
             MarkKind::TickX | MarkKind::BoxX | MarkKind::ViolinX | MarkKind::DensityX

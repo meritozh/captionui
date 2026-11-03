@@ -7,6 +7,7 @@
 
 pub(crate) mod basic;
 pub(crate) mod radial;
+pub(crate) mod stat;
 
 use gpui::{Hsla, SharedString};
 
@@ -314,11 +315,15 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
     // A bar's length channel becomes its interval: Plot's `barY` grows from
     // zero to `y`, or from `y1` to `y2` when both are given.
     match mark.kind {
-        MarkKind::BarY | MarkKind::AreaY if y1.is_null() && y2.is_null() && !y.is_null() => {
+        MarkKind::BarY | MarkKind::AreaY | MarkKind::WaffleY
+            if y1.is_null() && y2.is_null() && !y.is_null() =>
+        {
             y1 = Value::Number(0.);
             y2 = y.clone();
         }
-        MarkKind::BarX | MarkKind::AreaX if x1.is_null() && x2.is_null() && !x.is_null() => {
+        MarkKind::BarX | MarkKind::AreaX | MarkKind::WaffleX
+            if x1.is_null() && x2.is_null() && !x.is_null() =>
+        {
             x1 = Value::Number(0.);
             x2 = x.clone();
         }

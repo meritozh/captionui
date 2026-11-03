@@ -3,6 +3,8 @@
 //! A radial mark places its rows on an arc rather than on the x and y axes; its
 //! domain is the sum of its values, not the frame's extents.
 
+use std::collections::HashMap;
+
 use gpui::{Point, point, px};
 
 use crate::mark::MarkKind;
@@ -542,44 +544,88 @@ fn draw_density(prepared: &PreparedMark, ctx: &mut DrawContext<'_>, along_x: boo
     });
 }
 
+/// Plot's `hexbin`: points binned into hexagons on the same lattice the
+/// `hexgrid` mark draws, so the two align.
+///
+/// The binning is Plot's `hbin`: the point is rounded onto the nearest hex
+/// center, and when it falls near a hexagon's corner the neighbouring center
+/// wins if it is closer. The lattice's origin is offset by half a pixel, which
+/// keeps the frame's rightmost values out of a floating bin beyond the edge.
 fn draw_hexbin(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
-    let plot = ctx.frame.plot;
-    let side = plot.size.width.as_f32().min(plot.size.height.as_f32());
-    let radius = (side / 18.).max(4.);
+    let bin_width = prepared.mark.style.bin_width.max(2.);
+    // The lattice's spacing: `dx` across, and rows `dy` apart.
+    let dx = bin_width;
+    let dy = dx * (1.5 / 3f32.sqrt());
+    let (ox, oy) = (0.5_f32, 0.0_f32);
 
-    // Bin points into hexagon cells keyed by their row and column, then draw
-    // each cell with the count's color.
-    let mut cells: std::collections::HashMap<(i32, i32), usize> = std::collections::HashMap::new();
+    // Key by the lattice cell, and keep its center in pixels.
+    let mut cells: HashMap<(i32, i32), (f32, f32, usize)> = HashMap::new();
     for row in prepared.rows.iter() {
-        let Some(position) = ctx.frame.point(row.x_value(), row.y_value()) else {
+        let Some(placed) = ctx.frame.point(row.x_value(), row.y_value()) else {
             continue;
         };
-        let (x, y) = (position.x.as_f32(), position.y.as_f32());
-        let column = (x / (radius * 1.5)).floor() as i32;
-        let line = ((y - if column % 2 == 0 { 0. } else { radius * 0.866 }) / (radius * 1.732))
-            .floor() as i32;
-        *cells.entry((column, line)).or_insert(0) += 1;
+        let (px, py) = (placed.x.as_f32(), placed.y.as_f32());
+        let mut line = ((py - oy) / dy).round();
+        let mut column = ((px - ox) / dx - (line as i32 & 1) as f32 / 2.).round();
+        let fy = (py - oy) / dy - line;
+        // Near a corner, take the neighbouring hexagon when it is nearer.
+        if fy.abs() * 3. > 1. {
+            let fx = (px - ox) / dx - (line as i32 & 1) as f32 / 2. - column;
+            let column2 = column
+                + if (px - ox) / dx - (line as i32 & 1) as f32 / 2. < column {
+                    -0.5
+                } else {
+                    0.5
+                };
+            let line2 = line + if (py - oy) / dy < line { -1. } else { 1. };
+            let fx2 = (px - ox) / dx - (line2 as i32 & 1) as f32 / 2. - column2;
+            let fy2 = (py - oy) / dy - line2;
+            if fx * fx + fy * fy > fx2 * fx2 + fy2 * fy2 {
+                column = column2 + if line as i32 & 1 == 1 { 0.5 } else { -0.5 };
+                line = line2;
+            }
+        }
+        let key = (column as i32, line as i32);
+        let centre = (
+            (column + (line as i32 & 1) as f32 / 2.) * dx + ox,
+            line * dy + oy,
+        );
+        let entry = cells.entry(key).or_insert((centre.0, centre.1, 0));
+        entry.2 += 1;
     }
 
-    let max = cells.values().copied().max().unwrap_or(1).max(1) as f64;
+    let max = cells
+        .values()
+        .map(|(.., count)| *count)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
     let scale = crate::scale::ColorScale::continuous([0., max], ctx.theme.sequential_range());
 
     ctx.clipped(|ctx| {
-        for ((column, line), count) in cells.iter() {
-            let x = *column as f32 * radius * 1.5 + radius;
-            let y = *line as f32 * radius * 1.732
-                + if column % 2 == 0 {
-                    radius
-                } else {
-                    radius * 1.866
-                };
-            let center = ctx.absolute(gpui::point(px(x), px(y)));
-            let points = paint::circle_points(center, radius * 0.95, 6);
+        for (x, y, count) in cells.values() {
+            let center = ctx.absolute(gpui::point(px(*x), px(*y)));
+            // Plot's hexagon symbol, pointy-top: `binWidth` is its full
+            // width, and its corners reach `ry` above and below the centre.
+            let rx = bin_width / 2.;
+            let ry = rx * (2. / 3f32.sqrt());
+            let points = vec![
+                point(px(center.x.as_f32()), px(center.y.as_f32() - ry)),
+                point(px(center.x.as_f32() + rx), px(center.y.as_f32() - ry / 2.)),
+                point(px(center.x.as_f32() + rx), px(center.y.as_f32() + ry / 2.)),
+                point(px(center.x.as_f32()), px(center.y.as_f32() + ry)),
+                point(px(center.x.as_f32() - rx), px(center.y.as_f32() + ry / 2.)),
+                point(px(center.x.as_f32() - rx), px(center.y.as_f32() - ry / 2.)),
+            ];
             let color = scale
                 .color(&Value::Number(*count as f64))
                 .unwrap_or_else(|| colors.fill(0));
-            paint::paint_fill(&points, paint::alpha(color, 0.85), ctx.window);
+            paint::paint_fill(
+                &points,
+                paint::alpha(color, ctx.row_fill_opacity(prepared, &prepared.rows[0])),
+                ctx.window,
+            );
         }
     });
 }

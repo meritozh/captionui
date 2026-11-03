@@ -133,11 +133,13 @@ resolution.
 cargo run -p gpui-plot-demo --example snapshots
 ```
 
-renders all 22 gallery charts through GPUI's headless renderer, writes each to
+renders all 37 gallery charts through GPUI's headless renderer, writes each to
 `demo/snapshots/*.png`, and asserts each painted more than 12 distinct colors.
 This is the check that caught the defects unit tests could not: charts that
 painted nothing, legends over the title, clipped axis labels, stacked bars that
-read pre-stack values, and a categorical palette that was one blue ramp.
+read pre-stack values, a categorical palette that was one blue ramp, a
+regression band painted above its own fit, and a difference chart whose fills
+degenerated to zero area.
 
 ## Coverage against Observable Plot
 
@@ -150,21 +152,25 @@ channel types, the linear-family and ordinal scales with `nice`, `clamp`,
 opacity, with a title and per-mark swatch shapes), axes, grid, tooltips, and
 hover highlighting.
 
+The full mark set now also covers `linearRegressionX`/`Y` with confidence bands,
+`bollingerX`/`Y`, `differenceX`/`Y`, `raster`, `hexgrid` and `hexbin` on Plot's
+own lattice, `cellX`/`cellY`, `textX`/`textY`, `vectorX`/`vectorY`, `vector`,
+`spike`, `arrow`, `waffleX`/`waffleY`, and `boxX`/`boxY`.
+
 Not implemented yet, in the order the work is planned:
 
 1. **Grouping transforms.** `groupX`/`groupY` as mark options (a mark's
    `reduce` covers the common cases) and `find`.
-2. **More marks.** `linearRegression`, `bollinger`, `difference`, `image`,
-   `raster`, `hexgrid`, `cellX`/`cellY`, `textX`/`textY`,
-   `vectorX`/`vectorY`/`spike`/`arrow`, `waffleX`/`waffleY`.
-3. **Faceting** (`fx`/`fy`), which needs a nested-figure layout.
-4. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
-5. **Geo projections**, which are out of scope for a desktop chart library
+2. **Faceting** (`fx`/`fy`), which needs a nested-figure layout.
+3. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
+4. **Geo projections**, which are out of scope for a desktop chart library
    with no basemap ecosystem.
 
 The `tension` option for cardinal curves is also missing; the curves
 themselves (`basis`, `cardinal`, `catmull-rom`, `monotone`, `bump`, `bundle`,
-each with its open and closed variants) are implemented.
+each with its open and closed variants) are implemented. `raster` lacks
+`interpolate`/`width`/`height`, and there is no `image` mark that reads pixels
+from a `src` channel.
 
 `arc` and `contour` are approximations: `arc` reads explicit angles but draws
 no rounded ring caps, and `contour` draws nested density rings rather than
