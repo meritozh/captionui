@@ -120,6 +120,8 @@ pub struct Plot {
     frame_options: FrameOptions,
     title: PlotTitle,
     legend: LegendPosition,
+    /// A heading above the legend's entries, Plot's `legend.label`.
+    legend_title: Option<SharedString>,
     grid: bool,
     x_axis: bool,
     y_axis: bool,
@@ -151,6 +153,7 @@ impl Plot {
             frame_options: FrameOptions::default(),
             title: PlotTitle::default(),
             legend: LegendPosition::default(),
+            legend_title: None,
             grid: true,
             x_axis: true,
             y_axis: true,
@@ -526,6 +529,12 @@ impl Plot {
         self
     }
 
+    /// Give the legend a heading, Plot's `legend.label`.
+    pub fn legend_title(mut self, title: impl Into<SharedString>) -> Self {
+        self.legend_title = Some(title.into());
+        self
+    }
+
     /// Show or hide the grid.
     pub fn grid(mut self, grid: bool) -> Self {
         self.grid = grid;
@@ -736,9 +745,16 @@ impl Plot {
 
         let legend_entries = self.legend_entries(theme, prepared);
         if self.legend != LegendPosition::None && !legend_entries.is_empty() {
+            // A heading above the entries takes one more row on a top or
+            // bottom legend, and one more row of height on a side one.
+            let band = if self.legend_title.is_some() {
+                LEGEND_BAND * 2.
+            } else {
+                LEGEND_BAND
+            };
             match self.legend {
-                LegendPosition::Top => insets.top += LEGEND_BAND,
-                LegendPosition::Bottom => insets.bottom += LEGEND_BAND,
+                LegendPosition::Top => insets.top += band,
+                LegendPosition::Bottom => insets.bottom += band,
                 LegendPosition::Left => {
                     insets.left += self.legend_width(theme, window, &legend_entries)
                 }
@@ -855,11 +871,12 @@ impl Plot {
                 }
             }
             if !series.is_empty() {
-                entries.extend(
-                    series
-                        .into_iter()
-                        .map(|(label, color)| LegendEntry { label, color }),
-                );
+                let shape = legend_shape(mark.mark.kind);
+                entries.extend(series.into_iter().map(|(label, color)| LegendEntry {
+                    label,
+                    color,
+                    shape,
+                }));
             } else if let Some(title) = &mark.mark.title {
                 // A titled mark's swatch is the color it draws in, which for a
                 // line is its stroke: a mark with only a stroke channel is
@@ -875,10 +892,20 @@ impl Plot {
                 entries.push(LegendEntry {
                     label: title.clone(),
                     color,
+                    shape: legend_shape(mark.mark.kind),
                 });
             }
         }
         entries
+    }
+}
+
+/// The swatch shape a mark's legend entries draw.
+fn legend_shape(kind: MarkKind) -> LegendShape {
+    match kind {
+        MarkKind::Line | MarkKind::LineX | MarkKind::LineY => LegendShape::Line,
+        MarkKind::Dot | MarkKind::DotX | MarkKind::DotY => LegendShape::Circle,
+        _ => LegendShape::Square,
     }
 }
 
@@ -900,6 +927,21 @@ fn hover_targets(prepared: &[PreparedMark]) -> Vec<(usize, usize)> {
 struct LegendEntry {
     label: SharedString,
     color: Hsla,
+    /// The shape of the entry's swatch, so a line's legend reads as a line and
+    /// a dot's as a dot rather than every mark sharing one square.
+    shape: LegendShape,
+}
+
+/// The shape a legend swatch draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LegendShape {
+    /// A filled square, Plot's default for a rect or a cell.
+    #[default]
+    Square,
+    /// A horizontal line, for a line or an area's edge.
+    Line,
+    /// A filled circle, for a dot.
+    Circle,
 }
 
 impl Plot {
@@ -1346,16 +1388,53 @@ impl Plot {
         };
         let origin = bounds.origin;
 
-        for entry in entries {
-            paint::paint_rect(
-                Bounds::new(
-                    point(origin.x + px(x), origin.y + px(y + 2.)),
-                    gpui::size(swatch, swatch),
-                ),
-                2.,
-                entry.color,
+        // A legend heading sits on its own row above the entries, so a long
+        // row of entries does not push it off the figure's edge.
+        if let Some(title) = &self.legend_title {
+            let heading = Label::new(
+                title.clone(),
+                theme.label_size,
+                theme.label,
+                FontWeight::SEMIBOLD,
+                font.clone(),
                 window,
             );
+            heading.paint_at(
+                point(origin.x + px(x), origin.y + px(y)),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+            y += LEGEND_BAND;
+            x = LEGEND_MARGIN;
+        }
+
+        for entry in entries {
+            let centre = point(origin.x + px(x + 4.), origin.y + px(y + 6.));
+            match entry.shape {
+                LegendShape::Square => paint::paint_rect(
+                    Bounds::new(
+                        point(origin.x + px(x), origin.y + px(y + 2.)),
+                        gpui::size(swatch, swatch),
+                    ),
+                    2.,
+                    entry.color,
+                    window,
+                ),
+                LegendShape::Line => paint::paint_stroke(
+                    &[
+                        point(px(centre.x.as_f32() - 5.), centre.y),
+                        point(px(centre.x.as_f32() + 5.), centre.y),
+                    ],
+                    2.,
+                    entry.color,
+                    window,
+                ),
+                LegendShape::Circle => {
+                    paint::paint_fill(&paint::circle_points(centre, 4., 20), entry.color, window)
+                }
+            }
             let label = Label::new(
                 entry.label.clone(),
                 theme.label_size,
@@ -1376,6 +1455,11 @@ impl Plot {
                 y += LEGEND_BAND;
             } else {
                 x += LEGEND_SWATCH_GAP + width + entry_gap;
+                // A row that would run past the figure wraps to the next one.
+                if x > bounds.size.width.as_f32() - LEGEND_MARGIN - width {
+                    x = LEGEND_MARGIN;
+                    y += LEGEND_BAND;
+                }
             }
         }
     }

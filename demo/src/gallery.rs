@@ -553,7 +553,9 @@ fn curves() -> Plot {
                 .title(name)
         });
     }
-    plot.legend(LegendPosition::Top).grid(false)
+    plot.legend(LegendPosition::Top)
+        .legend_title("interpolation")
+        .grid(false)
 }
 
 /// A color from HSLA components, for marks that want a specific hue rather
