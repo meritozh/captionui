@@ -3,28 +3,32 @@
 //! This crate follows Observable Plot's model: data is a collection of records,
 //! marks read *channels* from each record, scales turn channel values into
 //! positions and colors, and transforms reshape the data between the two. A
-//! chart is a [`Plot`](plot::Plot) value built from marks, and a
-//! [`Plot`](plot::Plot) renders as a GPUI element.
+//! chart is a [`Plot`] value built from marks, and a [`Plot`] renders as a GPUI
+//! element.
 //!
 //! ```
-//! use gpui_plot::{PlotKind, Value};
+//! use gpui_plot::{Plot, Table, Value};
 //!
-//! let value = Value::text("North");
-//! assert_eq!(value.kind(), PlotKind::Text);
-//! assert_eq!(value.label(), "North");
+//! let data = vec![
+//!     Table::empty().with("x", Value::text("a")).with("y", Value::Number(4.)),
+//!     Table::empty().with("x", Value::text("b")).with("y", Value::Number(7.)),
+//! ];
+//!
+//! let plot = Plot::new(data)
+//!     .dot(|mark| mark.x("x").y("y"));
 //! ```
 //!
 //! The main pieces:
 //!
-//! - [`Table`](table::Table) and [`Dataset`](table::Dataset) hold the data.
+//! - [`Table`] and [`Dataset`] hold the data.
 //! - [`Value`] is the scalar a channel reads.
-//! - [`Mark`](mark::Mark) covers Plot's mark types: dot, line, area, bar, rect,
-//!   cell, rule, text, tick, vector, box, violin, hexbin, density, contour,
-//!   pie, arc, waffle and link.
+//! - [`Mark`] covers Plot's mark types: dot, line, area, bar, rect, cell, rule,
+//!   text, tick, vector, box, violin, hexbin, density, contour, pie, arc,
+//!   waffle and link.
 //! - [`transform`] holds Plot's transforms: group, bin, stack, window, sort,
 //!   filter, normalize.
 //! - [`scale`] holds the scales and color ranges.
-//! - [`Plot`](plot::Plot) assembles them and renders as an element.
+//! - [`Plot`] assembles them and renders as an element.
 
 // GPUI Kit re-exports GPUI at its root; the alias lets this crate and the
 // `IntoPlot` derive spell GPUI paths the way the rest of the ecosystem does.
@@ -36,10 +40,10 @@ pub mod mark;
 pub mod paint;
 pub mod plot;
 pub mod render;
-pub mod theme;
 pub mod scale;
 pub mod style;
 pub mod table;
+pub mod theme;
 pub mod ticks;
 pub mod transform;
 pub mod value;
