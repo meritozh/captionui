@@ -149,24 +149,25 @@ ranges, legends, axes, grid, tooltips, and hover highlighting.
 
 Not implemented yet, in the order the work is planned:
 
-1. **Curves.** Five of Plot's twenty (`natural`, `linear`, `step`,
-   `step-after`, `step-before`); the `basis`, `cardinal`, `catmull-rom`,
-   `monotone` and `bump` families and the `tension` option are missing.
-2. **Legends.** One per categorical color only — no size, opacity or symbol
-   legends, no legend title, no multi-column layout.
-3. **Annotations.** The `tip` mark and the `pointer` transforms; the hover
+1. **Legends.** Size, opacity and symbol legends; only the categorical color
+   legend exists, though it now has a title and per-mark swatch shapes.
+2. **Annotations.** The `tip` mark and the `pointer` transforms; the hover
    tooltip exists but nothing can be pinned to the plot.
-4. **Axis and grid marks.** `axisX`/`axisY` and `gridX`/`gridY` as marks
+3. **Axis and grid marks.** `axisX`/`axisY` and `gridX`/`gridY` as marks
    (axes and grid are currently only plot-level options), and `frame`.
-5. **More transforms.** `select` (min/max per group), `shift`, `map`,
+4. **More transforms.** `select` (min/max per group), `shift`, `map`,
    `groupX`/`groupY`, `find`, `shuffle`.
-6. **More marks.** `linearRegression`, `bollinger`, `difference`, `image`,
+5. **More marks.** `linearRegression`, `bollinger`, `difference`, `image`,
    `raster`, `hexgrid`, `cellX`/`cellY`, `textX`/`textY`,
    `vectorX`/`vectorY`/`spike`/`arrow`, `waffleX`/`waffleY`.
-7. **Faceting** (`fx`/`fy`), which needs a nested-figure layout.
-8. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
-9. **Geo projections**, which are out of scope for a desktop chart library
+6. **Faceting** (`fx`/`fy`), which needs a nested-figure layout.
+7. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
+8. **Geo projections**, which are out of scope for a desktop chart library
    with no basemap ecosystem.
+
+The `tension` option for cardinal curves is also missing; the curves
+themselves (`basis`, `cardinal`, `catmull-rom`, `monotone`, `bump`, `bundle`,
+each with its open and closed variants) are implemented.
 
 `arc` and `contour` are approximations: `arc` reads explicit angles but draws
 no rounded ring caps, and `contour` draws nested density rings rather than
