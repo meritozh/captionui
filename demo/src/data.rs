@@ -138,6 +138,32 @@ pub fn long_stacked() -> Vec<Table> {
     rows
 }
 
+/// Quarterly sales by region and channel, for the facet grid: two categorical
+/// fields to split the figure by, and a quantitative one to draw.
+pub fn faceted_sales() -> Vec<Table> {
+    const REGIONS: [&str; 3] = ["North", "South", "East"];
+    const CHANNELS: [&str; 2] = ["Retail", "Online"];
+    const QUARTERS: [&str; 4] = ["Q1", "Q2", "Q3", "Q4"];
+    let mut rng = Rng::new(29);
+    let mut rows = Vec::with_capacity(REGIONS.len() * CHANNELS.len() * QUARTERS.len());
+
+    for region in REGIONS {
+        for channel in CHANNELS {
+            for quarter in QUARTERS {
+                rows.push(
+                    Table::empty()
+                        .with("region", Value::text(region))
+                        .with("channel", Value::text(channel))
+                        .with("quarter", Value::text(quarter))
+                        .with("sales", Value::Number((rng.next_in(20., 90.)).round())),
+                );
+            }
+        }
+    }
+
+    rows
+}
+
 /// A wide grid of values over two categorical fields, for a heatmap cell mark.
 pub fn heatmap() -> Vec<Table> {
     const COLUMNS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];

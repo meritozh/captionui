@@ -264,6 +264,8 @@ pub struct BandScale {
     inner: ScaleBand<ValueKey>,
     domain: Vec<ValueKey>,
     range: [f32; 2],
+    padding_inner: f32,
+    padding_outer: f32,
 }
 
 impl std::fmt::Debug for BandScale {
@@ -284,17 +286,21 @@ impl BandScale {
             inner,
             domain,
             range,
+            padding_inner: 0.,
+            padding_outer: 0.,
         }
     }
 
     /// Set the inner padding between bands, as a fraction of a step.
     pub fn padding_inner(mut self, padding: f32) -> Self {
+        self.padding_inner = padding;
         self.inner = self.inner.clone().padding_inner(padding);
         self
     }
 
     /// Set the outer padding at the ends of the range, as a fraction of a step.
     pub fn padding_outer(mut self, padding: f32) -> Self {
+        self.padding_outer = padding;
         self.inner = self.inner.clone().padding_outer(padding);
         self
     }

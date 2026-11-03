@@ -109,6 +109,14 @@ right, none) that lays out as a row or a column and reserves its measured width,
 grid lines with optional dashes, x and y axes with per-axis tick counts, and
 margins that shrink to fit the labels actually drawn.
 
+**Faceting.** `fx` splits the figure into columns and `fy` into rows, Plot's
+small multiples: every facet draws the rows whose facet values match it, all
+facets share one x and y scale so they compare directly, and transforms that
+summarize (stack, bin, window, reduce) summarize within their own facet. The
+axes repeat inside each facet along the grid's first column and last row, a
+facet with no data keeps its slot but draws no marks, and the facet values label
+the columns and rows outside the plot.
+
 **Interaction.** Hover tracking with a nearest-datum tooltip, a crosshair, and
 highlighted dots per series; a custom tooltip body via `Plot::tooltip`; and a
 draw-in appear animation (GPUI Kit's `PlotAppear`) that runs once per plot.
@@ -133,7 +141,7 @@ resolution.
 cargo run -p gpui-plot-demo --example snapshots
 ```
 
-renders all 37 gallery charts through GPUI's headless renderer, writes each to
+renders all 38 gallery charts through GPUI's headless renderer, writes each to
 `demo/snapshots/*.png`, and asserts each painted more than 12 distinct colors.
 This is the check that caught the defects unit tests could not: charts that
 painted nothing, legends over the title, clipped axis labels, stacked bars that
@@ -148,9 +156,9 @@ dimensional variants (`dotX`/`dotY`, `lineX`/`lineY`, `rectX`/`rectY`), the
 furniture marks (`axisX`/`axisY`, `gridX`/`gridY`, `frame`) and `tip`, all
 channel types, the linear-family and ordinal scales with `nice`, `clamp`,
 `reverse` and pinned ranges, the transforms above (including `dodge`, `select`,
-`map`, `shift` and `shuffle`), color ranges, legends (color, size and
-opacity, with a title and per-mark swatch shapes), axes, grid, tooltips, and
-hover highlighting.
+`map`, `shift` and `shuffle`), faceting (`fx`/`fy`), color ranges, legends
+(color, size and opacity, with a title and per-mark swatch shapes), axes, grid,
+tooltips, and hover highlighting.
 
 The full mark set now also covers `linearRegressionX`/`Y` with confidence bands,
 `bollingerX`/`Y`, `differenceX`/`Y`, `raster`, `hexgrid` and `hexbin` on Plot's
@@ -161,9 +169,8 @@ Not implemented yet, in the order the work is planned:
 
 1. **Grouping transforms.** `groupX`/`groupY` as mark options (a mark's
    `reduce` covers the common cases) and `find`.
-2. **Faceting** (`fx`/`fy`), which needs a nested-figure layout.
-3. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
-4. **Geo projections**, which are out of scope for a desktop chart library
+2. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
+3. **Geo projections**, which are out of scope for a desktop chart library
    with no basemap ecosystem.
 
 The `tension` option for cardinal curves is also missing; the curves

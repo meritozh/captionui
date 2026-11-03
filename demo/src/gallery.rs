@@ -285,6 +285,13 @@ pub fn examples() -> Vec<Example> {
             height: 360.,
             build: raster_plot,
         },
+        Example {
+            title: "Small multiples",
+            section: "Faceting",
+            description: "One bar chart per region and channel, laid out by fx and fy with shared scales.",
+            height: 440.,
+            build: faceted_bars,
+        },
     ]
 }
 
@@ -1081,4 +1088,16 @@ fn raster_plot() -> Plot {
         .y_scale(gpui_plot::frame::ScaleKind::Band)
         .grid(false)
         .legend(LegendPosition::None)
+}
+
+fn faceted_bars() -> Plot {
+    let data = data::faceted_sales();
+    Plot::new(data)
+        .title("Quarterly sales")
+        .subtitle("One small multiple per region and channel, sharing both scales")
+        .bar_y(|mark| mark.x("quarter").y("sales").corner_radius(2.))
+        .fx("region")
+        .fy("channel")
+        .y_zero(true)
+        .grid(false)
 }

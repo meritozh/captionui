@@ -108,8 +108,17 @@ pub struct FrameOptions {
     pub x_tick_count: usize,
     /// How many ticks the y axis asks for.
     pub y_tick_count: usize,
-    /// The space the frame reserves for its axes and labels.
+    /// The space the frame reserves around the whole grid for its title,
+    /// legend and facet labels.
     pub insets: Insets,
+    /// The space one facet reserves inside its own band for its axes and
+    /// labels. A faceted figure is a grid of small charts, so every facet
+    /// repeats the axis gutters rather than sharing one at the figure's edge.
+    pub facet_insets: Insets,
+    /// The size of one facet's marks area, when the figure is faceted, Plot's
+    /// `innerDimensions`. The x and y scales are laid out in this size rather
+    /// than across the whole figure, because every facet shares them.
+    pub facet_size: Option<[f32; 2]>,
 }
 
 impl Default for FrameOptions {
@@ -141,6 +150,8 @@ impl Default for FrameOptions {
             x_tick_count: 6,
             y_tick_count: 5,
             insets: Insets::default(),
+            facet_insets: Insets::default(),
+            facet_size: None,
         }
     }
 }
@@ -174,8 +185,16 @@ pub struct AxisTick {
 pub struct Frame {
     /// The figure's bounds.
     pub bounds: Bounds<Pixels>,
-    /// The plot's bounds inside the figure.
+    /// The plot's bounds inside the figure: the area the facets' bands fill.
     pub plot: Bounds<Pixels>,
+    /// The space the figure reserves around `plot` for its title, legend and
+    /// facet labels.
+    pub insets: Insets,
+    /// The space each facet reserves inside its band for its own axes.
+    pub facet_insets: Insets,
+    /// The size the x and y scales are laid out in: the plot's size, or one
+    /// facet's when the figure is faceted.
+    pub layout: [f32; 2],
     pub x: Axis,
     pub y: Axis,
 }
@@ -200,6 +219,10 @@ impl Frame {
             size: Size::new(px(plot_width), px(plot_height)),
         };
 
+        // A faceted figure lays its scales out in one facet, which every facet
+        // shares; the frame's own bounds still hold the whole grid.
+        let [facet_width, facet_height] = options.facet_size.unwrap_or([plot_width, plot_height]);
+
         let x = resolve_axis(
             x_values,
             &AxisOptions {
@@ -216,7 +239,7 @@ impl Frame {
                 padding: options.padding,
                 padding_outer: options.padding_outer,
                 tick_count: options.x_tick_count,
-                range: [0., plot_width],
+                range: [0., facet_width],
                 axis: AxisSide::X,
             },
         );
@@ -236,12 +259,20 @@ impl Frame {
                 padding: options.padding,
                 padding_outer: options.padding_outer,
                 tick_count: options.y_tick_count,
-                range: [plot_height, 0.],
+                range: [facet_height, 0.],
                 axis: AxisSide::Y,
             },
         );
 
-        Self { bounds, plot, x, y }
+        Self {
+            bounds,
+            plot,
+            insets,
+            facet_insets: options.facet_insets,
+            layout: [facet_width, facet_height],
+            x,
+            y,
+        }
     }
 
     /// The plot-relative point for a pair of channel values, or `None` when
@@ -256,6 +287,21 @@ impl Frame {
     /// The plot-relative point, moved into the figure's coordinates.
     pub fn absolute(&self, point: Point<Pixels>) -> Point<Pixels> {
         point + self.plot.origin - self.bounds.origin
+    }
+
+    /// A copy of this frame for one facet of a faceted figure.
+    ///
+    /// The scales are already laid out in one facet's size (see
+    /// [`FrameOptions::facet_size`]), which every facet shares, so only the
+    /// plot moves: it sits at the facet's marks area within its band, while
+    /// the frame's bounds still hold the whole figure. The ticks come along
+    /// unchanged, because they are the same values at the same offsets within
+    /// each facet.
+    pub fn facet(&self, plot: Bounds<Pixels>) -> Self {
+        Self {
+            plot,
+            ..self.clone()
+        }
     }
 }
 

@@ -18,6 +18,7 @@ use gpui_kit::base::plot::{
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::plot::tooltip::{CrossLine, Dot, Tooltip};
 
+use crate::facet::{FACET_LABEL_GAP, Grid};
 use crate::frame::{Frame, FrameOptions, Insets, ScaleKind};
 use crate::mark::{Mark, MarkKind};
 use crate::paint::{self, Label};
@@ -26,7 +27,7 @@ use crate::scale::{ColorRange, ColorScale, Transform};
 use crate::style::NumberChannel;
 use crate::table::{Dataset, Table};
 use crate::theme::PlotTheme;
-use crate::value::{PlotKind, Value};
+use crate::value::Value;
 
 /// The height a legend row takes in the frame's margin.
 const LEGEND_BAND: f32 = 20.;
@@ -132,6 +133,13 @@ pub struct Plot {
     tooltip_formatter: Option<TooltipFormatter>,
     color_range: Option<ColorRange>,
     color_field: Option<SharedString>,
+    /// The field that splits the figure into columns, Plot's `fx`.
+    fx: Option<SharedString>,
+    /// The field that splits the figure into rows, Plot's `fy`.
+    fy: Option<SharedString>,
+    /// The resolved facet grid, kept from the last frame so the tooltip
+    /// phases place a facet the same way the marks did.
+    facet_cache: Option<crate::facet::Grid>,
     /// The hovered datum's index in the flattened row list, kept between
     /// frames so the hover presentation can fade out over the last datum.
     hover: Option<usize>,
@@ -164,6 +172,9 @@ impl Plot {
             tooltip_formatter: None,
             color_range: None,
             color_field: None,
+            fx: None,
+            fy: None,
+            facet_cache: None,
             hover: None,
             hover_progress: 0.,
             frame_cache: None,
@@ -935,6 +946,36 @@ impl Plot {
         self
     }
 
+    /// Split the figure into one column per value of `field`, Plot's `fx`.
+    ///
+    /// Every facet draws the rows whose `field` matches it, and the x and y
+    /// scales stay shared across the figure, so the small multiples compare
+    /// directly. A facet axis labels the columns above the plot.
+    pub fn fx(mut self, field: impl Into<SharedString>) -> Self {
+        self.fx = Some(field.into());
+        self
+    }
+
+    /// Split the figure into one row per value of `field`, Plot's `fy`.
+    ///
+    /// A facet axis labels the rows to the right of the plot, and the two
+    /// facet options together make a grid: `fx` varies across a row, `fy`
+    /// down the figure.
+    pub fn fy(mut self, field: impl Into<SharedString>) -> Self {
+        self.fy = Some(field.into());
+        self
+    }
+
+    /// The field that splits the figure into columns, if any.
+    pub fn facet_x(&self) -> Option<&SharedString> {
+        self.fx.as_ref()
+    }
+
+    /// The field that splits the figure into rows, if any.
+    pub fn facet_y(&self) -> Option<&SharedString> {
+        self.fy.as_ref()
+    }
+
     /// The marks, for a caller that wants to inspect them.
     pub fn marks(&self) -> &[Mark] {
         &self.marks
@@ -950,26 +991,53 @@ impl Plot {
         &self.frame_options
     }
 
+    /// The facet grid the plot's `fx`/`fy` fields resolve.
+    ///
+    /// The domains come from the data's values, so a facet exists for every
+    /// value a mark could draw there — the same values Plot's facet band
+    /// scales read.
+    fn facet_grid(&self) -> Grid {
+        let domain = |field: Option<&SharedString>| match field {
+            Some(field) => self
+                .data
+                .values(field)
+                .into_iter()
+                .filter(|value| !value.is_null())
+                .collect(),
+            None => Vec::new(),
+        };
+        Grid::from_values(domain(self.fx.as_ref()), domain(self.fy.as_ref()))
+    }
+
     /// The resolved layout: the insets the frame reserves.
     ///
     /// Plot's margins follow the axes and legend it draws, so the plot shrinks
-    /// to fit them.
-    fn insets(&self, theme: &PlotTheme, window: &mut Window, prepared: &[PreparedMark]) -> Insets {
+    /// to fit them. A faceted figure repeats its axis gutters inside every
+    /// facet, so the axis insets are returned separately from the figure's
+    /// own margins for the title, legend and facet labels.
+    fn insets(
+        &self,
+        theme: &PlotTheme,
+        window: &mut Window,
+        facets: &[Vec<PreparedMark>],
+        grid: &Grid,
+    ) -> (Insets, Insets) {
         let mut insets = Insets {
             top: 8.,
             right: 12.,
             bottom: 8.,
             left: 12.,
         };
+        let mut facet_insets = Insets::default();
 
         if self.x_axis {
-            insets.bottom += axis_gutter(theme.label_size);
+            facet_insets.bottom += axis_gutter(theme.label_size);
         }
         if self.y_axis {
             // The axis line sits at the plot's left edge and its labels
             // right-align against it, one `TEXT_GAP` to its left.
             let widest = self
-                .y_tick_labels(prepared)
+                .y_tick_labels(facets)
                 .into_iter()
                 .map(|label| {
                     paint::measure(&label, theme.label_size, window)
@@ -977,7 +1045,41 @@ impl Plot {
                         .as_f32()
                 })
                 .fold(0.0_f32, f32::max);
-            insets.left += widest + AXIS_LABEL_GAP;
+            facet_insets.left += widest + AXIS_LABEL_GAP;
+        }
+        // A faceted figure draws each facet's axes inside that facet's band,
+        // so its own margins need only hold the facet labels; an unfaceted
+        // one puts its axes in the figure's margins.
+        if grid.is_faceted() {
+            // The bands sit against the grid's edges, so the figure needs a
+            // gutter there for the outermost facet's axis labels to fit in.
+            if self.x_axis {
+                insets.bottom += facet_insets.bottom;
+            }
+            if self.y_axis {
+                insets.left += facet_insets.left;
+            }
+        } else {
+            insets.bottom += facet_insets.bottom;
+            insets.left += facet_insets.left;
+        }
+
+        // A facet axis labels its facets outside the plot: the `fx` values
+        // above each column, the `fy` values to the right of each row.
+        if grid.fx.is_some() {
+            insets.top += theme.label_size.as_f32() + FACET_LABEL_GAP;
+        }
+        if grid.fy.is_some() {
+            let widest = grid
+                .fy_labels()
+                .iter()
+                .map(|label| {
+                    paint::measure(label, theme.label_size, window)
+                        .width
+                        .as_f32()
+                })
+                .fold(0.0_f32, f32::max);
+            insets.right += widest + FACET_LABEL_GAP;
         }
 
         if self.title.text.is_some() {
@@ -987,7 +1089,7 @@ impl Plot {
             }
         }
 
-        let legend_entries = self.legend_entries(theme, prepared);
+        let legend_entries = self.legend_entries(theme, facets);
         if self.legend != LegendPosition::None && !legend_entries.is_empty() {
             // A heading above the entries takes one more row on a top or
             // bottom legend, and one more row of height on a side one; a
@@ -1011,7 +1113,7 @@ impl Plot {
             }
         }
 
-        insets
+        (insets, facet_insets)
     }
 
     /// How many rows a top or bottom legend's entries take once they wrap at
@@ -1086,23 +1188,17 @@ impl Plot {
     }
 
     /// The labels the y axis will draw, for measuring its gutter.
-    fn y_tick_labels(&self, prepared: &[PreparedMark]) -> Vec<SharedString> {
-        let values = self.y_domain_values(prepared);
-        let kind = values
-            .iter()
-            .find(|value| !value.is_null())
-            .map(Value::kind)
-            .unwrap_or(PlotKind::Null);
+    fn y_tick_labels(&self, facets: &[Vec<PreparedMark>]) -> Vec<SharedString> {
+        let values = self.y_domain_values(facets);
         let frame = Frame::resolve(
             Bounds::new(point(px(0.), px(0.)), gpui::size(px(400.), px(200.))),
             &FrameOptions {
                 insets: Insets::default(),
                 ..self.frame_options.clone()
             },
-            &self.x_domain_values(prepared),
+            &self.x_domain_values(facets),
             &values,
         );
-        let _ = kind;
         frame
             .y
             .ticks
@@ -1111,21 +1207,30 @@ impl Plot {
             .collect()
     }
 
-    fn x_domain_values(&self, prepared: &[PreparedMark]) -> Vec<Value> {
-        prepared.iter().flat_map(render::basic::x_values).collect()
+    fn x_domain_values(&self, facets: &[Vec<PreparedMark>]) -> Vec<Value> {
+        facets
+            .iter()
+            .flatten()
+            .flat_map(render::basic::x_values)
+            .collect()
     }
 
-    fn y_domain_values(&self, prepared: &[PreparedMark]) -> Vec<Value> {
-        prepared.iter().flat_map(render::basic::y_values).collect()
+    fn y_domain_values(&self, facets: &[Vec<PreparedMark>]) -> Vec<Value> {
+        facets
+            .iter()
+            .flatten()
+            .flat_map(render::basic::y_values)
+            .collect()
     }
 
     /// The plot's ordinal color scale: the distinct `z` values across every
     /// mark, colored from the theme's palette.
-    fn ordinal_scale(&self, theme: &PlotTheme, prepared: &[PreparedMark]) -> ColorScale {
+    fn ordinal_scale(&self, theme: &PlotTheme, facets: &[Vec<PreparedMark>]) -> ColorScale {
         ColorScale::ordinal(
             crate::scale::dedup(
-                prepared
+                facets
                     .iter()
+                    .flatten()
                     .filter(|mark| mark.mark.channels.fill.is_none())
                     .flat_map(|mark| mark.rows.iter())
                     .filter_map(|row| row.z.as_ref().map(|z| z.key())),
@@ -1135,14 +1240,21 @@ impl Plot {
     }
 
     /// The legend's entries: one per series or one per categorical value.
-    fn legend_entries(&self, theme: &PlotTheme, prepared: &[PreparedMark]) -> Vec<LegendEntry> {
+    ///
+    /// Every facet's marks are read, and an entry appears once however many
+    /// facets draw it: a faceted chart's legend describes the series, not each
+    /// small multiple.
+    fn legend_entries(&self, theme: &PlotTheme, facets: &[Vec<PreparedMark>]) -> Vec<LegendEntry> {
         let mut entries: Vec<LegendEntry> = Vec::new();
         // The color scale spans every mark's `z` values, the way Plot's is one
         // scale for the whole plot: a chart drawn as one line per series has a
         // `z` value in each mark, and each mark's own domain would give every
         // line the first palette color.
-        let ordinal = self.ordinal_scale(theme, prepared);
-        for (index, mark) in prepared.iter().enumerate() {
+        let ordinal = self.ordinal_scale(theme, facets);
+        // Every facet holds the same marks in the same order, so a mark's
+        // place in its facet's list is its place in the plot's.
+        for (index, mark) in facets.iter().flatten().enumerate() {
+            let index = index % self.marks.len().max(1);
             let mut series: Vec<(SharedString, Hsla)> = Vec::new();
             let mark_ordinal = mark.mark.channels.fill.is_none().then(|| ordinal.clone());
             for row in mark.rows.iter() {
@@ -1185,26 +1297,36 @@ impl Plot {
                     .or(mark.mark.channels.stroke.as_ref())
                     .and_then(|channel| mark.rows.first().map(|row| channel.read(&row.row)))
                     .unwrap_or_else(|| theme.palette_color(index));
-                entries.push(LegendEntry {
-                    label: title.clone(),
-                    swatch: LegendSwatch::Color(color),
-                    shape,
-                });
+                if !entries.iter().any(|entry| entry.label == *title) {
+                    entries.push(LegendEntry {
+                        label: title.clone(),
+                        swatch: LegendSwatch::Color(color),
+                        shape,
+                    });
+                }
             }
             // A `r` or `opacity` accessor is a third dimension the color
             // legend cannot show, so it gets a legend of its own: the smallest
             // and largest value, and the middle one when the range is wide.
             if let Some(channel) = &mark.mark.channels.r {
                 let values = numbers(mark, channel);
-                entries.extend(quantity_entries("r", &values, |value| {
-                    LegendSwatch::Size(value.max(1.))
-                }));
+                for entry in
+                    quantity_entries("r", &values, |value| LegendSwatch::Size(value.max(1.)))
+                {
+                    if !entries.iter().any(|existing| existing.label == entry.label) {
+                        entries.push(entry);
+                    }
+                }
             }
             if let Some(channel) = &mark.mark.channels.opacity {
                 let values = numbers(mark, channel);
-                entries.extend(quantity_entries("opacity", &values, |value| {
+                for entry in quantity_entries("opacity", &values, |value| {
                     LegendSwatch::Opacity(value.clamp(0., 1.))
-                }));
+                }) {
+                    if !entries.iter().any(|existing| existing.label == entry.label) {
+                        entries.push(entry);
+                    }
+                }
             }
         }
         entries
@@ -1277,15 +1399,23 @@ fn legend_shape(kind: MarkKind) -> LegendShape {
     }
 }
 
-/// Every `(mark, row)` a pointer can land on, in the order `tooltip_state`
-/// searches them. Both `tooltip_state` and `tooltip` build this list, so the
-/// state's index means the same thing to each.
-fn hover_targets(prepared: &[PreparedMark]) -> Vec<(usize, usize)> {
-    prepared
+/// Every `(facet, mark, row)` a pointer can land on, in the order
+/// `tooltip_state` searches them. Both `tooltip_state` and `tooltip` build
+/// this list, so the state's index means the same thing to each.
+///
+/// A facet draws its marks in the order the marks were declared, and the
+/// facets come in the grid's own order, which is the order `paint` draws in.
+fn hover_targets(facets: &[Vec<PreparedMark>]) -> Vec<(usize, usize, usize)> {
+    facets
         .iter()
         .enumerate()
-        .flat_map(|(mark_index, mark)| {
-            (0..mark.rows.len()).map(move |row_index| (mark_index, row_index))
+        .flat_map(|(cell, prepared)| {
+            prepared
+                .iter()
+                .enumerate()
+                .flat_map(move |(mark_index, mark)| {
+                    (0..mark.rows.len()).map(move |row_index| (cell, mark_index, row_index))
+                })
         })
         .collect()
 }
@@ -1346,24 +1476,31 @@ enum LegendShape {
 impl Plot {
     /// Resolve the frame for `bounds`, including the margins the axes and
     /// title need.
+    ///
+    /// A faceted figure lays its x and y scales out inside one facet, so the
+    /// frame is told that facet's size up front; the plot's own bounds still
+    /// hold the whole grid.
     fn resolve_frame(
         &self,
         bounds: Bounds<Pixels>,
         theme: &PlotTheme,
         window: &mut Window,
-        prepared: &[PreparedMark],
+        facets: &[Vec<PreparedMark>],
+        grid: &Grid,
     ) -> Frame {
         let mut options = self.frame_options.clone();
-        options.insets = self.insets(theme, window, prepared);
+        let (insets, facet_insets) = self.insets(theme, window, facets, grid);
+        options.insets = insets;
+        options.facet_insets = facet_insets;
         // A mark that draws a band on an axis — a bar's width, a cell's
         // extent — needs a band scale there, not a point scale: a point
         // scale puts the first and last category on the plot's edges, and
         // their bands would hang off the plot and be clipped in half. Plot
         // infers `band` for barX/barY/cell and `point` for everything else.
-        if options.x_kind.is_none() && marks_use_band(prepared, true) {
+        if options.x_kind.is_none() && marks_use_band(facets, true) {
             options.x_kind = Some(ScaleKind::Band);
         }
-        if options.y_kind.is_none() && marks_use_band(prepared, false) {
+        if options.y_kind.is_none() && marks_use_band(facets, false) {
             options.y_kind = Some(ScaleKind::Band);
         }
         // A plot may ask for its own height, Plot's `height`. The element fills
@@ -1376,11 +1513,26 @@ impl Plot {
             },
             _ => bounds,
         };
+        // The grid divides the plot the insets leave, so one facet's size
+        // follows from the plot's size, the number of facets and the axes each
+        // facet draws inside its own band.
+        let plot_width =
+            (bounds.size.width.as_f32() - options.insets.left - options.insets.right).max(1.);
+        let plot_height =
+            (bounds.size.height.as_f32() - options.insets.top - options.insets.bottom).max(1.);
+        options.facet_size = grid.is_faceted().then(|| {
+            let band_width = grid.facet_width(plot_width);
+            let band_height = grid.facet_height(plot_height);
+            [
+                (band_width - facet_insets.left - facet_insets.right).max(1.),
+                (band_height - facet_insets.top - facet_insets.bottom).max(1.),
+            ]
+        });
         Frame::resolve(
             bounds,
             &options,
-            &self.x_domain_values(prepared),
-            &self.y_domain_values(prepared),
+            &self.x_domain_values(facets),
+            &self.y_domain_values(facets),
         )
     }
 }
@@ -1388,8 +1540,8 @@ impl Plot {
 /// Whether any mark draws a band along the x axis (`along_x`) or the y axis.
 ///
 /// Only matters for a discrete axis: a continuous scale has no bands.
-fn marks_use_band(prepared: &[PreparedMark], along_x: bool) -> bool {
-    prepared.iter().any(|prepared| {
+fn marks_use_band(facets: &[Vec<PreparedMark>], along_x: bool) -> bool {
+    facets.iter().flatten().any(|prepared| {
         let discrete = if along_x {
             prepared
                 .rows
@@ -1437,68 +1589,133 @@ impl PlotTrait for Plot {
         // Resolve the frame here so `paint` and `tooltip_state` share one
         // layout, and measure the labels that decide the margins.
         let theme = PlotTheme::from_theme(cx.theme());
-        let prepared = render::prepare(&self.data, &self.marks);
-        let frame = self.resolve_frame(bounds, &theme, window, &prepared);
+        let grid = self.facet_grid();
+        let (facets, populated) = render::prepare_facets(
+            &self.data,
+            &self.marks,
+            &grid,
+            self.fx.as_deref(),
+            self.fy.as_deref(),
+        );
+        let mut grid = grid;
+        grid.set_empty(&populated);
+        let frame = self.resolve_frame(bounds, &theme, window, &facets, &grid);
         self.frame_cache = Some(frame);
+        self.facet_cache = Some(grid);
         vec![]
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let theme = PlotTheme::from_theme(cx.theme());
 
-        let mut prepared = render::prepare(&self.data, &self.marks);
-        let frame = self
-            .frame_cache
+        let grid = self
+            .facet_cache
             .clone()
-            .unwrap_or_else(|| self.resolve_frame(bounds, &theme, window, &prepared));
-        // A dodge works in pixels, so it needs the frame resolved first.
-        render::apply_dodge(&mut prepared, &frame);
+            .unwrap_or_else(|| self.facet_grid());
+        let (mut facets, _) = render::prepare_facets(
+            &self.data,
+            &self.marks,
+            &grid,
+            self.fx.as_deref(),
+            self.fy.as_deref(),
+        );
+        let frame = match self.frame_cache.clone() {
+            Some(frame) => frame,
+            None => self.resolve_frame(bounds, &theme, window, &facets, &grid),
+        };
+        // A dodge works in pixels, so it needs the frame resolved first. Every
+        // facet is the same size, so one facet's frame packs the same way.
+        let facet_frame = match grid.is_faceted() {
+            true => frame.facet(facet_marks(grid.facet(frame.plot, 0), &frame)),
+            false => frame.clone(),
+        };
+        for marks in facets.iter_mut() {
+            render::apply_dodge(marks, &facet_frame);
+        }
 
         let appear = self.appear_progress;
 
         // The title sits above the plot, inside the figure's top margin.
         self.paint_title(bounds, &theme, window, cx);
         // The legend sits in the margin its position reserves.
-        self.paint_legend(bounds, &theme, window, cx, &prepared);
+        self.paint_legend(bounds, &theme, window, cx, &facets);
         // The grid goes under the marks.
         if self.grid {
-            paint_grid(&frame, &theme, window);
+            paint_grid(&frame, &theme, window, self.x_axis, self.y_axis, &grid);
         }
         // The marks. Every mark shares one ordinal color scale, so a series
-        // keeps its color across marks.
-        let ordinal = self.ordinal_scale(&theme, &prepared);
+        // keeps its color across marks, and across facets.
+        let ordinal = self.ordinal_scale(&theme, &facets);
         let mut row_offset = 0;
-        for (index, mark) in prepared.iter().enumerate() {
-            let mut ctx = DrawContext {
-                frame: &frame,
-                theme: &theme,
-                mark_index: index,
-                appear,
-                hover_progress: self.hover_progress,
-                hovered: self.hover,
-                row_offset,
-                ordinal: &ordinal,
-                window,
-                cx,
-            };
-            row_offset += mark.rows.len();
-            match mark.mark.kind {
-                MarkKind::Pie
-                | MarkKind::Arc
-                | MarkKind::Waffle
-                | MarkKind::BoxX
-                | MarkKind::BoxY
-                | MarkKind::ViolinX
-                | MarkKind::ViolinY
-                | MarkKind::DensityX
-                | MarkKind::DensityY
-                | MarkKind::Hexbin
-                | MarkKind::Contour => render::radial::draw(mark, &mut ctx),
-                _ => render::basic::draw(mark, &mut ctx),
+        for (cell, marks) in facets.iter().enumerate() {
+            let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, cell), &frame));
+            // Plot skips a facet that holds no data: it keeps the slot, and
+            // the facet axis, but draws no marks inside it.
+            if grid.is_faceted() && grid.is_empty(cell) {
+                continue;
+            }
+            for (index, mark) in marks.iter().enumerate() {
+                let mut ctx = DrawContext {
+                    frame: &facet_frame,
+                    theme: &theme,
+                    mark_index: index,
+                    appear,
+                    hover_progress: self.hover_progress,
+                    hovered: self.hover,
+                    row_offset,
+                    ordinal: &ordinal,
+                    window,
+                    cx,
+                };
+                row_offset += mark.rows.len();
+                match mark.mark.kind {
+                    MarkKind::Pie
+                    | MarkKind::Arc
+                    | MarkKind::Waffle
+                    | MarkKind::BoxX
+                    | MarkKind::BoxY
+                    | MarkKind::ViolinX
+                    | MarkKind::ViolinY
+                    | MarkKind::DensityX
+                    | MarkKind::DensityY
+                    | MarkKind::Hexbin
+                    | MarkKind::Contour => render::radial::draw(mark, &mut ctx),
+                    _ => render::basic::draw(mark, &mut ctx),
+                }
             }
         }
-        // The axes sit on top of the marks' clipping edge.
-        paint_axes(&frame, &theme, window, cx, self.x_axis, self.y_axis);
+        // The axes sit on top of the marks' clipping edge. A faceted figure
+        // draws each facet's axes inside its band; an unfaceted one draws a
+        // single pair at the figure's edges.
+        if grid.is_faceted() {
+            for cell in 0..grid.cells.len() {
+                if grid.is_empty(cell) {
+                    continue;
+                }
+                let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, cell), &frame));
+                paint_axes(
+                    &facet_frame,
+                    &theme,
+                    window,
+                    cx,
+                    self.x_axis,
+                    self.y_axis,
+                    &AxisEdges::from_cell(cell, &grid),
+                );
+            }
+            // The facet axis labels the grid outside the facets.
+            paint_facet_labels(&frame, &theme, window, cx, &grid);
+        } else {
+            paint_axes(
+                &frame,
+                &theme,
+                window,
+                cx,
+                self.x_axis,
+                self.y_axis,
+                &AxisEdges::default(),
+            );
+        }
     }
 
     fn id(&self) -> Option<ElementId> {
@@ -1542,8 +1759,22 @@ impl PlotTrait for Plot {
             return None;
         }
         let frame = self.frame_cache.clone()?;
-        let mut prepared = render::prepare(&self.data, &self.marks);
-        render::apply_dodge(&mut prepared, &frame);
+        let grid = self
+            .facet_cache
+            .clone()
+            .unwrap_or_else(|| self.facet_grid());
+        let (mut facets, _) = render::prepare_facets(
+            &self.data,
+            &self.marks,
+            &grid,
+            self.fx.as_deref(),
+            self.fy.as_deref(),
+        );
+        // The dodge packs each facet's rows in its own facet's pixels.
+        let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, 0), &frame));
+        for marks in facets.iter_mut() {
+            render::apply_dodge(marks, &facet_frame);
+        }
 
         // Ignore the axis gutters: hovering a label shows nothing.
         let absolute = position + bounds.origin;
@@ -1552,19 +1783,24 @@ impl PlotTrait for Plot {
         }
         let local = absolute - frame.plot.origin;
 
-        // The nearest datum across every mark, measured by distance to its
-        // projected position, which is Plot's `nearest` pointer. The state's
-        // index addresses the flattened row list, so it identifies the mark
-        // and row together.
+        // The nearest datum across every mark in every facet, measured by
+        // distance to its projected position, which is Plot's `nearest`
+        // pointer. The state's index addresses the flattened row list, so it
+        // identifies the facet, mark and row together.
         let mut best: Option<(usize, Point<Pixels>, f32)> = None;
-        for (flat, (mark_index, row_index)) in hover_targets(&prepared).into_iter().enumerate() {
-            let mark = &prepared[mark_index];
+        for (flat, (cell, mark_index, row_index)) in hover_targets(&facets).into_iter().enumerate()
+        {
+            let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, cell), &frame));
+            let mark = &facets[cell][mark_index];
             let Some(row) = mark.rows.get(row_index) else {
                 continue;
             };
-            let Some(point) = frame.point(row.x_value(), row.y_value()) else {
+            let Some(point) = facet_frame.point(row.x_value(), row.y_value()) else {
                 continue;
             };
+            // The tooltip positions are relative to the whole figure's plot,
+            // so a facet's point is shifted by where that facet sits.
+            let point = point + (facet_frame.plot.origin - frame.plot.origin);
             let dx = point.x.as_f32() - local.x.as_f32();
             let dy = point.y.as_f32() - local.y.as_f32();
             let distance = dx * dx + dy * dy;
@@ -1573,8 +1809,9 @@ impl PlotTrait for Plot {
             }
         }
         let (flat, hit, _) = best?;
-        let (mark_index, row_index) = hover_targets(&prepared)[flat];
-        let mark = &prepared[mark_index];
+        let (cell, mark_index, row_index) = hover_targets(&facets)[flat];
+        let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, cell), &frame));
+        let mark = &facets[cell][mark_index];
         let row = mark.rows.get(row_index)?;
 
         let dots: Vec<Point<Pixels>> = mark
@@ -1582,7 +1819,9 @@ impl PlotTrait for Plot {
             .iter()
             .filter_map(|other| {
                 if other.z.as_ref().map(|z| z.key()) == row.z.as_ref().map(|z| z.key()) {
-                    frame.point(other.x_value(), other.y_value())
+                    facet_frame
+                        .point(other.x_value(), other.y_value())
+                        .map(|point| point + (facet_frame.plot.origin - frame.plot.origin))
                 } else {
                     None
                 }
@@ -1602,13 +1841,23 @@ impl PlotTrait for Plot {
         cx: &mut App,
     ) -> Option<AnyElement> {
         let theme = PlotTheme::from_theme(cx.theme());
-        let prepared = render::prepare(&self.data, &self.marks);
+        let grid = self
+            .facet_cache
+            .clone()
+            .unwrap_or_else(|| self.facet_grid());
+        let (facets, _) = render::prepare_facets(
+            &self.data,
+            &self.marks,
+            &grid,
+            self.fx.as_deref(),
+            self.fy.as_deref(),
+        );
 
         // The hover carries the index the pointer resolved to, in the same
         // flattened row list `tooltip_state` searched.
         let flat = self.hover?;
-        let (mark_index, row_index) = *hover_targets(&prepared).get(flat)?;
-        let mark = prepared.get(mark_index)?;
+        let (cell, mark_index, row_index) = *hover_targets(&facets).get(flat)?;
+        let mark = facets.get(cell)?.get(mark_index)?;
         let row = mark.rows.get(row_index)?;
 
         // A custom formatter replaces the default rows entirely.
@@ -1752,9 +2001,9 @@ impl Plot {
         theme: &PlotTheme,
         window: &mut Window,
         cx: &mut App,
-        prepared: &[PreparedMark],
+        facets: &[Vec<PreparedMark>],
     ) {
-        let entries = self.legend_entries(theme, prepared);
+        let entries = self.legend_entries(theme, facets);
         if self.legend == LegendPosition::None || entries.is_empty() {
             return;
         }
@@ -1892,32 +2141,104 @@ impl Plot {
 }
 
 /// Paint the grid lines behind the marks.
-fn paint_grid(frame: &Frame, theme: &PlotTheme, window: &mut Window) {
-    let plot = frame.plot;
+fn paint_grid(
+    frame: &Frame,
+    theme: &PlotTheme,
+    window: &mut Window,
+    x_axis: bool,
+    y_axis: bool,
+    grid: &Grid,
+) {
+    // A faceted figure draws its grid inside each facet's marks area, the same
+    // way its axes repeat there.
+    let areas: Vec<Bounds<Pixels>> = if grid.is_faceted() {
+        (0..grid.cells.len())
+            .filter(|cell| !grid.is_empty(*cell))
+            .map(|cell| facet_marks(grid.facet(frame.plot, cell), frame))
+            .collect()
+    } else {
+        vec![frame.plot]
+    };
     let width = theme.line_width;
-    for tick in frame.y.ticks.iter() {
-        let y = plot.origin.y + px(tick.position);
-        let start = point(plot.origin.x, y);
-        let end = point(plot.origin.x + plot.size.width, y);
-        if theme.grid_dash.is_empty() {
-            paint::paint_stroke(&[start, end], width.as_f32(), theme.grid, window);
-        } else {
-            paint_dashed(start, end, &theme.grid_dash, width, theme.grid, window);
-        }
-    }
-    // Vertical grid lines only for a continuous x scale: a band scale's
-    // categories are already clear from their labels.
-    if !frame.x.scale.is_discrete() {
-        for tick in frame.x.ticks.iter() {
-            let x = plot.origin.x + px(tick.position);
-            let start = point(x, plot.origin.y);
-            let end = point(x, plot.origin.y + plot.size.height);
-            if theme.grid_dash.is_empty() {
-                paint::paint_stroke(&[start, end], width.as_f32(), theme.grid, window);
-            } else {
-                paint_dashed(start, end, &theme.grid_dash, width, theme.grid, window);
+    for plot in areas {
+        if y_axis {
+            for tick in frame.y.ticks.iter() {
+                let y = plot.origin.y + px(tick.position);
+                let start = point(plot.origin.x, y);
+                let end = point(plot.origin.x + plot.size.width, y);
+                if theme.grid_dash.is_empty() {
+                    paint::paint_stroke(&[start, end], width.as_f32(), theme.grid, window);
+                } else {
+                    paint_dashed(start, end, &theme.grid_dash, width, theme.grid, window);
+                }
             }
         }
+        // Vertical grid lines only for a continuous x scale: a band scale's
+        // categories are already clear from their labels.
+        if x_axis && !frame.x.scale.is_discrete() {
+            for tick in frame.x.ticks.iter() {
+                let x = plot.origin.x + px(tick.position);
+                let start = point(x, plot.origin.y);
+                let end = point(x, plot.origin.y + plot.size.height);
+                if theme.grid_dash.is_empty() {
+                    paint::paint_stroke(&[start, end], width.as_f32(), theme.grid, window);
+                } else {
+                    paint_dashed(start, end, &theme.grid_dash, width, theme.grid, window);
+                }
+            }
+        }
+    }
+}
+
+/// The marks area of one facet band: the band, less the axes the facet draws
+/// inside it.
+fn facet_marks(band: Bounds<Pixels>, frame: &Frame) -> Bounds<Pixels> {
+    let insets = frame.facet_insets;
+    Bounds::new(
+        point(
+            band.origin.x + px(insets.left),
+            band.origin.y + px(insets.top),
+        ),
+        gpui::size(
+            px((band.size.width.as_f32() - insets.left - insets.right).max(1.)),
+            px((band.size.height.as_f32() - insets.top - insets.bottom).max(1.)),
+        ),
+    )
+}
+
+/// Which of a facet's edges draw an axis, Plot's `facetAnchor`.
+///
+/// A left y axis and a bottom x axis run to the outermost facet of each row
+/// and column, so the grid reads like a table of small charts.
+#[derive(Clone, Copy, Debug)]
+struct AxisEdges {
+    left: bool,
+    bottom: bool,
+}
+
+impl Default for AxisEdges {
+    fn default() -> Self {
+        Self {
+            left: true,
+            bottom: true,
+        }
+    }
+}
+
+impl AxisEdges {
+    /// The edges of facet `cell` that draw an axis.
+    ///
+    /// A y axis belongs to the first column and an x axis to the last row,
+    /// which is Plot's `facetAnchorLeft` and `facetAnchorBottom`. A facet
+    /// further in draws the axis too when the neighbour it would share it
+    /// with holds no data, which is the `-empty` variant those anchors take
+    /// by default: the axis then stops where the facets do.
+    fn from_cell(cell: usize, grid: &Grid) -> Self {
+        let (column, row) = (grid.column(cell), grid.row(cell));
+        let left = column == 0 || grid.is_empty(cell - 1);
+        let below = cell + grid.columns();
+        let bottom = row == grid.rows() - 1 || below >= grid.cells.len() || grid.is_empty(below);
+        Self { left, bottom }
     }
 }
 
@@ -1968,12 +2289,12 @@ fn paint_axes(
     cx: &mut App,
     x_axis: bool,
     y_axis: bool,
+    edges: &AxisEdges,
 ) {
     let plot = frame.plot;
     let mut axis = PlotAxis::new().stroke(theme.axis);
-    let font = gpui::font(theme.font_family.clone());
 
-    if x_axis {
+    if x_axis && edges.bottom {
         let labels: Vec<gpui_kit::base::plot::AxisText> = frame
             .x
             .ticks
@@ -1990,7 +2311,7 @@ fn paint_axes(
             .collect();
         axis = axis.x(plot.size.height).x_axis(false).x_label(labels);
     }
-    if y_axis {
+    if y_axis && edges.left {
         let labels: Vec<gpui_kit::base::plot::AxisText> = frame
             .y
             .ticks
@@ -2021,7 +2342,7 @@ fn paint_axes(
             .y_label(labels);
     }
     axis.paint(&plot, window, cx);
-    if y_axis {
+    if y_axis && edges.left {
         // `PlotAxis` draws the y line only where it was told to, and it
         // right-aligns its labels against that line, so the line is drawn
         // here rather than duplicated there.
@@ -2035,7 +2356,74 @@ fn paint_axes(
             window,
         );
     }
-    let _ = font;
+}
+
+/// Paint the facet axis: the `fx` values above each column, the `fy` values
+/// right of each row.
+///
+/// Plot's facet axes label the grid rather than the data, so each label is
+/// centred on its band and sits outside the plot.
+fn paint_facet_labels(
+    frame: &Frame,
+    theme: &PlotTheme,
+    window: &mut Window,
+    cx: &mut App,
+    grid: &Grid,
+) {
+    let plot = frame.plot;
+    let font = gpui::font(theme.font_family.clone());
+    let color = theme.label;
+
+    if let Some(fx) = &grid.fx {
+        let labels = grid.fx_labels();
+        for (index, text) in labels.into_iter().enumerate() {
+            let (start, width) = crate::facet::band(index, fx.len(), plot.size.width.as_f32());
+            let label = Label::new(
+                text,
+                theme.label_size,
+                color,
+                FontWeight::NORMAL,
+                font.clone(),
+                window,
+            );
+            // Above the plot, in the gutter the insets reserved for it.
+            let y = plot.origin.y - px(theme.label_size.as_f32() + FACET_LABEL_GAP);
+            label.paint_at(
+                point(plot.origin.x + px(start + width / 2.), y),
+                TextAlign::Center,
+                None,
+                window,
+                cx,
+            );
+        }
+    }
+
+    if let Some(fy) = &grid.fy {
+        let labels = grid.fy_labels();
+        for (index, text) in labels.into_iter().enumerate() {
+            let (start, height) = crate::facet::band(index, fy.len(), plot.size.height.as_f32());
+            let label = Label::new(
+                text,
+                theme.label_size,
+                color,
+                FontWeight::NORMAL,
+                font.clone(),
+                window,
+            );
+            // Right of the plot, centred on the facet's band.
+            let x = plot.origin.x + plot.size.width + px(FACET_LABEL_GAP);
+            label.paint_at(
+                point(
+                    x,
+                    plot.origin.y + px(start + height / 2. - theme.label_size.as_f32() / 2.),
+                ),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+    }
 }
 
 impl IntoElement for Plot {
@@ -2109,8 +2497,64 @@ mod tests {
         let plot = Plot::new(data).line(|mark| mark.x("x").y("y").z("z"));
         let prepared = render::prepare(plot.data(), plot.marks());
         let theme = PlotTheme::from_theme(&gpui_kit::component::Theme::default());
-        let entries = plot.legend_entries(&theme, &prepared);
+        let entries = plot.legend_entries(&theme, &[prepared]);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].label, "one");
+    }
+
+    #[test]
+    fn facet_grid_domains_come_from_the_data() {
+        let data = [
+            Table::empty()
+                .with("r", Value::text("a"))
+                .with("c", Value::text("x")),
+            Table::empty()
+                .with("r", Value::text("b"))
+                .with("c", Value::text("x")),
+            Table::empty()
+                .with("r", Value::text("a"))
+                .with("c", Value::text("y")),
+        ];
+        let plot = Plot::new(data).dot(|mark| mark.x("c")).fx("r").fy("c");
+        let grid = plot.facet_grid();
+        // Both domains are distinct values in the order they appear, so the
+        // grid is the cross product: two columns by two rows.
+        assert_eq!(grid.fx_labels(), vec!["a", "b"]);
+        assert_eq!(grid.fy_labels(), vec!["x", "y"]);
+        assert_eq!(grid.columns(), 2);
+        assert_eq!(grid.rows(), 2);
+        assert_eq!(grid.cells.len(), 4);
+    }
+
+    #[test]
+    fn facet_axes_run_along_the_first_column_and_last_row() {
+        let grid = Grid::from_values(
+            vec![Value::text("a"), Value::text("b"), Value::text("c")],
+            vec![Value::text("1"), Value::text("2")],
+        );
+        let edges = |cell: usize| AxisEdges::from_cell(cell, &grid);
+        // The first row: a y axis on the first facet only, an x axis nowhere
+        // because another row sits below it.
+        assert!(edges(0).left && !edges(0).bottom);
+        assert!(!edges(1).left && !edges(1).bottom);
+        // The last row draws the x axis under every facet, and the y axis
+        // still only on the first column.
+        assert!(edges(3).left && edges(3).bottom);
+        assert!(!edges(4).left && edges(4).bottom);
+    }
+
+    #[test]
+    fn an_empty_facet_hands_its_axis_to_its_neighbour() {
+        let mut grid = Grid::from_values(
+            vec![Value::text("a"), Value::text("b")],
+            vec![Value::text("1"), Value::text("2")],
+        );
+        // Only the second row's first facet holds data: the row above it is
+        // empty, so that facet draws the x axis too, and the one beside it
+        // draws the y axis.
+        grid.set_empty(&[false, false, true, false]);
+        assert!(AxisEdges::from_cell(2, &grid).left);
+        assert!(AxisEdges::from_cell(2, &grid).bottom);
+        assert!(!AxisEdges::from_cell(3, &grid).left);
     }
 }

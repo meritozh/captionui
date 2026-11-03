@@ -11,6 +11,7 @@ pub(crate) mod stat;
 
 use gpui::{Hsla, SharedString};
 
+use crate::facet::Grid;
 use crate::frame::Frame;
 use crate::mark::{Axis, Channels, CrossAxis, MapReducer, Mark, MarkKind};
 use crate::table::{Dataset, Table};
@@ -101,9 +102,34 @@ impl PreparedRow {
     }
 }
 
-/// Resolve every mark against `data`.
+/// Resolve every mark against `data`, for an unfaceted plot.
 pub fn prepare(data: &Dataset, marks: &[Mark]) -> Vec<PreparedMark> {
     marks.iter().map(|mark| prepare_mark(data, mark)).collect()
+}
+
+/// Resolve every mark against the part of `data` that lands in each facet.
+///
+/// A mark's rows are split by the facet fields, and each facet's share then
+/// resolves on its own, so a stack, bin or reducer summarizes within its
+/// facet. The facets come back in the grid's order, one list of marks per
+/// facet, with the facets that hold no rows; a figure that is not faceted has
+/// one facet holding every row and no empty facets.
+pub fn prepare_facets(
+    data: &Dataset,
+    marks: &[Mark],
+    grid: &Grid,
+    fx: Option<&str>,
+    fy: Option<&str>,
+) -> (Vec<Vec<PreparedMark>>, Vec<bool>) {
+    if !grid.is_faceted() {
+        return (vec![prepare(data, marks)], Vec::new());
+    }
+    let (groups, populated) = grid.partition(data, fx, fy);
+    let prepared = groups
+        .into_iter()
+        .map(|rows| prepare(&Dataset::new(rows), marks))
+        .collect();
+    (prepared, populated)
 }
 
 fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
@@ -880,5 +906,71 @@ mod stack_tests {
             .map(|row| row.y2.as_ref().unwrap().as_number().unwrap())
             .fold(0.0_f64, f64::max);
         assert_eq!(top, 4.);
+    }
+}
+
+#[cfg(test)]
+mod facet_tests {
+    use super::*;
+    use crate::facet::Grid;
+    use crate::mark::MarkKind;
+
+    #[test]
+    fn a_stack_summarizes_within_its_facet() {
+        // Two facets, each with both series, so a whole-figure stack would
+        // reach 100 in each and a per-facet one reaches the facet's own total.
+        let rows = vec![
+            Table::empty()
+                .with("f", Value::text("one"))
+                .with("m", Value::text("a"))
+                .with("p", Value::text("x"))
+                .with("v", Value::Number(10.)),
+            Table::empty()
+                .with("f", Value::text("one"))
+                .with("m", Value::text("a"))
+                .with("p", Value::text("y"))
+                .with("v", Value::Number(30.)),
+            Table::empty()
+                .with("f", Value::text("two"))
+                .with("m", Value::text("a"))
+                .with("p", Value::text("x"))
+                .with("v", Value::Number(20.)),
+            Table::empty()
+                .with("f", Value::text("two"))
+                .with("m", Value::text("a"))
+                .with("p", Value::text("y"))
+                .with("v", Value::Number(20.)),
+        ];
+        let mark = Mark::new(MarkKind::BarY)
+            .x("m")
+            .y("v")
+            .z("p")
+            .stack(StackOffset::Normalize)
+            .stack_series("p");
+        let grid = Grid::from_values(vec![Value::text("one"), Value::text("two")], Vec::new());
+        let (facets, populated) =
+            prepare_facets(&Dataset::new(rows), &[mark], &grid, Some("f"), None);
+        assert_eq!(facets.len(), 2);
+        assert_eq!(populated, vec![true, true]);
+        for marks in &facets {
+            let top = marks[0]
+                .rows
+                .iter()
+                .map(|row| row.y2.as_ref().unwrap().as_number().unwrap())
+                .fold(0.0_f64, f64::max);
+            // Normalized within the facet: the two series add to one.
+            assert_eq!(top, 1.);
+        }
+    }
+
+    #[test]
+    fn an_unfaceted_grid_prepares_every_row_once() {
+        let rows = vec![Table::empty().with("x", Value::Number(1.))];
+        let mark = Mark::new(MarkKind::Dot).x("x");
+        let grid = Grid::from_values(Vec::new(), Vec::new());
+        let (facets, populated) = prepare_facets(&Dataset::new(rows), &[mark], &grid, None, None);
+        assert_eq!(facets.len(), 1);
+        assert_eq!(facets[0][0].rows.len(), 1);
+        assert!(populated.is_empty());
     }
 }
