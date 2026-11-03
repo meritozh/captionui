@@ -79,6 +79,20 @@ supports (`x`, `y`, `x1`, `x2`, `y1`, `y2`, `z`, `fill`, `stroke`, `r`, `text`,
 | pie / arc | `.pie(…)` / `.arc(…)` | shares or explicit angles |
 | waffle | `.waffle(…)` | one cell per percent |
 
+**Delaunay marks**
+
+| Mark | Builder | Notes |
+| --- | --- | --- |
+| delaunayLink | `.delaunay_link(…)` | every triangulation edge as its own path, colored by the row it starts from |
+| delaunayMesh | `.delaunay_mesh(…)` | the triangulation as one path, Plot's 0.2 stroke opacity |
+| hull | `.hull(…)` | convex outline; filled only when given a `fill` |
+| voronoi | `.voronoi(…)` | one cell per datum, clipped to the plot |
+| voronoiMesh | `.voronoi_mesh(…)` | the cells' shared edges, each stroked once |
+
+The geometry is built from the data's *projected* points, so the shapes follow
+the scales, and it lives in `gpui_plot::delaunay` for callers that want the
+triangulation itself.
+
 ## Features
 
 **Scales.** Linear, log, pow, sqrt and symlog transforms (`x_transform`,
@@ -141,7 +155,7 @@ resolution.
 cargo run -p gpui-plot-demo --example snapshots
 ```
 
-renders all 38 gallery charts through GPUI's headless renderer, writes each to
+renders all 42 gallery charts through GPUI's headless renderer, writes each to
 `demo/snapshots/*.png`, and asserts each painted more than 12 distinct colors.
 This is the check that caught the defects unit tests could not: charts that
 painted nothing, legends over the title, clipped axis labels, stacked bars that
@@ -163,14 +177,14 @@ tooltips, and hover highlighting.
 The full mark set now also covers `linearRegressionX`/`Y` with confidence bands,
 `bollingerX`/`Y`, `differenceX`/`Y`, `raster`, `hexgrid` and `hexbin` on Plot's
 own lattice, `cellX`/`cellY`, `textX`/`textY`, `vectorX`/`vectorY`, `vector`,
-`spike`, `arrow`, `waffleX`/`waffleY`, and `boxX`/`boxY`.
+`spike`, `arrow`, `waffleX`/`waffleY`, `boxX`/`boxY`, and the Delaunay family
+(`delaunayLink`, `delaunayMesh`, `hull`, `voronoi`, `voronoiMesh`).
 
 Not implemented yet, in the order the work is planned:
 
 1. **Grouping transforms.** `groupX`/`groupY` as mark options (a mark's
    `reduce` covers the common cases) and `find`.
-2. **Delaunay family**: `voronoi`, `hull`, `delaunayLink`, `delaunayMesh`.
-3. **Geo projections**, which are out of scope for a desktop chart library
+2. **Geo projections**, which are out of scope for a desktop chart library
    with no basemap ecosystem.
 
 The `tension` option for cardinal curves is also missing; the curves

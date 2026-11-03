@@ -6,6 +6,7 @@
 //! unions their values to build the scales. Drawing then only reads pixels.
 
 pub(crate) mod basic;
+pub(crate) mod delaunay;
 pub(crate) mod radial;
 pub(crate) mod stat;
 

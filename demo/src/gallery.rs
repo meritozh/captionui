@@ -292,6 +292,34 @@ pub fn examples() -> Vec<Example> {
             height: 440.,
             build: faceted_bars,
         },
+        Example {
+            title: "Delaunay mesh",
+            section: "Marks / delaunayMesh, delaunayLink",
+            description: "The triangulation of a point cloud, with its links colored by the group each edge starts from.",
+            height: 440.,
+            build: delaunay_plot,
+        },
+        Example {
+            title: "Convex hull",
+            section: "Marks / hull",
+            description: "The outline of the cloud, drawn over the dots it wraps.",
+            height: 440.,
+            build: hull_plot,
+        },
+        Example {
+            title: "Voronoi cells",
+            section: "Marks / voronoi",
+            description: "The region nearest each point, shaded by its group.",
+            height: 440.,
+            build: voronoi_plot,
+        },
+        Example {
+            title: "Voronoi mesh",
+            section: "Marks / voronoiMesh",
+            description: "The same cells as one lattice, each edge stroked once.",
+            height: 440.,
+            build: voronoi_mesh_plot,
+        },
     ]
 }
 
@@ -1099,5 +1127,69 @@ fn faceted_bars() -> Plot {
         .fx("region")
         .fy("channel")
         .y_zero(true)
+        .grid(false)
+}
+
+fn delaunay_plot() -> Plot {
+    let data = data::clusters();
+    Plot::new(data)
+        .title("Delaunay triangulation")
+        .subtitle("Every point joined to its nearest neighbours")
+        .delaunay_mesh(|mark| mark.x("x").y("y").stroke(theme_color(0.55, 0.5, 0.55, 1.)))
+        .delaunay_link(|mark| mark.x("x").y("y").z("group").stroke_width(1.))
+        .dot(|mark| {
+            mark.x("x")
+                .y("y")
+                .r(2.5)
+                .fill(theme_color(0.55, 0.5, 0.55, 1.))
+        })
+        .legend(LegendPosition::Top)
+        .grid(false)
+}
+
+fn hull_plot() -> Plot {
+    let data = data::clusters();
+    Plot::new(data)
+        .title("Convex hull")
+        .subtitle("The smallest polygon containing every point")
+        .hull(|mark| {
+            mark.x("x")
+                .y("y")
+                .stroke(theme_color(0.33, 0.7, 0.45, 1.))
+                .stroke_width(2.)
+        })
+        .dot(|mark| mark.x("x").y("y").r(2.5).opacity(0.7))
+        // The hull reaches past the dots' own extent; a domain with a margin
+        // around it keeps the outline whole instead of clipped at the frame.
+        .x_domain(0., 11.)
+        .y_domain(-1., 10.)
+        .grid(false)
+}
+
+fn voronoi_plot() -> Plot {
+    let data = data::clusters();
+    Plot::new(data)
+        .title("Voronoi cells")
+        .subtitle("The region nearer one point than any other")
+        .voronoi(|mark| {
+            mark.x("x").y("y").z("group").fill(|row: &Table| {
+                match row.value("group").label().as_ref() {
+                    "left" => theme_color(0.55, 0.65, 0.6, 0.35),
+                    _ => theme_color(0.33, 0.7, 0.45, 0.35),
+                }
+            })
+        })
+        .dot(|mark| mark.x("x").y("y").r(2.5))
+        .legend(LegendPosition::Top)
+        .grid(false)
+}
+
+fn voronoi_mesh_plot() -> Plot {
+    let data = data::clusters();
+    Plot::new(data)
+        .title("Voronoi mesh")
+        .subtitle("The cells' shared edges, each stroked once")
+        .voronoi_mesh(|mark| mark.x("x").y("y").stroke_width(1.))
+        .dot(|mark| mark.x("x").y("y").r(2.5))
         .grid(false)
 }

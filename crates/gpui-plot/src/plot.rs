@@ -758,6 +758,56 @@ impl Plot {
         self
     }
 
+    /// Add a Delaunay triangulation drawn as links, Plot's `delaunayLink`.
+    pub fn delaunay_link(
+        mut self,
+        configure: impl FnOnce(crate::mark::DelaunayLinkMark) -> crate::mark::DelaunayLinkMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::DelaunayLinkMark::new()).into());
+        self
+    }
+
+    /// Add a Delaunay triangulation drawn as one mesh, Plot's `delaunayMesh`.
+    pub fn delaunay_mesh(
+        mut self,
+        configure: impl FnOnce(crate::mark::DelaunayMeshMark) -> crate::mark::DelaunayMeshMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::DelaunayMeshMark::new()).into());
+        self
+    }
+
+    /// Add the convex hull of the data, Plot's `hull`.
+    pub fn hull(
+        mut self,
+        configure: impl FnOnce(crate::mark::HullMark) -> crate::mark::HullMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::HullMark::new()).into());
+        self
+    }
+
+    /// Add a Voronoi cell per datum, Plot's `voronoi`.
+    pub fn voronoi(
+        mut self,
+        configure: impl FnOnce(crate::mark::VoronoiMark) -> crate::mark::VoronoiMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::VoronoiMark::new()).into());
+        self
+    }
+
+    /// Add the Voronoi mesh of the data, Plot's `voronoiMesh`.
+    pub fn voronoi_mesh(
+        mut self,
+        configure: impl FnOnce(crate::mark::VoronoiMeshMark) -> crate::mark::VoronoiMeshMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::VoronoiMeshMark::new()).into());
+        self
+    }
+
     /// Name the plot's element id, replacing the default taken from the
     /// construction site. Use one where a single call site renders several
     /// plots as siblings.
@@ -1680,6 +1730,14 @@ impl PlotTrait for Plot {
                     | MarkKind::DensityY
                     | MarkKind::Hexbin
                     | MarkKind::Contour => render::radial::draw(mark, &mut ctx),
+                    // The Delaunay marks build their geometry from the
+                    // projected points, so they draw through the frame's
+                    // pixel space rather than the row shapes.
+                    MarkKind::DelaunayLink
+                    | MarkKind::DelaunayMesh
+                    | MarkKind::Hull
+                    | MarkKind::Voronoi
+                    | MarkKind::VoronoiMesh => render::delaunay::draw(mark, &mut ctx),
                     _ => render::basic::draw(mark, &mut ctx),
                 }
             }

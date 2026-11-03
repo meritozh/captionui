@@ -131,6 +131,16 @@ pub enum MarkKind {
     BollingerX,
     /// The y-axis form of `bollingerX`, Plot's `bollingerY`.
     BollingerY,
+    /// A Delaunay triangulation drawn as links, Plot's `delaunayLink`.
+    DelaunayLink,
+    /// A Delaunay triangulation drawn as one mesh, Plot's `delaunayMesh`.
+    DelaunayMesh,
+    /// The convex hull of the data, Plot's `hull`.
+    Hull,
+    /// A Voronoi cell per datum, Plot's `voronoi`.
+    Voronoi,
+    /// The Voronoi mesh of the data, Plot's `voronoiMesh`.
+    VoronoiMesh,
 }
 
 impl MarkKind {
@@ -193,6 +203,11 @@ impl MarkKind {
             MarkKind::LinearRegressionY => "linearRegressionY",
             MarkKind::BollingerX => "bollingerX",
             MarkKind::BollingerY => "bollingerY",
+            MarkKind::DelaunayLink => "delaunayLink",
+            MarkKind::DelaunayMesh => "delaunayMesh",
+            MarkKind::Hull => "hull",
+            MarkKind::Voronoi => "voronoi",
+            MarkKind::VoronoiMesh => "voronoiMesh",
         }
     }
 
@@ -239,6 +254,11 @@ impl MarkKind {
                 | MarkKind::DensityY
                 | MarkKind::Contour
                 | MarkKind::Link
+                | MarkKind::DelaunayLink
+                | MarkKind::DelaunayMesh
+                | MarkKind::Hull
+                | MarkKind::Voronoi
+                | MarkKind::VoronoiMesh
         )
     }
 
@@ -704,6 +724,11 @@ impl Mark {
             style.stroke_width = 1.;
             style.fill_opacity = 0.3;
             style.anchor = VectorAnchor::Start;
+        }
+        // The meshes are a faint underlay: Plot strokes them at 0.2 opacity so
+        // the data drawn over them stays the figure's subject.
+        if matches!(kind, MarkKind::DelaunayMesh | MarkKind::VoronoiMesh) {
+            style.stroke_opacity = 0.2;
         }
         Self {
             kind,
@@ -1595,6 +1620,31 @@ mark_builder!(
     /// A link mark, Plot's `link`.
     LinkMark,
     MarkKind::Link
+);
+mark_builder!(
+    /// A Delaunay triangulation drawn as links, Plot's `delaunayLink`.
+    DelaunayLinkMark,
+    MarkKind::DelaunayLink
+);
+mark_builder!(
+    /// A Delaunay triangulation drawn as one mesh, Plot's `delaunayMesh`.
+    DelaunayMeshMark,
+    MarkKind::DelaunayMesh
+);
+mark_builder!(
+    /// The convex hull of the data, Plot's `hull`.
+    HullMark,
+    MarkKind::Hull
+);
+mark_builder!(
+    /// A Voronoi cell per datum, Plot's `voronoi`.
+    VoronoiMark,
+    MarkKind::Voronoi
+);
+mark_builder!(
+    /// The Voronoi mesh of the data, Plot's `voronoiMesh`.
+    VoronoiMeshMark,
+    MarkKind::VoronoiMesh
 );
 
 impl Mark {

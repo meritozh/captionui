@@ -34,6 +34,7 @@
 // `IntoPlot` derive spell GPUI paths the way the rest of the ecosystem does.
 extern crate gpui_kit as gpui;
 
+pub mod delaunay;
 pub mod density;
 pub mod facet;
 pub mod frame;

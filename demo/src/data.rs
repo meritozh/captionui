@@ -138,6 +138,30 @@ pub fn long_stacked() -> Vec<Table> {
     rows
 }
 
+/// Two well-separated clouds, for the Delaunay and Voronoi marks: enough
+/// points that the triangulation has structure to show.
+pub fn clusters() -> Vec<Table> {
+    let mut rng = Rng::new(31);
+    let centres = [(3.0, 3.0), (8.0, 7.0)];
+    let mut rows = Vec::with_capacity(60);
+
+    for (index, (cx, cy)) in centres.into_iter().enumerate() {
+        for _ in 0..30 {
+            rows.push(
+                Table::empty()
+                    .with("x", Value::Number(round2(cx + rng.gaussian() * 1.4)))
+                    .with("y", Value::Number(round2(cy + rng.gaussian() * 1.4)))
+                    .with(
+                        "group",
+                        Value::text(if index == 0 { "left" } else { "right" }),
+                    ),
+            );
+        }
+    }
+
+    rows
+}
+
 /// Quarterly sales by region and channel, for the facet grid: two categorical
 /// fields to split the figure by, and a quantitative one to draw.
 pub fn faceted_sales() -> Vec<Table> {
