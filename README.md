@@ -151,7 +151,11 @@ cargo test --workspace
 ```
 
 covers the data model, scales, ticks, transforms, stacking and legend
-resolution.
+resolution. Two suites pin the pipeline's invariants so a rearrangement
+cannot silently change the charts: `transform_order_tests` fixes the order
+the mark transforms compose in (`prepare_mark`), and a purity test asserts
+`prepare_facets` is a pure function, so the once-per-frame facets cache
+faithfully mirrors a fresh resolve.
 
 ```bash
 cargo run -p gpui-plot-demo --example snapshots
@@ -164,6 +168,56 @@ painted nothing, legends over the title, clipped axis labels, stacked bars that
 read pre-stack values, a categorical palette that was one blue ramp, a
 regression band painted above its own fit, and a difference chart whose fills
 degenerated to zero area.
+
+## Architecture
+
+The library is layered so each step of the Plot model has one home, and the
+seams between them stay open for extension:
+
+- **Data.** `Value` (in `value.rs`) is one scalar with a total order — `Null`
+  sorts below everything, booleans as false < true, strings lexicographically,
+  numbers and dates numerically — so a channel's extent can be computed without
+  the caller declaring its type. `Table`/`Dataset` hold the records.
+- **Marks.** `Mark` (`mark.rs`) is a pure data spec: a `MarkKind`, its
+  `Channels`, and the transform options it carries. It holds no window state,
+  so a chart is a cheap value to build and rebuild. `MarkKind::category()`
+  returns one `MarkCategory` table that classifies every mark exactly once —
+  which renderer family draws it, its band direction, its bin axis, its stack
+  orientation, whether it is bivariate, a length mark, furniture, and how a
+  one-dimensional mark sits across its other axis. Every predicate and the
+  renderer's dispatch derive from that table rather than re-declaring
+  `matches!` whitelists, so adding a mark touches exactly one new row.
+- **Preparation.** `prepare_mark` (`render/mod.rs`) applies the transforms to
+  the mark's rows: the record rewrites (`select`, `map`, `shift`, `shuffle`)
+  run on a cloned `Dataset` before any row resolves; then `sort`, `window`,
+  `normalize`, `group`, `reduce`, `bin` and `stack` rewrite the resolved rows.
+  The order is pinned by `transform_order_tests`, and the resolved facets are
+  cached per frame so hover, tooltip and paint all read the same rows.
+- **Scales and frame.** `scale.rs` builds position and color scales;
+  `frame.rs` resolves the plot's bounds from the figure and the margins, builds
+  the axis ticks, and now owns the furniture painters (grid, axis lines and
+  labels, facet labels) that reach into a frame's insets. `facet.rs` splits the
+  data into `fx`/`fy` cells that share one scale.
+- **Rendering.** Each mark draws through the family `MarkCategory` assigned to
+  it: one shape per row in `render/basic.rs`, a summarized or arranged shape in
+  `render/radial.rs`, and a lattice over the projected points in
+  `render/delaunay.rs`.
+
+Two design choices keep this clean:
+
+- **One code path per concept.** The standalone transforms in `transform.rs`
+  (`group`, `normalize`, `sort_by`, `filter`, …) are the public,
+  compose-able `Dataset → Dataset` API — README's "as functions in
+  `gpui_plot::transform`". The row-level reducers in `render/mod.rs`
+  (`collapse_groups`, `reduce_rows`, `stack_rows`) are a separate,
+  deliberately optimized path over already-resolved `PreparedRow`s; they are
+  not dead duplicates of the same thing, and removing either would break the
+  boundary.
+- **Deriving intervals in one place.** `derive_intervals` (how a bar grows
+  from zero to its value, how a cell fills its band) is one authority invoked
+  twice — when a row resolves, and again after grouping, because grouping
+  replaces the value a bar's length came from. Both calls are required; folding
+  them into one breaks grouped bars.
 
 ## Coverage against Observable Plot
 
