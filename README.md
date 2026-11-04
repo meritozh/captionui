@@ -249,10 +249,6 @@ Not implemented yet:
 1. **Geo projections** (`geo` and the `geoCentroid`/`centroid` transforms),
    which are out of scope for a desktop chart library with no basemap
    ecosystem.
-2. **The `image` mark**, which draws a raster read from a URL or file path —
-   GPUI decodes images through its async image cache rather than a sync buffer,
-   which the plot's paint path and the offscreen snapshot renderer can't
-   resolve deterministically.
 
 `auto` also turns two quantitative fields with a `count` color into a
 heatmap — binning both axes and filling each cell by its count, Plot's
@@ -260,6 +256,11 @@ heatmap — binning both axes and filling each cell by its count, Plot's
 histogram, bar and heatmap branches are covered. Its finer cases (a barcode
 with no reducer, a `barX` heatmap from an ordinal axis) are left to explicit
 marks.
+
+The `image` mark paints a [`gpui::RenderImage`] at each datum's position —
+a caller supplies pixels synchronously via `gpui_plot::image_from_rgba`
+rather than GPUI's async image cache, so the mark works in the offscreen
+snapshot renderer too.
 
 ### Adding a mark
 

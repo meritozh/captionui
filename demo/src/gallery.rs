@@ -369,6 +369,13 @@ pub fn examples() -> Vec<Example> {
             height: 440.,
             build: auto_heatmap_plot,
         },
+        Example {
+            title: "Image",
+            section: "Marks / image",
+            description: "A raster painted at data positions: a gradient image repeated across a grid.",
+            height: 440.,
+            build: image_plot,
+        },
     ]
 }
 
@@ -1316,5 +1323,31 @@ fn auto_heatmap_plot() -> Plot {
     Plot::auto(data, Some("x"), Some("y"), Some("count"))
         .title("Two clusters as a heatmap")
         .subtitle("Color of count: Plot::auto bins both axes and counts each cell")
+        .grid(false)
+}
+
+fn image_plot() -> Plot {
+    // A grid of data positions, each painting the gradient image.
+    let image = data::gradient_image();
+    let data = vec![
+        Table::empty()
+            .with("x", Value::Number(0.))
+            .with("y", Value::Number(0.)),
+        Table::empty()
+            .with("x", Value::Number(3.))
+            .with("y", Value::Number(0.)),
+        Table::empty()
+            .with("x", Value::Number(0.))
+            .with("y", Value::Number(3.)),
+        Table::empty()
+            .with("x", Value::Number(3.))
+            .with("y", Value::Number(3.)),
+    ];
+    Plot::new(data)
+        .title("A raster image at four positions")
+        .subtitle("The image mark paints its gradient at each datum")
+        .image(|mark| mark.image(image.clone()).x("x").y("y"))
+        .x_domain(-0.5, 3.5)
+        .y_domain(-0.5, 3.5)
         .grid(false)
 }

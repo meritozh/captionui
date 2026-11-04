@@ -788,6 +788,16 @@ impl Plot {
         self
     }
 
+    /// Add a raster image painted at a position, Plot's `image`.
+    pub fn image(
+        mut self,
+        configure: impl FnOnce(crate::mark::ImageMark) -> crate::mark::ImageMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::ImageMark::new()).into());
+        self
+    }
+
     /// Add a Delaunay triangulation drawn as links, Plot's `delaunayLink`.
     pub fn delaunay_link(
         mut self,

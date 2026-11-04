@@ -2205,6 +2205,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "gpui-kit",
+ "image",
+ "smallvec",
 ]
 
 [[package]]

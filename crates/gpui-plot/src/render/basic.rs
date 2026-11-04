@@ -269,6 +269,7 @@ pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         MarkKind::Arrow => draw_arrows(prepared, ctx),
         MarkKind::Link => draw_links(prepared, ctx),
         MarkKind::Tree => draw_tree(prepared, ctx),
+        MarkKind::Image => draw_image(prepared, ctx),
         MarkKind::Tip => draw_tips(prepared, ctx),
         MarkKind::AxisX => draw_axis_x(prepared, ctx),
         MarkKind::AxisY => draw_axis_y(prepared, ctx),
@@ -1072,6 +1073,46 @@ fn draw_tree(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                 fill,
                 ctx.theme.axis,
                 1.,
+            );
+        }
+    });
+}
+
+/// Draw an image mark's rows, each painting the mark's image at its position.
+///
+/// Plot's `image` reads an `src` and paints it with a `width`/`height`; here
+/// the mark carries one [`gpui::RenderImage`] shared across its rows, and each
+/// row draws it at its scaled position with the image's own size.
+fn draw_image(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let Some(image) = prepared.mark.image.clone() else {
+        return;
+    };
+    if prepared.rows.is_empty() {
+        return;
+    }
+    // The image's pixel size, once.
+    let size = image.size(0);
+    let pixel_size = gpui::size(px(size.width.0 as f32), px(size.height.0 as f32));
+    ctx.clipped(|ctx| {
+        for row in prepared.rows.iter() {
+            // The image sits at the row's scaled position, its top-left there.
+            let (Some(x), Some(y)) = (
+                ctx.frame.x.scale.position(row.x_value()),
+                ctx.frame.y.scale.position(row.y_value()),
+            ) else {
+                continue;
+            };
+            let origin = ctx.absolute(point(px(x), px(y)));
+            let bounds = Bounds::new(origin, pixel_size);
+            let image_bounds = Bounds::new(origin, pixel_size);
+            // `paint_image` returns a Result; a failure paints nothing.
+            let _ = ctx.window.paint_image(
+                bounds,
+                image_bounds,
+                Default::default(),
+                image.clone(),
+                0,
+                false,
             );
         }
     });

@@ -164,6 +164,8 @@ pub enum MarkKind {
     VoronoiMesh,
     /// A tree diagram of a slash-separated hierarchy, Plot's `tree`.
     Tree,
+    /// A raster image painted at a position, Plot's `image`.
+    Image,
 }
 
 /// Which renderer family paints a mark.
@@ -305,6 +307,7 @@ impl MarkKind {
             MarkKind::Voronoi => "voronoi",
             MarkKind::VoronoiMesh => "voronoiMesh",
             MarkKind::Tree => "tree",
+            MarkKind::Image => "image",
         }
     }
 
@@ -491,6 +494,12 @@ impl MarkKind {
             // out from a `path` field, so it is not bivariate and draws through
             // the basic renderer.
             Tree => MarkCategory {
+                bivariate: false,
+                ..Default::default()
+            },
+            // An image is positioned by its own width and height, not by two
+            // positional channels, so it is not bivariate.
+            Image => MarkCategory {
                 bivariate: false,
                 ..Default::default()
             },
@@ -918,6 +927,8 @@ pub struct Mark {
     pub rotate: Option<NumberChannel>,
     /// How a date or number is bucketed into an interval, Plot's `interval`.
     pub interval: Option<Interval>,
+    /// The image an `image` mark paints, shared across its rows.
+    pub image: Option<std::sync::Arc<gpui::RenderImage>>,
 }
 
 /// A time or numeric bucket, Plot's `interval` option: turn a singular value
@@ -1096,6 +1107,7 @@ impl Mark {
             length: None,
             rotate: None,
             interval: None,
+            image: None,
         }
     }
 
@@ -1285,6 +1297,12 @@ impl Mark {
     /// by a fixed width.
     pub fn interval(mut self, interval: Interval) -> Self {
         self.interval = Some(interval);
+        self
+    }
+
+    /// Set the image an `image` mark paints, shared across its rows.
+    pub fn image(mut self, image: std::sync::Arc<gpui::RenderImage>) -> Self {
+        self.image = Some(image);
         self
     }
 
@@ -1734,6 +1752,12 @@ macro_rules! mark_builder {
                 self
             }
 
+            /// Set the image an `image` mark paints, shared across its rows.
+            pub fn image(mut self, image: std::sync::Arc<gpui::RenderImage>) -> Self {
+                self.0 = self.0.image(image);
+                self
+            }
+
             /// Sort the mark's rows by a field.
             pub fn sort(mut self, field: impl Into<SharedString>, descending: bool) -> Self {
                 self.0 = self.0.sort(field, descending);
@@ -2105,6 +2129,11 @@ mark_builder!(
     /// A tree diagram of a slash-separated hierarchy, Plot's `tree`.
     TreeMark,
     MarkKind::Tree
+);
+mark_builder!(
+    /// A raster image painted at a position, Plot's `image`.
+    ImageMark,
+    MarkKind::Image
 );
 
 impl Mark {

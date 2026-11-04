@@ -68,3 +68,20 @@ pub use transform::{
 pub use value::{PlotKind, Value};
 
 pub use plot::{Interaction, LegendPosition, Plot, PlotTitle};
+
+/// Build a [`gpui::RenderImage`] from RGBA pixels, for an `image` mark.
+///
+/// `rgba` is a `(width, height, bytes)` tri-plet of tightly-packed RGBA bytes
+/// (`height` rows of `width` pixels). The image mark paints it at its position;
+/// this is how a caller supplies pixels without GPUI's async image cache.
+pub fn image_from_rgba(
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+) -> std::sync::Arc<gpui::RenderImage> {
+    let buffer = image::RgbaImage::from_raw(width, height, rgba)
+        .expect("RGBA bytes must match width * height * 4");
+    let frame = image::Frame::new(buffer);
+    let render = gpui::RenderImage::new(smallvec::smallvec![frame]);
+    std::sync::Arc::new(render)
+}

@@ -415,3 +415,23 @@ fn round1(value: f64) -> f64 {
 fn round2(value: f64) -> f64 {
     (value * 100.).round() / 100.
 }
+
+/// A small deterministic RGBA image for the `image` mark: a blue-to-yellow
+/// horizontal gradient, so its pixels render visibly and its extent can be
+/// checked at a glance. The bytes are stable across runs.
+pub fn gradient_image() -> std::sync::Arc<gpui_kit::RenderImage> {
+    let (width, height) = (24u32, 24u32);
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for _y in 0..height {
+        for x in 0..width {
+            let t = x as f32 / (width - 1) as f32;
+            rgba.extend_from_slice(&[
+                (t * 255.) as u8, // red rises left→right
+                (t * 255.) as u8, // green blends blue→yellow
+                0,                // blue falls as red rises
+                255,              // opaque
+            ]);
+        }
+    }
+    gpui_plot::image_from_rgba(width, height, rgba)
+}

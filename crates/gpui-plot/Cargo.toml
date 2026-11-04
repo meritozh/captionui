@@ -9,3 +9,5 @@ publish.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 chrono.workspace = true
+image = "0.25"
+smallvec = "1"
