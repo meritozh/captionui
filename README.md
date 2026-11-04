@@ -234,8 +234,9 @@ tooltips, and hover highlighting.
 The full mark set now also covers `linearRegressionX`/`Y` with confidence bands,
 `bollingerX`/`Y`, `differenceX`/`Y`, `raster`, `hexgrid` and `hexbin` on Plot's
 own lattice, `cellX`/`cellY`, `textX`/`textY`, `vectorX`/`vectorY`, `vector`,
-`spike`, `arrow`, `waffleX`/`waffleY`, `boxX`/`boxY`, and the Delaunay family
-(`delaunayLink`, `delaunayMesh`, `hull`, `voronoi`, `voronoiMesh`).
+`spike`, `arrow`, `waffleX`/`waffleY`, `boxX`/`boxY`, `tree` (slash-separated
+hierarchies laid out tidily), and the Delaunay family (`delaunayLink`,
+`delaunayMesh`, `hull`, `voronoi`, `voronoiMesh`).
 
 Not implemented yet:
 
