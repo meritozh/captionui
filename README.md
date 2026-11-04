@@ -248,23 +248,26 @@ over daily dates draws one bar per month, Plot's `interval` transform.
 
 Not implemented yet:
 
-1. **d3-geo-scale projections** beyond the flat equirectangular view — the
-   `geo` mark ships an equirectangular projection of lon/lat onto the plot,
-   and `projection::centroid` averages a point list; full spherical (Mercator,
-   etc.) projections and GeoJSON shape rendering would need a d3-geo-class
-   ecosystem.
+1. **GeoJSON source loading** — the `geo` mark projects and shapes geography,
+   but a caller supplies the lon/lat points, paths and rings; Plot's ability to
+   load a GeoJSON file or URL and parse its polygons is left to the caller's
+   own data, since this desktop library ships no basemap dataset.
 
-`auto` also turns two quantitative fields with a `count` color into a
-heatmap — binning both axes and filling each cell by its count, Plot's
-`bin({fill: "count"}, {x, y})` — so the scatter, scatter-by-color, line,
-histogram, bar and heatmap branches are covered. Its finer cases (a barcode
-with no reducer, a `barX` heatmap from an ordinal axis) are left to explicit
-marks.
+`auto` covers the scatter, scatter-by-color, line, histogram, bar and heatmap
+branches (two quantitative fields with a `count` color bin both axes and fill
+each cell by its count, Plot's `bin({fill: "count"}, {x, y})`). The barcode —
+a bare quantitative field as a strip, no reduction — has its own `Plot::barcode`.
 
 The `image` mark paints a [`gpui::RenderImage`] at each datum's position —
 a caller supplies pixels synchronously via `gpui_plot::image_from_rgba`
 rather than GPUI's async image cache, so the mark works in the offscreen
 snapshot renderer too.
+
+The `geo` mark ships two projections — a flat **equirectangular** and a
+spherical **Mercator** — plus `projection::centroid`. It reads lon/lat
+channels for paths and points, or takes a GeoJSON-like ring of coastline to
+fill; `Projection::mercator`/`equirectangular` pick the mapping and fit its
+view.
 
 ### Adding a mark
 

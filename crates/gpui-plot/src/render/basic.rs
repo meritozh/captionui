@@ -1135,22 +1135,41 @@ fn draw_geo(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             else {
                 return None;
             };
-            let [fx, fy] = projection.project(lon, lat)?;
-            let x = plot.origin.x + px(plot.size.width.as_f32() * fx as f32);
-            let y = plot.origin.y + px(plot.size.height.as_f32() * fy as f32);
-            Some(point(x, y))
+            Some(project_point(plot, &projection, lon, lat))
         })
         .collect();
 
     let colors = Colors::resolve(prepared, ctx);
     ctx.clipped(|ctx| {
+        // Fill any GeoJSON-like rings: each ring's (lon, lat) projected and
+        // traced as a closed polygon, Plot's way of drawing geographic shapes.
+        if let Some(rings) = &prepared.mark.geo_geometry {
+            for ring in rings {
+                if ring.len() < 3 {
+                    continue;
+                }
+                let polygon: Vec<Point<Pixels>> = ring
+                    .iter()
+                    .map(|(lon, lat)| project_point(plot, &projection, *lon, *lat))
+                    .collect();
+                paint::paint_fill(&polygon, colors.fill(0), ctx.window);
+                // A stroke around the shape reads as a coastline.
+                let mut outline = PathBuilder::stroke(px(1.));
+                outline.move_to(polygon[0]);
+                for p in &polygon[1..] {
+                    outline.line_to(*p);
+                }
+                outline.close();
+                paint::paint_path(outline.build().ok(), colors.stroke(0), ctx.window);
+            }
+        }
         // A rounded path joining the projected points, in row order.
         let projected: Vec<Point<Pixels>> = points.iter().flatten().cloned().collect();
         if projected.len() >= 2 {
             let mut builder = PathBuilder::stroke(px(prepared.mark.style.stroke_width.max(1.)));
-            builder.move_to(ctx.absolute(projected[0]));
+            builder.move_to(projected[0]);
             for p in &projected[1..] {
-                builder.line_to(ctx.absolute(*p));
+                builder.line_to(*p);
             }
             paint::paint_path(builder.build().ok(), colors.stroke(0), ctx.window);
         }
@@ -1164,6 +1183,22 @@ fn draw_geo(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             );
         }
     });
+}
+
+/// An absolute window point for a degree (lon, lat), projected through `p`
+/// onto the plot's bounds. The frame's plot bounds are already in window
+/// coordinates, so adding the projected fraction places it in window space.
+fn project_point(
+    plot: Bounds<Pixels>,
+    p: &crate::projection::Projection,
+    lon: f64,
+    lat: f64,
+) -> Point<Pixels> {
+    let [fx, fy] = p.project(lon, lat);
+    point(
+        plot.origin.x + px(plot.size.width.as_f32() * fx as f32),
+        plot.origin.y + px(plot.size.height.as_f32() * fy as f32),
+    )
 }
 
 /// The plot-relative position of a row.

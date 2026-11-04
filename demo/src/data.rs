@@ -455,3 +455,17 @@ pub fn route() -> Vec<Table> {
     })
     .collect()
 }
+
+/// A rough coastline ring for the `geo` mark's GeoJSON shape: a lone islet's
+/// outline, a few (lon, lat) points the projected polygon fills. A real
+/// world-coast dataset would be much larger; this shows the shape path.
+pub fn islet() -> Vec<(f64, f64)> {
+    vec![
+        (-9.0, 42.0),
+        (-8.5, 42.8),
+        (-8.8, 43.4),
+        (-9.6, 43.6),
+        (-10.2, 43.0),
+        (-9.0, 42.0),
+    ]
+}

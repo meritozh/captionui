@@ -379,9 +379,23 @@ pub fn examples() -> Vec<Example> {
         Example {
             title: "Ship's track",
             section: "Marks / geo",
-            description: "Longitude and latitude projected equirectangularly, connected as a path.",
+            description: "Longitude and latitude projected by the spherical Mercator, connected as a path.",
             height: 440.,
             build: geo_plot,
+        },
+        Example {
+            title: "A projected islet",
+            section: "Marks / geo",
+            description: "A GeoJSON-like ring of coastline, projected and filled as a shape.",
+            height: 440.,
+            build: geo_shape_plot,
+        },
+        Example {
+            title: "Barcode",
+            section: "Marks / auto",
+            description: "One quantitative field as a strip of dots — Plot::auto's barcode, nothing binned or reduced.",
+            height: 440.,
+            build: barcode_plot,
         },
     ]
 }
@@ -1361,20 +1375,33 @@ fn image_plot() -> Plot {
 
 fn geo_plot() -> Plot {
     let data = data::route();
-    let projection = gpui_plot::Equirectangular {
-        west: -12.,
-        east: 5.,
-        north: 50.,
-        south: 42.,
-    };
+    let projection = gpui_plot::Projection::mercator(-12., 5., 50., 42.);
     Plot::new(data)
         .title("A ship's track across the Bay of Biscay")
-        .subtitle("Longitude and latitude, projected equirectangularly onto the plot")
+        .subtitle("Longitude and latitude, projected by the spherical Mercator onto the plot")
         .geo(|mark| {
             mark.x("lon")
                 .y("lat")
                 .projection(projection)
                 .stroke_width(2.)
         })
+        .grid(false)
+}
+
+fn geo_shape_plot() -> Plot {
+    let ring = data::islet();
+    let projection = gpui_plot::Projection::mercator(-11., -8., 44., 41.);
+    Plot::new(Vec::<Table>::new())
+        .title("A lone islet, projected")
+        .subtitle("A ring of coastline filled and stroked as a projected shape")
+        .geo(|mark| mark.ring(ring).projection(projection).stroke_width(1.))
+        .grid(false)
+}
+
+fn barcode_plot() -> Plot {
+    let data = data::curve_points();
+    Plot::barcode(data, "value")
+        .title("A strip of values, no binning")
+        .subtitle("Each dot is one datum's value along x — the barcode Plot::auto draws for a bare quantitative field")
         .grid(false)
 }

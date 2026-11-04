@@ -940,7 +940,10 @@ pub struct Mark {
     /// The image an `image` mark paints, shared across its rows.
     pub image: Option<std::sync::Arc<gpui::RenderImage>>,
     /// The projection a `geo` mark maps lon/lat through, Plot's `geo`.
-    pub projection: Option<crate::projection::Equirectangular>,
+    pub projection: Option<crate::projection::Projection>,
+    /// A GeoJSON-like collection of rings a `geo` mark fills — each ring a
+    /// closed loop of `(lon, lat)` degree points, Plot's way of drawing shapes.
+    pub geo_geometry: Option<Vec<Vec<(f64, f64)>>>,
 }
 
 /// A time or numeric bucket, Plot's `interval` option: turn a singular value
@@ -1121,6 +1124,7 @@ impl Mark {
             interval: None,
             image: None,
             projection: None,
+            geo_geometry: None,
         }
     }
 
@@ -1320,8 +1324,16 @@ impl Mark {
     }
 
     /// Set the equirectangular projection a `geo` mark maps lon/lat through.
-    pub fn projection(mut self, projection: crate::projection::Equirectangular) -> Self {
+    pub fn projection(mut self, projection: crate::projection::Projection) -> Self {
         self.projection = Some(projection);
+        self
+    }
+
+    /// Add a GeoJSON-like ring to a `geo` mark: a closed loop of `(lon, lat)`
+    /// degree points the mark fills as a projected shape.
+    pub fn ring(mut self, ring: Vec<(f64, f64)>) -> Self {
+        let geometry = self.geo_geometry.get_or_insert_with(Vec::new);
+        geometry.push(ring);
         self
     }
 
@@ -1779,8 +1791,14 @@ macro_rules! mark_builder {
 
             /// Set the equirectangular projection a `geo` mark maps lon/lat
             /// through.
-            pub fn projection(mut self, projection: crate::projection::Equirectangular) -> Self {
+            pub fn projection(mut self, projection: crate::projection::Projection) -> Self {
                 self.0 = self.0.projection(projection);
+                self
+            }
+
+            /// Add a GeoJSON-like ring a geo mark fills as a projected shape.
+            pub fn ring(mut self, ring: Vec<(f64, f64)>) -> Self {
+                self.0 = self.0.ring(ring);
                 self
             }
 

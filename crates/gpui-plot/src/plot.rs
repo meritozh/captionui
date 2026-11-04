@@ -209,6 +209,13 @@ impl Plot {
         crate::auto::build(&rows, x, y, color)
     }
 
+    /// A barcode: one quantitative field laid as a strip of dots along x,
+    /// nothing binned or reduced — Plot's `auto` with a `reduce: null` y.
+    pub fn barcode(data: impl IntoIterator<Item = Table>, field: &str) -> Self {
+        let rows: Vec<Table> = data.into_iter().collect();
+        Self::new(rows).dot_x(|mark| mark.x(field))
+    }
+
     /// Add a mark from its builder.
     pub fn mark(mut self, mark: impl Into<Mark>) -> Self {
         self.marks.push(mark.into());
