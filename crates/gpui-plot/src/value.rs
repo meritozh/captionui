@@ -160,6 +160,11 @@ impl PlotKind {
         matches!(self, PlotKind::Number | PlotKind::Date)
     }
 
+    /// Whether a scale for this kind is categorical (a band or ordinal scale).
+    pub fn is_ordinal(self) -> bool {
+        matches!(self, PlotKind::Text | PlotKind::Bool)
+    }
+
     /// The name Plot gives this kind, for axis and tooltip defaults.
     pub fn label(self) -> &'static str {
         match self {

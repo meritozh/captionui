@@ -341,6 +341,20 @@ pub fn examples() -> Vec<Example> {
             height: 440.,
             build: tree_plot,
         },
+        Example {
+            title: "Auto mark",
+            section: "Marks / auto",
+            description: "Plot::auto reads the data's shape and picks a dot — two quantitative, non-monotonic dimensions scatter.",
+            height: 440.,
+            build: auto_plot,
+        },
+        Example {
+            title: "Auto histogram",
+            section: "Marks / auto",
+            description: "One quantitative dimension: Plot::auto picks a histogram and bins the values.",
+            height: 440.,
+            build: auto_histogram_plot,
+        },
     ]
 }
 
@@ -1249,5 +1263,23 @@ fn tree_plot() -> Plot {
         .title("A family of Greek deities")
         .subtitle("Each slash-separated path is a node; links join parent and child")
         .tree(|mark| mark.path("path").stroke_width(1.5).r(3.))
+        .grid(false)
+}
+
+fn auto_plot() -> Plot {
+    let data = data::clusters();
+    Plot::auto(data, Some("x"), Some("y"), Some("group"))
+        .title("Two clusters, chosen automatically")
+        .subtitle(
+            "Two quantitative, non-monotonic dimensions: Plot::auto picks a dot, colored by group",
+        )
+        .grid(true)
+}
+
+fn auto_histogram_plot() -> Plot {
+    let data = data::temperature();
+    Plot::auto(data, Some("temperature"), None, None)
+        .title("A quantitative dimension, chosen automatically")
+        .subtitle("Plot::auto bins it into a histogram")
         .grid(false)
 }

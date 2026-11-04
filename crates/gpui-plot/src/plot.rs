@@ -193,6 +193,22 @@ impl Plot {
         plot
     }
 
+    /// A plot whose mark is chosen from the data's shape, Plot's `auto`.
+    ///
+    /// `x`/`y` name the fields to plot, and `color` optionally colors the mark.
+    /// Two quantitative fields scatter (or line when x is monotonic), one
+    /// quantitative field histograms, and an ordinal field bars against a
+    /// count.
+    pub fn auto(
+        data: impl IntoIterator<Item = Table>,
+        x: Option<&str>,
+        y: Option<&str>,
+        color: Option<&str>,
+    ) -> Self {
+        let rows: Vec<Table> = data.into_iter().collect();
+        crate::auto::build(&rows, x, y, color)
+    }
+
     /// Add a mark from its builder.
     pub fn mark(mut self, mark: impl Into<Mark>) -> Self {
         self.marks.push(mark.into());

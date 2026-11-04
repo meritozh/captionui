@@ -236,7 +236,10 @@ The full mark set now also covers `linearRegressionX`/`Y` with confidence bands,
 own lattice, `cellX`/`cellY`, `textX`/`textY`, `vectorX`/`vectorY`, `vector`,
 `spike`, `arrow`, `waffleX`/`waffleY`, `boxX`/`boxY`, `tree` (slash-separated
 hierarchies laid out tidily), and the Delaunay family (`delaunayLink`,
-`delaunayMesh`, `hull`, `voronoi`, `voronoiMesh`).
+`delaunayMesh`, `hull`, `voronoi`, `voronoiMesh`). A `Plot::auto` picks a
+mark from the data's shape — a dot for two non-monotonic quantitative fields,
+a line for a monotonic one, a histogram for a single quantitative field, a bar
+for an ordinal one — mirroring Plot's `auto` heuristics.
 
 Not implemented yet:
 
