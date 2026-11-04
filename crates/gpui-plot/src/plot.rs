@@ -140,6 +140,9 @@ pub struct Plot {
     /// The resolved facet grid, kept from the last frame so the tooltip
     /// phases place a facet the same way the marks did.
     facet_cache: Option<crate::facet::Grid>,
+    /// The marks resolved against the data, kept from the last frame so the
+    /// tooltip and hover phases do not re-run the transform pipeline.
+    facets_cache: Option<Vec<Vec<render::PreparedMark>>>,
     /// The hovered datum's index in the flattened row list, kept between
     /// frames so the hover presentation can fade out over the last datum.
     hover: Option<usize>,
@@ -175,6 +178,7 @@ impl Plot {
             fx: None,
             fy: None,
             facet_cache: None,
+            facets_cache: None,
             hover: None,
             hover_progress: 0.,
             frame_cache: None,
@@ -1627,6 +1631,9 @@ impl PlotTrait for Plot {
         // layout, and measure the labels that decide the margins.
         let theme = PlotTheme::from_theme(cx.theme());
         let grid = self.facet_grid();
+        // Resolve the marks once here and keep them: the hover, tooltip and
+        // paint phases re-read the same rows, so this is the only place the
+        // transform pipeline runs each frame.
         let (facets, populated) = render::prepare_facets(
             &self.data,
             &self.marks,
@@ -1634,6 +1641,7 @@ impl PlotTrait for Plot {
             self.fx.as_deref(),
             self.fy.as_deref(),
         );
+        self.facets_cache = Some(facets.clone());
         let mut grid = grid;
         grid.set_empty(&populated);
         let frame = self.resolve_frame(bounds, &theme, window, &facets, &grid);
@@ -1649,13 +1657,10 @@ impl PlotTrait for Plot {
             .facet_cache
             .clone()
             .unwrap_or_else(|| self.facet_grid());
-        let (mut facets, _) = render::prepare_facets(
-            &self.data,
-            &self.marks,
-            &grid,
-            self.fx.as_deref(),
-            self.fy.as_deref(),
-        );
+        let mut facets = self
+            .facets_cache
+            .clone()
+            .unwrap_or_else(|| render::prepare_facets(&self.data, &self.marks, &grid, self.fx.as_deref(), self.fy.as_deref()).0);
         let frame = match self.frame_cache.clone() {
             Some(frame) => frame,
             None => self.resolve_frame(bounds, &theme, window, &facets, &grid),
@@ -1796,13 +1801,10 @@ impl PlotTrait for Plot {
             .facet_cache
             .clone()
             .unwrap_or_else(|| self.facet_grid());
-        let (mut facets, _) = render::prepare_facets(
-            &self.data,
-            &self.marks,
-            &grid,
-            self.fx.as_deref(),
-            self.fy.as_deref(),
-        );
+        let mut facets = self
+            .facets_cache
+            .clone()
+            .unwrap_or_else(|| render::prepare_facets(&self.data, &self.marks, &grid, self.fx.as_deref(), self.fy.as_deref()).0);
         // The dodge packs each facet's rows in its own facet's pixels.
         let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, 0), &frame));
         for marks in facets.iter_mut() {
@@ -1878,13 +1880,10 @@ impl PlotTrait for Plot {
             .facet_cache
             .clone()
             .unwrap_or_else(|| self.facet_grid());
-        let (facets, _) = render::prepare_facets(
-            &self.data,
-            &self.marks,
-            &grid,
-            self.fx.as_deref(),
-            self.fy.as_deref(),
-        );
+        let facets = self
+            .facets_cache
+            .clone()
+            .unwrap_or_else(|| render::prepare_facets(&self.data, &self.marks, &grid, self.fx.as_deref(), self.fy.as_deref()).0);
 
         // The hover carries the index the pointer resolved to, in the same
         // flattened row list `tooltip_state` searched.
