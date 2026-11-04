@@ -350,6 +350,28 @@ fn derive_intervals(
     y2: &mut Option<Value>,
 ) {
     let unset = |start: &Option<Value>, end: &Option<Value>| start.is_none() && end.is_none();
+    // An interval buckets a singular date or number into a continuous extent:
+    // `x` (or `y`) becomes the `[start, end)` that spans its bucket, so a
+    // `rectY` over dates draws one bar per bucket. This runs first, before the
+    // mark's own baseline derivation, and only when the mark names no interval
+    // channels of its own.
+    if let Some(interval) = mark.interval {
+        // The interval buckets the mark's *primary* positional channel — x when
+        // the mark reads an x, else y — so a `rectY` over dates buckets its
+        // date axis and leaves the value axis to the baseline derivation below.
+        // Bucketing both would turn the count into an extent too.
+        if mark.channels.x.is_some() && unset(x1, x2) && !x.is_null() {
+            if let Some((start, end)) = interval.extent(x) {
+                *x1 = Some(interval_value(x, start));
+                *x2 = Some(interval_value(x, end));
+            }
+        } else if mark.channels.x.is_none() && unset(y1, y2) && !y.is_null()
+            && let Some((start, end)) = interval.extent(y)
+        {
+            *y1 = Some(interval_value(y, start));
+            *y2 = Some(interval_value(y, end));
+        }
+    }
     match mark.kind {
         MarkKind::BarY | MarkKind::AreaY | MarkKind::WaffleY if unset(y1, y2) && !y.is_null() => {
             *y1 = Some(Value::Number(0.));
@@ -381,6 +403,17 @@ fn derive_intervals(
             }
         }
         _ => {}
+    }
+}
+
+/// An interval boundary as a [`Value`], matching the singuar value it buckets:
+/// a date stays a date (so the axis scales temporally and labels as calendar
+/// dates), a number stays a number.
+fn interval_value(source: &Value, millis_or_number: f64) -> Value {
+    if source.as_date().is_some() {
+        Value::date_from_millis(millis_or_number as i64)
+    } else {
+        Value::Number(millis_or_number)
     }
 }
 
@@ -1479,4 +1512,93 @@ mod transform_order_tests {
         assert_eq!(rows[1].x_value(), &Value::text("b"));
         assert_eq!(rows[1].y_value(), &Value::Number(7.));
     }
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+    use crate::mark::{Interval, Mark, MarkKind};
+
+    #[test]
+    fn a_numeric_step_buckets_x_into_an_interval() {
+        let data = vec![
+            Table::empty()
+                .with("t", Value::Number(5.))
+                .with("v", Value::Number(2.)),
+        ];
+        let mark = Mark::new(MarkKind::RectY)
+            .x("t")
+            .y("v")
+            .interval(Interval::Step(10.));
+        let rows = &prepare(&Dataset::new(data), &[mark])[0].rows;
+        // 5 floors to [0, 10); the value grows the y interval to [0, 2].
+        assert_eq!(rows[0].x1, Some(Value::Number(0.)));
+        assert_eq!(rows[0].x2, Some(Value::Number(10.)));
+        assert_eq!(rows[0].y1, Some(Value::Number(0.)));
+        assert_eq!(rows[0].y2, Some(Value::Number(2.)));
+    }
+
+    #[test]
+    fn a_day_interval_buckets_dates_by_calendar_day() {
+        let date = Value::date(chrono::NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let data = vec![Table::empty().with("t", date).with("v", Value::Number(4.))];
+        let mark = Mark::new(MarkKind::RectY)
+            .x("t")
+            .y("v")
+            .interval(Interval::Day);
+        let rows = &prepare(&Dataset::new(data), &[mark])[0].rows;
+        let start = rows[0].x1.as_ref().unwrap().as_number().unwrap();
+        let end = rows[0].x2.as_ref().unwrap().as_number().unwrap();
+        // Midnight on the 15th to midnight on the 16th.
+        let midnight = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 3, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis() as f64;
+        assert_eq!(start, midnight);
+        assert_eq!(end, midnight + 86_400_000.);
+    }
+}
+
+#[cfg(test)]
+mod interval_domain_tests {
+    use super::*;
+    use crate::mark::{Interval, Mark, MarkKind};
+
+    #[test]
+    fn month_interval_domain_spans_the_data() {
+        let dates = (0..3)
+            .map(|m| {
+                Table::empty()
+                    .with(
+                        "d",
+                        Value::date(chrono::NaiveDate::from_ymd_opt(2024, m + 1, 15).unwrap()),
+                    )
+                    .with("v", Value::Number(1.))
+            })
+            .collect::<Vec<_>>();
+        let mark = Mark::new(MarkKind::RectY)
+            .x("d")
+            .y("v")
+            .interval(Interval::Month);
+        let prepared = prepare(&Dataset::new(dates), &[mark]);
+        let xs = crate::render::basic::x_values(&prepared[0]);
+        let first = xs[0].clone();
+        let kinds: Vec<_> = xs.iter().map(|v| v.kind()).collect();
+        assert!(
+            kinds.iter().all(|k| *k == PlotKind::Date),
+            "interval boundaries must stay dates: {kinds:?}"
+        );
+        assert_eq!(first.kind(), PlotKind::Date);
+        // First boundary is Jan 1 2024, not 1980.
+        let millis = first.as_date().unwrap().timestamp_millis();
+        assert_eq!(
+            millis,
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 1, 1, 0, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp_millis()
+        );
+    }
+
+    use crate::value::PlotKind;
 }

@@ -239,7 +239,10 @@ hierarchies laid out tidily), and the Delaunay family (`delaunayLink`,
 `delaunayMesh`, `hull`, `voronoi`, `voronoiMesh`). A `Plot::auto` picks a
 mark from the data's shape — a dot for two non-monotonic quantitative fields,
 a line for a monotonic one, a histogram for a single quantitative field, a bar
-for an ordinal one — mirroring Plot's `auto` heuristics.
+for an ordinal one — mirroring Plot's `auto` heuristics. A mark's
+`interval` option buckets a date or number into an extent — `Day`/`Month`/
+`Year` on a calendar, a fixed `Step` on a number — so a `rectY` over daily
+dates draws one bar per month, Plot's `interval` transform.
 
 Not implemented yet:
 

@@ -355,6 +355,13 @@ pub fn examples() -> Vec<Example> {
             height: 440.,
             build: auto_histogram_plot,
         },
+        Example {
+            title: "Monthly bars",
+            section: "Transforms / interval",
+            description: "A daily series bucketed into calendar months: each bar spans its month, the value its total.",
+            height: 440.,
+            build: interval_plot,
+        },
     ]
 }
 
@@ -1281,5 +1288,18 @@ fn auto_histogram_plot() -> Plot {
     Plot::auto(data, Some("temperature"), None, None)
         .title("A quantitative dimension, chosen automatically")
         .subtitle("Plot::auto bins it into a histogram")
+        .grid(false)
+}
+
+fn interval_plot() -> Plot {
+    let data = data::temperature();
+    Plot::new(data)
+        .title("Temperature by month")
+        .subtitle("A daily series bucketed into calendar months with the interval transform")
+        .rect_y(|mark| {
+            mark.x("date")
+                .y("temperature")
+                .interval(gpui_plot::Interval::Month)
+        })
         .grid(false)
 }

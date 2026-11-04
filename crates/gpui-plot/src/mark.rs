@@ -916,6 +916,84 @@ pub struct Mark {
     pub length: Option<NumberChannel>,
     /// A vector's rotation per datum, Plot's `rotate` channel, in degrees.
     pub rotate: Option<NumberChannel>,
+    /// How a date or number is bucketed into an interval, Plot's `interval`.
+    pub interval: Option<Interval>,
+}
+
+/// A time or numeric bucket, Plot's `interval` option: turn a singular value
+/// into an extent `[floor, floor + step)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Interval {
+    /// Whole years.
+    Year,
+    /// Whole calendar months.
+    Month,
+    /// Whole days.
+    Day,
+    /// A fixed numeric step.
+    Step(f64),
+}
+
+impl Interval {
+    /// The extent this interval spans for a value, `(start, end)`, in the
+    /// value's own units (dates as UTC instants, numbers as numbers).
+    pub fn extent(self, value: &crate::value::Value) -> Option<(f64, f64)> {
+        let instant = value.as_number()?;
+        use chrono::{Datelike, Duration, TimeZone, Utc};
+        let (start, end) = match self {
+            Interval::Day => {
+                let date = Utc.timestamp_millis_opt(instant as i64).single()?;
+                let start = date
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)?
+                    .and_utc()
+                    .timestamp_millis();
+                let end = start + Duration::days(1).num_milliseconds();
+                (start as f64, end as f64)
+            }
+            Interval::Month => {
+                let date = Utc.timestamp_millis_opt(instant as i64).single()?;
+                // Reconstruct the first of the month directly from its
+                // year and month, so a date like Jan 31 doesn't rely on
+                // clamping `with_month`/`with_day` (which returns None when
+                // the day doesn't fit the new month).
+                let naive = date.date_naive();
+                let start = Utc
+                    .with_ymd_and_hms(naive.year(), naive.month(), 1, 0, 0, 0)
+                    .single()?
+                    .timestamp_millis();
+                let (end_year, end_month) = if naive.month() == 12 {
+                    (naive.year() + 1, 1)
+                } else {
+                    (naive.year(), naive.month() + 1)
+                };
+                let end = Utc
+                    .with_ymd_and_hms(end_year, end_month, 1, 0, 0, 0)
+                    .single()?
+                    .timestamp_millis();
+                (start as f64, end as f64)
+            }
+            Interval::Year => {
+                let date = Utc.timestamp_millis_opt(instant as i64).single()?;
+                let naive = date.date_naive();
+                let start = Utc
+                    .with_ymd_and_hms(naive.year(), 1, 1, 0, 0, 0)
+                    .single()?
+                    .timestamp_millis();
+                let end = Utc
+                    .with_ymd_and_hms(naive.year() + 1, 1, 1, 0, 0, 0)
+                    .single()?
+                    .timestamp_millis();
+                (start as f64, end as f64)
+            }
+            Interval::Step(width) if width > 0. => {
+                let start = (instant / width).floor() * width;
+                (start, start + width)
+            }
+            Interval::Step(_) => return None,
+        };
+        Some((start, end))
+    }
 }
 
 /// A [`Mark::select`] configuration, Plot's `select`.
@@ -1017,6 +1095,7 @@ impl Mark {
             shuffle: None,
             length: None,
             rotate: None,
+            interval: None,
         }
     }
 
@@ -1194,6 +1273,18 @@ impl Mark {
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
         self.bin = Some(BinConfig { thresholds });
+        self
+    }
+
+    /// Bucket a date or number into an interval, Plot's `interval`.
+    ///
+    /// A mark with a singular `x` (or `y`) value and an interval replaces it
+    /// with an x interval spanning its bucket: a `Day` on a date turns each
+    /// datum into `[midnight, next midnight)`, so a `rectY` draws one bar per
+    /// day. A `Month`/`Year` bucket the calendar; a `Step(n)` buckets numbers
+    /// by a fixed width.
+    pub fn interval(mut self, interval: Interval) -> Self {
+        self.interval = Some(interval);
         self
     }
 
@@ -1634,6 +1725,12 @@ macro_rules! mark_builder {
             /// Bin the mark's data.
             pub fn bin(mut self, thresholds: Thresholds) -> Self {
                 self.0 = self.0.bin(thresholds);
+                self
+            }
+
+            /// Bucket a date or number into an interval, Plot's `interval`.
+            pub fn interval(mut self, interval: Interval) -> Self {
+                self.0 = self.0.interval(interval);
                 self
             }
 
