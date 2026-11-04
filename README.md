@@ -246,8 +246,17 @@ dates draws one bar per month, Plot's `interval` transform.
 
 Not implemented yet:
 
-1. **Geo projections**, which are out of scope for a desktop chart library
-   with no basemap ecosystem.
+1. **Geo projections** (`geo` and the `geoCentroid`/`centroid` transforms),
+   which are out of scope for a desktop chart library with no basemap
+   ecosystem.
+2. **The `image` mark**, which draws a raster read from a URL or file path —
+   GPUI decodes images through its async image cache rather than a sync buffer,
+   which the plot's paint path and the offscreen snapshot renderer can't
+   resolve deterministically.
+
+The `auto` mark picks dots, lines, histograms and bars; its finer reducer
+branches — a heatmap from two binned quantitative fields, a barcode with no
+reducer, a `barX` heatmap from an ordinal axis — are left to explicit marks.
 
 ### Adding a mark
 

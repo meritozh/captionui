@@ -365,7 +365,9 @@ fn derive_intervals(
                 *x1 = Some(interval_value(x, start));
                 *x2 = Some(interval_value(x, end));
             }
-        } else if mark.channels.x.is_none() && unset(y1, y2) && !y.is_null()
+        } else if mark.channels.x.is_none()
+            && unset(y1, y2)
+            && !y.is_null()
             && let Some((start, end)) = interval.extent(y)
         {
             *y1 = Some(interval_value(y, start));
