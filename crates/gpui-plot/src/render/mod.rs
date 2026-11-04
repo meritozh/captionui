@@ -755,12 +755,14 @@ fn bin_rows(data: &Dataset, mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRo
     };
     // A vertical mark bins along x and counts on y; a horizontal one the
     // other way round. Plot picks this from the mark, not from which channel
-    // happens to be set — `rectX` names its field on x yet bins along y.
-    let bin_x = match mark.kind {
-        MarkKind::BarX | MarkKind::RectX => false,
-        MarkKind::BarY | MarkKind::RectY => true,
-        _ => mark.channels.x.is_some(),
-    };
+    // happens to be set — `rectX` names its field on x yet bins along y. The
+    // mark's classification pins the axis for the marks that have a fixed one,
+    // and a mark without one bins along whatever channel it names.
+    let bin_x = mark
+        .kind
+        .category()
+        .bins_on_x
+        .unwrap_or(mark.channels.x.is_some());
 
     let (bins, _domain) = transform::bin(data, &field, bin.thresholds);
     bins.into_iter()
@@ -818,7 +820,7 @@ fn stack_rows(rows: Vec<PreparedRow>, mark: &Mark) -> Vec<PreparedRow> {
 
     // A horizontal mark puts its categories on y and its values on x; a
     // vertical one is the other way round.
-    let group_by_y = matches!(mark.kind, MarkKind::BarX | MarkKind::AreaX);
+    let group_by_y = mark.kind.category().groups_on_y;
     let (category_channel, value_channel) = if group_by_y {
         (&mark.channels.y, &mark.channels.x)
     } else {
@@ -862,7 +864,7 @@ fn stack_rows_from_series(
     mark: &Mark,
     series: &[StackedSeries],
 ) -> Vec<PreparedRow> {
-    let group_by_y = matches!(mark.kind, MarkKind::BarX | MarkKind::AreaX);
+    let group_by_y = mark.kind.category().groups_on_y;
     let mut out: Vec<PreparedRow> = Vec::new();
 
     for stacked in series {

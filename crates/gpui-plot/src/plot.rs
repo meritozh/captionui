@@ -1608,24 +1608,11 @@ fn marks_use_band(facets: &[Vec<PreparedMark>], along_x: bool) -> bool {
         if !discrete {
             return false;
         }
-        match prepared.mark.kind {
-            // A bar's width and a cell's extent fill a band.
-            MarkKind::BarY | MarkKind::Cell | MarkKind::WaffleY if along_x => true,
-            MarkKind::BarX | MarkKind::Cell | MarkKind::WaffleX if !along_x => true,
-            // A band `y` is the ordinal secondary axis of tickX, and the
-            // category axis of the box and violin marks.
-            MarkKind::TickX | MarkKind::BoxX | MarkKind::ViolinX | MarkKind::DensityX
-                if !along_x =>
-            {
-                true
-            }
-            MarkKind::TickY | MarkKind::BoxY | MarkKind::ViolinY | MarkKind::DensityY
-                if along_x =>
-            {
-                true
-            }
-            _ => false,
-        }
+        // A mark's band direction is part of its classification: a bar's
+        // width, a cell's extent, a tick's ordinal secondary axis and a
+        // box/violin/density's category axis all fill a band.
+        let cat = prepared.mark.kind.category();
+        if along_x { cat.band_x } else { cat.band_y }
     })
 }
 
@@ -1718,27 +1705,15 @@ impl PlotTrait for Plot {
                     cx,
                 };
                 row_offset += mark.rows.len();
-                match mark.mark.kind {
-                    MarkKind::Pie
-                    | MarkKind::Arc
-                    | MarkKind::Waffle
-                    | MarkKind::BoxX
-                    | MarkKind::BoxY
-                    | MarkKind::ViolinX
-                    | MarkKind::ViolinY
-                    | MarkKind::DensityX
-                    | MarkKind::DensityY
-                    | MarkKind::Hexbin
-                    | MarkKind::Contour => render::radial::draw(mark, &mut ctx),
+                // Which renderer family paints the mark, read from its single
+                // classification table rather than a hand-maintained list here.
+                match mark.mark.kind.category().family {
+                    crate::mark::MarkFamily::Radial => render::radial::draw(mark, &mut ctx),
                     // The Delaunay marks build their geometry from the
                     // projected points, so they draw through the frame's
                     // pixel space rather than the row shapes.
-                    MarkKind::DelaunayLink
-                    | MarkKind::DelaunayMesh
-                    | MarkKind::Hull
-                    | MarkKind::Voronoi
-                    | MarkKind::VoronoiMesh => render::delaunay::draw(mark, &mut ctx),
-                    _ => render::basic::draw(mark, &mut ctx),
+                    crate::mark::MarkFamily::Delaunay => render::delaunay::draw(mark, &mut ctx),
+                    crate::mark::MarkFamily::Basic => render::basic::draw(mark, &mut ctx),
                 }
             }
         }
