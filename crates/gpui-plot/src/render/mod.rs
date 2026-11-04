@@ -1236,6 +1236,58 @@ mod facet_tests {
         assert_eq!(facets[0][0].rows.len(), 1);
         assert!(populated.is_empty());
     }
+
+    #[test]
+    fn preparing_is_a_pure_function() {
+        // Plot caches the prepared facets from prepaint and reuses them for
+        // hover, tooltip and paint. That is only faithful if resolving the
+        // same data twice yields identical rows — not just the same values,
+        // but the same per-row records, so a hovered datum is placed exactly
+        // where it was painted.
+        let rows = vec![
+            Table::empty()
+                .with("f", Value::text("one"))
+                .with("x", Value::Number(1.))
+                .with("v", Value::Number(10.)),
+            Table::empty()
+                .with("f", Value::text("one"))
+                .with("x", Value::Number(2.))
+                .with("v", Value::Number(20.)),
+        ];
+        let mark = Mark::new(MarkKind::Dot).x("x").y("v");
+        let grid = Grid::from_values(vec![Value::text("one")], Vec::new());
+        let dataset = Dataset::new(rows);
+
+        let (first, _) = prepare_facets(&dataset, std::slice::from_ref(&mark), &grid, Some("f"), None);
+        for _ in 0..2 {
+            let (again, _) = prepare_facets(&dataset, std::slice::from_ref(&mark), &grid, Some("f"), None);
+            // PreparedMark is not PartialEq (its mark holds closures), so
+            // compare the resolved rows: the shape is the position a hovered
+            // datum is placed at, and it must be identical across calls.
+            let describe = |facets: &[Vec<PreparedMark>]| {
+                let cell = &facets[0][0];
+                (
+                    cell.mark.kind,
+                    cell.rows
+                        .iter()
+                        .map(|row| {
+                            (
+                                row.x_value().clone(),
+                                row.y_value().clone(),
+                                row.index,
+                                row.row.value("v"),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            };
+            assert_eq!(
+                describe(&first),
+                describe(&again),
+                "preparation must be stable across calls"
+            );
+        }
+    }
 }
 
 /// The transforms' composition order in [`prepare_mark`], pinned so a future
