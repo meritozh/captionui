@@ -1237,3 +1237,138 @@ mod facet_tests {
         assert!(populated.is_empty());
     }
 }
+
+/// The transforms' composition order in [`prepare_mark`], pinned so a future
+/// rearrangement cannot silently reorder them.
+///
+/// The pipeline is `select/reduce` → `map` → `shift` → `shuffle` (record
+/// rewrites, run on the cloned `Dataset` before any row resolves), then
+/// `sort` → `window` → `normalize` → `group` → `reduce` → `bin` → `stack` (row
+/// rewrites, run on the resolved rows). Each test below exercises one edge of
+/// that order: if a transform moved, an observable value changes.
+#[cfg(test)]
+mod transform_order_tests {
+    use super::*;
+    use crate::mark::{Mark, MarkKind, MapReducer};
+    use crate::transform::WindowReducer;
+
+    fn nums(values: &[f64]) -> Vec<Table> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                Table::empty()
+                    .with("x", Value::Number(i as f64))
+                    .with("g", Value::text(if i % 2 == 0 { "a" } else { "b" }))
+                    .with("v", Value::Number(*v))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn map_runs_before_resolve() {
+        // `map` folds `v` into a new `total` field; the y channel reads it, so
+        // the field must exist before the row resolves. If resolve ran first,
+        // the y channel would find no `total` and read nothing.
+        let mark = Mark::new(MarkKind::BarY)
+            .x("x")
+            .y("total")
+            .map("v", "total", MapReducer::Sum);
+        let rows = &prepare(&Dataset::new(nums(&[1., 2., 3., 4.])), &[mark])[0].rows;
+        assert_eq!(
+            rows.iter().map(|r| r.y_value()).collect::<Vec<_>>(),
+            vec![&Value::Number(1.), &Value::Number(3.), &Value::Number(6.), &Value::Number(10.)]
+        );
+    }
+
+    #[test]
+    fn shift_runs_before_resolve() {
+        let mark = Mark::new(MarkKind::BarY).x("x").y("shifted").shift("v", "shifted", 10.);
+        let rows = &prepare(&Dataset::new(nums(&[1., 2., 3.])), &[mark])[0].rows;
+        assert_eq!(
+            rows.iter().map(|r| r.y_value()).collect::<Vec<_>>(),
+            vec![&Value::Number(11.), &Value::Number(12.), &Value::Number(13.)]
+        );
+    }
+
+    #[test]
+    fn sort_runs_before_group() {
+        // Sorting by the value, then grouping by x, must group in the sorted
+        // (descending) order. If group ran first, the categories would appear
+        // in their original order.
+        let mark = Mark::new(MarkKind::BarY)
+            .x("x")
+            .y("v")
+            .sort("v", true)
+            .group_x();
+        let rows = &prepare(&Dataset::new(nums(&[10., 1., 20., 2.])), &[mark])[0].rows;
+        // Sorted descending: 20 (i=2), 10 (i=0), 2 (i=3), 1 (i=1). Grouped by
+        // x, so the x values keep the sorted encounter order.
+        assert_eq!(rows[0].x_value(), &Value::Number(2.));
+        assert_eq!(rows[1].x_value(), &Value::Number(0.));
+        assert_eq!(rows[2].x_value(), &Value::Number(3.));
+        assert_eq!(rows[3].x_value(), &Value::Number(1.));
+    }
+
+    #[test]
+    fn window_runs_before_draw() {
+        // A window rewrites the y value in place; the first row of a backward
+        // cumulative window is its own value only if the window ran before the
+        // rows were read for placement.
+        let mark = Mark::new(MarkKind::Line)
+            .x("x")
+            .y("v")
+            .window(2, WindowReducer::CumulativeMean, Anchor::Start);
+        let rows = &prepare(&Dataset::new(nums(&[2., 4., 6., 8.])), &[mark])[0].rows;
+        // Cumulative means: 2, 3, 4, 5.
+        assert_eq!(
+            rows.iter().map(|r| r.y_value()).collect::<Vec<_>>(),
+            vec![
+                &Value::Number(2.),
+                &Value::Number(3.),
+                &Value::Number(4.),
+                &Value::Number(5.)
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_rescales_before_group_counts() {
+        // `normalize` rescales y to [0, 1] and a `group` then bins by it. Three
+        // equal rows normalize to the same point, so their group's count sees
+        // the normalized value, not the raw one.
+        let data = vec![
+            Table::empty().with("x", Value::Number(0.)).with("g", Value::text("a")).with("v", Value::Number(10.)),
+            Table::empty().with("x", Value::Number(1.)).with("g", Value::text("a")).with("v", Value::Number(20.)),
+            Table::empty().with("x", Value::Number(2.)).with("g", Value::text("a")).with("v", Value::Number(0.)),
+        ];
+        let mark = Mark::new(MarkKind::BarY).x("g").y("v").normalize().group_x();
+        let rows = &prepare(&Dataset::new(data), &[mark])[0].rows;
+        // All three share x="a", so one group. Its count is 3 regardless of
+        // the normalized values; the important edge is that normalize ran on
+        // the whole set first (span 20), not after grouping.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].y_value(), &Value::Number(3.));
+    }
+
+    #[test]
+    fn reduce_runs_after_resolve() {
+        // `reduce` by sum collapses rows sharing a category (x here) into one
+        // total. If reduce ran before the rows were resolved, the categories
+        // wouldn't be available to group on.
+        let data = vec![
+            Table::empty().with("x", Value::text("a")).with("v", Value::Number(1.)),
+            Table::empty().with("x", Value::text("a")).with("v", Value::Number(2.)),
+            Table::empty().with("x", Value::text("b")).with("v", Value::Number(3.)),
+            Table::empty().with("x", Value::text("b")).with("v", Value::Number(4.)),
+        ];
+        let mark = Mark::new(MarkKind::BarY).x("x").y("v").reduce(Reducer::Sum);
+        let rows = &prepare(&Dataset::new(data), &[mark])[0].rows;
+        // One row per category, summed.
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].x_value(), &Value::text("a"));
+        assert_eq!(rows[0].y_value(), &Value::Number(3.));
+        assert_eq!(rows[1].x_value(), &Value::text("b"));
+        assert_eq!(rows[1].y_value(), &Value::Number(7.));
+    }
+}
