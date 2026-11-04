@@ -48,6 +48,7 @@ pub mod table;
 pub mod theme;
 pub mod ticks;
 pub mod transform;
+pub mod tree;
 pub mod value;
 
 pub use mark::{Axis, GroupConfig, GroupOutput, MapConfig, MapReducer, SelectConfig, ShiftConfig};

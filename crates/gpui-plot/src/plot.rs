@@ -762,6 +762,16 @@ impl Plot {
         self
     }
 
+    /// Add a tree diagram of a slash-separated hierarchy, Plot's `tree`.
+    pub fn tree(
+        mut self,
+        configure: impl FnOnce(crate::mark::TreeMark) -> crate::mark::TreeMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::TreeMark::new()).into());
+        self
+    }
+
     /// Add a Delaunay triangulation drawn as links, Plot's `delaunayLink`.
     pub fn delaunay_link(
         mut self,

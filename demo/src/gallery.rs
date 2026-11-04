@@ -334,6 +334,13 @@ pub fn examples() -> Vec<Example> {
             height: 400.,
             build: grouped_counts,
         },
+        Example {
+            title: "Family tree",
+            section: "Marks / tree",
+            description: "A hierarchy of slash-separated paths drawn as a tree: a link per parent–child, a dot per node.",
+            height: 440.,
+            build: tree_plot,
+        },
     ]
 }
 
@@ -1233,5 +1240,14 @@ fn grouped_counts() -> Plot {
         .subtitle("One bar per month, its height the readings that month holds")
         .bar_y(|mark| mark.x("month").y("reading").group_x().corner_radius(2.))
         .y_zero(true)
+        .grid(false)
+}
+
+fn tree_plot() -> Plot {
+    let data = data::genealogy();
+    Plot::new(data)
+        .title("A family of Greek deities")
+        .subtitle("Each slash-separated path is a node; links join parent and child")
+        .tree(|mark| mark.path("path").stroke_width(1.5).r(3.))
         .grid(false)
 }

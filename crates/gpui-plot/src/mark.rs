@@ -162,6 +162,8 @@ pub enum MarkKind {
     Voronoi,
     /// The Voronoi mesh of the data, Plot's `voronoiMesh`.
     VoronoiMesh,
+    /// A tree diagram of a slash-separated hierarchy, Plot's `tree`.
+    Tree,
 }
 
 /// Which renderer family paints a mark.
@@ -302,6 +304,7 @@ impl MarkKind {
             MarkKind::Hull => "hull",
             MarkKind::Voronoi => "voronoi",
             MarkKind::VoronoiMesh => "voronoiMesh",
+            MarkKind::Tree => "tree",
         }
     }
 
@@ -484,6 +487,13 @@ impl MarkKind {
             },
             // The Delaunay marks triangulate the projected points.
             DelaunayLink | DelaunayMesh | Hull | Voronoi | VoronoiMesh => delaunay,
+            // The tree reads no positional channels: it lays its own hierarchy
+            // out from a `path` field, so it is not bivariate and draws through
+            // the basic renderer.
+            Tree => MarkCategory {
+                bivariate: false,
+                ..Default::default()
+            },
         }
     }
 
@@ -665,6 +675,8 @@ pub struct Channels {
     pub stroke: Option<ColorChannel>,
     /// The radius of a dot.
     pub r: Option<NumberChannel>,
+    /// A node's slash-separated path in a hierarchy, for the `tree` mark.
+    pub path: Option<Channel>,
     /// The text of a label, Plot's `text`.
     pub text: Option<Channel>,
     /// The symbol of a dot, Plot's `symbol`.
@@ -1065,6 +1077,12 @@ impl Mark {
     /// Set the radius of a dot, in pixels.
     pub fn r(mut self, radius: impl Into<NumberChannel>) -> Self {
         self.channels.r = Some(radius.into());
+        self
+    }
+
+    /// Set a node's hierarchy path, for the `tree` mark.
+    pub fn path(mut self, channel: impl IntoChannel) -> Self {
+        self.channels.path = Some(channel.into_channel());
         self
     }
 
@@ -1510,6 +1528,12 @@ macro_rules! mark_builder {
             /// Set the radius of a dot, in pixels.
             pub fn r(mut self, radius: impl Into<NumberChannel>) -> Self {
                 self.0 = self.0.r(radius);
+                self
+            }
+
+            /// Set a node's hierarchy path, for the `tree` mark.
+            pub fn path(mut self, channel: impl IntoChannel) -> Self {
+                self.0 = self.0.path(channel);
                 self
             }
 
@@ -1979,6 +2003,11 @@ mark_builder!(
     /// The Voronoi mesh of the data, Plot's `voronoiMesh`.
     VoronoiMeshMark,
     MarkKind::VoronoiMesh
+);
+mark_builder!(
+    /// A tree diagram of a slash-separated hierarchy, Plot's `tree`.
+    TreeMark,
+    MarkKind::Tree
 );
 
 impl Mark {

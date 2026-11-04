@@ -346,6 +346,34 @@ fn flow_row(source: &str, target: &str) -> f64 {
     source * 2. + target
 }
 
+/// A family tree as slash-separated paths, for the `tree` mark: one row per
+/// descendant path, so shared prefixes make the hierarchy.
+pub fn genealogy() -> Vec<Table> {
+    const PATHS: [&str; 13] = [
+        "Root",
+        "Root/Athena",
+        "Root/Athena/Pallas",
+        "Root/Athena/Nike",
+        "Root/Ares",
+        "Root/Ares/Deimos",
+        "Root/Ares/Phobos",
+        "Root/Hermes",
+        "Root/Hermes/Pan",
+        "Root/Hermes/Daphnis",
+        "Root/Apollo",
+        "Root/Apollo/Asclepius",
+        "Root/Apollo/Python",
+    ];
+    PATHS
+        .into_iter()
+        .map(|path| {
+            Table::empty()
+                .with("path", Value::text(path))
+                .with("node", Value::text(path.rsplit('/').next().unwrap_or(path)))
+        })
+        .collect()
+}
+
 /// A short, irregular series for comparing curve interpolations: a dozen
 /// points that make a spline's overshoot visible.
 pub fn curve_points() -> Vec<Table> {

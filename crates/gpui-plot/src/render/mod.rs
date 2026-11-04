@@ -46,6 +46,8 @@ pub struct PreparedRow {
     pub y2: Option<Value>,
     /// The series a mark groups by.
     pub z: Option<Value>,
+    /// A hierarchy path, read for the `tree` mark.
+    pub path: Option<SharedString>,
     /// The resolved radius of a dot.
     pub r: Option<f32>,
     /// The resolved symbol of a dot.
@@ -428,6 +430,12 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
         y1,
         y2,
         z,
+        path: channels
+            .path
+            .as_ref()
+            .map(|channel| channel.read(row))
+            .filter(|v| !v.is_null())
+            .map(|v| v.label()),
         r: channels.r.as_ref().map(|channel| channel.read(row)),
         symbol: channels
             .symbol
@@ -779,6 +787,7 @@ fn bin_rows(data: &Dataset, mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRo
                 y1: None,
                 y2: None,
                 z: None,
+                path: None,
                 r: None,
                 symbol: None,
                 opacity: None,
@@ -904,6 +913,7 @@ fn stack_rows_from_series(
                 y1: None,
                 y2: None,
                 z: None,
+                path: None,
                 r: None,
                 symbol: None,
                 opacity: None,
