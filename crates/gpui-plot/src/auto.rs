@@ -8,9 +8,11 @@
 //! histogram or a rule. The finer reducer-driven heatmap and density branches
 //! are left to explicit marks, which a caller reaches just as easily.
 
+use gpui::Hsla;
+
 use crate::plot::Plot;
 use crate::table::{Dataset, Table};
-use crate::value::PlotKind;
+use crate::value::{PlotKind, Value};
 
 /// Build a plot whose mark is chosen from the shapes of `x` and `y`.
 ///
@@ -47,6 +49,15 @@ pub fn build(data: &[Table], x: Option<&str>, y: Option<&str>, color: Option<&st
                 mark
             }
         }),
+        // Two quantitative dimensions with a `count` color → a heatmap: bin both
+        // axes and fill each cell by how many rows landed in it.
+        (Some(xk), Some(yk))
+            if xk.is_quantitative()
+                && yk.is_quantitative()
+                && color.as_deref() == Some("count") =>
+        {
+            heatmap(plot, x.unwrap(), y.unwrap())
+        }
         // Two quantitative dimensions → scatter, or a line when x is monotonic.
         (Some(xk), Some(yk)) if xk.is_quantitative() && yk.is_quantitative() => {
             if monotonic_x(&dataset, x.unwrap()) {
@@ -100,6 +111,105 @@ pub fn build(data: &[Table], x: Option<&str>, y: Option<&str>, color: Option<&st
         }),
         (None, None) => plot,
     }
+}
+
+/// A heatmap of two quantitative fields: bin each axis into a grid of cells
+/// and count the rows per cell, filling each cell by its count.
+///
+/// The data is re-binned here — Plot's `bin({fill: "count"}, {x, y})` — into
+/// rows carrying the cell's bounds and count, drawn as a `rect` and colored by
+/// the count through a sequential ramp.
+fn heatmap(plot: Plot, x: &str, y: &str) -> Plot {
+    let data: Vec<Table> = plot.data().rows().to_vec();
+    let cells = bin2(&data, x, y, 10);
+    // Each cell becomes a rect row carrying its bounds and its count.
+    let rows: Vec<Table> = cells
+        .into_iter()
+        .map(|[x0, x1, y0, y1, count]| {
+            Table::empty()
+                .with("x0", Value::Number(x0))
+                .with("x1", Value::Number(x1))
+                .with("y0", Value::Number(y0))
+                .with("y1", Value::Number(y1))
+                .with("count", Value::Number(count))
+        })
+        .collect();
+    if rows.is_empty() {
+        return plot;
+    }
+    // A rect spanning each cell, filled by its count through a sequential ramp.
+    Plot::new(rows)
+        .rect(|mark| mark.x1("x0").x2("x1").y1("y0").y2("y1"))
+        .color(
+            "count",
+            crate::scale::ColorRange::Continuous(vec![
+                Hsla {
+                    h: 0.6,
+                    s: 0.4,
+                    l: 0.9,
+                    a: 1.,
+                },
+                Hsla {
+                    h: 0.6,
+                    s: 0.8,
+                    l: 0.4,
+                    a: 1.,
+                },
+            ]),
+        )
+}
+
+/// Bin two quantitative fields into a `count` per cell, Plot's 2D `bin`.
+///
+/// Returns `(cells, counts)` where `cells` is the flattened grid —
+/// `(x0, x1, y0, y1, count)` — for every cell that holds at least one row, in
+/// sweep order.
+fn bin2(data: &[Table], x: &str, y: &str, per_axis: usize) -> Vec<[f64; 5]> {
+    // Collect the (x, y) pairs that are both numbers.
+    let points: Vec<(f64, f64)> = data
+        .iter()
+        .filter_map(|row| {
+            let (Some(xv), Some(yv)) = (row.value(x).as_number(), row.value(y).as_number()) else {
+                return None;
+            };
+            Some((xv, yv))
+        })
+        .collect();
+    let (x0, x1) = match crate::scale::extent(points.iter().map(|p| Value::Number(p.0))) {
+        Some([a, b]) if a != b => (a, b),
+        Some([a, b]) => (a - 0.5, b + 0.5),
+        None => return Vec::new(),
+    };
+    let (y0, y1) = match crate::scale::extent(points.iter().map(|p| Value::Number(p.1))) {
+        Some([a, b]) if a != b => (a, b),
+        Some([a, b]) => (a - 0.5, b + 0.5),
+        None => return Vec::new(),
+    };
+    let (xw, yw) = ((x1 - x0) / per_axis as f64, (y1 - y0) / per_axis as f64);
+    let xslots = ((x1 - x0) / xw).round() as usize;
+    let yslots = ((y1 - y0) / yw).round() as usize;
+    let mut grid = vec![0usize; (xslots + 1) * (yslots + 1)];
+    for (px, py) in &points {
+        let xi = (((px - x0) / xw).floor() as usize).min(xslots);
+        let yi = (((py - y0) / yw).floor() as usize).min(yslots);
+        grid[xi + yi * (xslots + 1)] += 1;
+    }
+    let mut cells = Vec::new();
+    for yi in 0..=yslots {
+        for xi in 0..=xslots {
+            let count = grid[xi + yi * (xslots + 1)];
+            if count > 0 {
+                cells.push([
+                    x0 + xi as f64 * xw,
+                    x0 + (xi + 1) as f64 * xw,
+                    y0 + yi as f64 * yw,
+                    y0 + (yi + 1) as f64 * yw,
+                    count as f64,
+                ]);
+            }
+        }
+    }
+    cells
 }
 
 /// A histogram of `field` along one axis: `rectY` with a bin on x, or `rectX`
@@ -215,5 +325,24 @@ mod tests {
         let plot = build(&data, Some("x"), Some("y"), Some("g"));
         // A color field becomes a z series, so the mark colors by it.
         assert!(plot.marks()[0].channels.z.is_some());
+    }
+
+    #[test]
+    fn count_color_heatmaps_two_quantitative_fields() {
+        // A dense two-cluster cloud, so binning both axes yields many cells.
+        let data = rows(
+            &[1., 1., 5., 5., 5., 5.],
+            Some(&[1., 2., 3., 3., 4., 4.]),
+            None,
+        );
+        let plot = build(&data, Some("x"), Some("y"), Some("count"));
+        // Auto re-bins into a rect mark, not the raw dot.
+        assert_eq!(plot.marks().len(), 1);
+        assert_eq!(plot.marks()[0].kind, crate::mark::MarkKind::Rect);
+        // The plot's data is the re-binned cells (with x1/x2/y1/y2/count),
+        // not the original dots.
+        let first = &plot.data().rows()[0];
+        assert!(first.value("count").as_number().is_some());
+        assert!(first.value("x0").as_number().is_some());
     }
 }

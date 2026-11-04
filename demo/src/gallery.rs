@@ -362,6 +362,13 @@ pub fn examples() -> Vec<Example> {
             height: 440.,
             build: interval_plot,
         },
+        Example {
+            title: "Auto heatmap",
+            section: "Marks / auto",
+            description: "Two quantitative fields with a count color: Plot::auto bins both and fills each cell by its count.",
+            height: 440.,
+            build: auto_heatmap_plot,
+        },
     ]
 }
 
@@ -1301,5 +1308,13 @@ fn interval_plot() -> Plot {
                 .y("temperature")
                 .interval(gpui_plot::Interval::Month)
         })
+        .grid(false)
+}
+
+fn auto_heatmap_plot() -> Plot {
+    let data = data::clusters();
+    Plot::auto(data, Some("x"), Some("y"), Some("count"))
+        .title("Two clusters as a heatmap")
+        .subtitle("Color of count: Plot::auto bins both axes and counts each cell")
         .grid(false)
 }

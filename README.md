@@ -254,9 +254,12 @@ Not implemented yet:
    which the plot's paint path and the offscreen snapshot renderer can't
    resolve deterministically.
 
-The `auto` mark picks dots, lines, histograms and bars; its finer reducer
-branches — a heatmap from two binned quantitative fields, a barcode with no
-reducer, a `barX` heatmap from an ordinal axis — are left to explicit marks.
+`auto` also turns two quantitative fields with a `count` color into a
+heatmap — binning both axes and filling each cell by its count, Plot's
+`bin({fill: "count"}, {x, y})` — so the scatter, scatter-by-color, line,
+histogram, bar and heatmap branches are covered. Its finer cases (a barcode
+with no reducer, a `barX` heatmap from an ordinal axis) are left to explicit
+marks.
 
 ### Adding a mark
 
