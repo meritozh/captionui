@@ -239,15 +239,19 @@ hierarchies laid out tidily), and the Delaunay family (`delaunayLink`,
 `delaunayMesh`, `hull`, `voronoi`, `voronoiMesh`). A `Plot::auto` picks a
 mark from the data's shape — a dot for two non-monotonic quantitative fields,
 a line for a monotonic one, a histogram for a single quantitative field, a bar
-for an ordinal one — mirroring Plot's `auto` heuristics. A mark's
-`interval` option buckets a date or number into an extent — `Day`/`Month`/
-`Year` on a calendar, a fixed `Step` on a number — so a `rectY` over daily
-dates draws one bar per month, Plot's `interval` transform.
+for an ordinal one, or a heatmap for two quantitative fields with a `count`
+color — mirroring Plot's `auto` heuristics. The `image` mark paints a raster
+supplied as pixels, and the `geo` mark projects longitude/latitude onto the
+plot. A mark's `interval` option buckets a date or number into an extent —
+`Day`/`Month`/`Year` on a calendar, a fixed `Step` on a number — so a `rectY`
+over daily dates draws one bar per month, Plot's `interval` transform.
 
 Not implemented yet:
 
-1. **Geo projections** (`geo` and the `geoCentroid`/`centroid` transforms),
-   which are out of scope for a desktop chart library with no basemap
+1. **d3-geo-scale projections** beyond the flat equirectangular view — the
+   `geo` mark ships an equirectangular projection of lon/lat onto the plot,
+   and `projection::centroid` averages a point list; full spherical (Mercator,
+   etc.) projections and GeoJSON shape rendering would need a d3-geo-class
    ecosystem.
 
 `auto` also turns two quantitative fields with a `count` color into a

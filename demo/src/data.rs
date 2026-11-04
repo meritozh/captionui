@@ -435,3 +435,23 @@ pub fn gradient_image() -> std::sync::Arc<gpui_kit::RenderImage> {
     }
     gpui_plot::image_from_rgba(width, height, rgba)
 }
+
+/// A lon/lat route across a sea, for the `geo` mark: a few points a projected
+/// path connects — the equirectangular view keeps them a flat ship's track.
+pub fn route() -> Vec<Table> {
+    // (lon, lat) across the Bay of Biscay, roughly west→east then north.
+    [
+        (-9.0, 43.5),
+        (-6.0, 44.0),
+        (-3.0, 45.5),
+        (0.0, 46.0),
+        (2.0, 48.0),
+    ]
+    .into_iter()
+    .map(|(lon, lat)| {
+        Table::empty()
+            .with("lon", Value::Number(lon))
+            .with("lat", Value::Number(lat))
+    })
+    .collect()
+}

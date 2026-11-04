@@ -166,6 +166,9 @@ pub enum MarkKind {
     Tree,
     /// A raster image painted at a position, Plot's `image`.
     Image,
+    /// A geographic mark, Plot's `geo`: longitude/latitude projected
+    /// equirectangularly into the plot.
+    Geo,
 }
 
 /// Which renderer family paints a mark.
@@ -308,6 +311,7 @@ impl MarkKind {
             MarkKind::VoronoiMesh => "voronoiMesh",
             MarkKind::Tree => "tree",
             MarkKind::Image => "image",
+            MarkKind::Geo => "geo",
         }
     }
 
@@ -500,6 +504,12 @@ impl MarkKind {
             // An image is positioned by its own width and height, not by two
             // positional channels, so it is not bivariate.
             Image => MarkCategory {
+                bivariate: false,
+                ..Default::default()
+            },
+            // A geo mark reads lon/lat and projects them itself, so it does not
+            // go through the frame's linear scales as a bivariate mark.
+            Geo => MarkCategory {
                 bivariate: false,
                 ..Default::default()
             },
@@ -929,6 +939,8 @@ pub struct Mark {
     pub interval: Option<Interval>,
     /// The image an `image` mark paints, shared across its rows.
     pub image: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// The projection a `geo` mark maps lon/lat through, Plot's `geo`.
+    pub projection: Option<crate::projection::Equirectangular>,
 }
 
 /// A time or numeric bucket, Plot's `interval` option: turn a singular value
@@ -1108,6 +1120,7 @@ impl Mark {
             rotate: None,
             interval: None,
             image: None,
+            projection: None,
         }
     }
 
@@ -1303,6 +1316,12 @@ impl Mark {
     /// Set the image an `image` mark paints, shared across its rows.
     pub fn image(mut self, image: std::sync::Arc<gpui::RenderImage>) -> Self {
         self.image = Some(image);
+        self
+    }
+
+    /// Set the equirectangular projection a `geo` mark maps lon/lat through.
+    pub fn projection(mut self, projection: crate::projection::Equirectangular) -> Self {
+        self.projection = Some(projection);
         self
     }
 
@@ -1758,6 +1777,13 @@ macro_rules! mark_builder {
                 self
             }
 
+            /// Set the equirectangular projection a `geo` mark maps lon/lat
+            /// through.
+            pub fn projection(mut self, projection: crate::projection::Equirectangular) -> Self {
+                self.0 = self.0.projection(projection);
+                self
+            }
+
             /// Sort the mark's rows by a field.
             pub fn sort(mut self, field: impl Into<SharedString>, descending: bool) -> Self {
                 self.0 = self.0.sort(field, descending);
@@ -2134,6 +2160,11 @@ mark_builder!(
     /// A raster image painted at a position, Plot's `image`.
     ImageMark,
     MarkKind::Image
+);
+mark_builder!(
+    /// A geographic mark, Plot's `geo`: lon/lat projected equirectangularly.
+    GeoMark,
+    MarkKind::Geo
 );
 
 impl Mark {

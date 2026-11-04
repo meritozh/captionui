@@ -798,6 +798,16 @@ impl Plot {
         self
     }
 
+    /// Add a geographic mark, Plot's `geo`: lon/lat projected equirectangularly.
+    pub fn geo(
+        mut self,
+        configure: impl FnOnce(crate::mark::GeoMark) -> crate::mark::GeoMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::GeoMark::new()).into());
+        self
+    }
+
     /// Add a Delaunay triangulation drawn as links, Plot's `delaunayLink`.
     pub fn delaunay_link(
         mut self,

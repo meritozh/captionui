@@ -42,6 +42,7 @@ pub mod frame;
 pub mod mark;
 pub mod paint;
 pub mod plot;
+pub mod projection;
 pub mod render;
 pub mod scale;
 pub mod style;
@@ -68,6 +69,7 @@ pub use transform::{
 pub use value::{PlotKind, Value};
 
 pub use plot::{Interaction, LegendPosition, Plot, PlotTitle};
+pub use projection::{Equirectangular, centroid};
 
 /// Build a [`gpui::RenderImage`] from RGBA pixels, for an `image` mark.
 ///

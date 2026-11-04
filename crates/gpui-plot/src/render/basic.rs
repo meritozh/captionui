@@ -270,6 +270,7 @@ pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         MarkKind::Link => draw_links(prepared, ctx),
         MarkKind::Tree => draw_tree(prepared, ctx),
         MarkKind::Image => draw_image(prepared, ctx),
+        MarkKind::Geo => draw_geo(prepared, ctx),
         MarkKind::Tip => draw_tips(prepared, ctx),
         MarkKind::AxisX => draw_axis_x(prepared, ctx),
         MarkKind::AxisY => draw_axis_y(prepared, ctx),
@@ -1113,6 +1114,53 @@ fn draw_image(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                 image.clone(),
                 0,
                 false,
+            );
+        }
+    });
+}
+
+/// Draw a geo mark: project each row's lon/lat into the plot and connect them
+/// as a path — Plot's `geo` over a sequence of points, where the plot's own
+/// scales don't need to know about geography.
+fn draw_geo(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let projection = prepared.mark.projection.clone().unwrap_or_default();
+    let plot = ctx.frame.plot;
+
+    // Project every row's (lon, lat) onto the plot, in row order.
+    let points: Vec<Option<Point<Pixels>>> = prepared
+        .rows
+        .iter()
+        .map(|row| {
+            let (Some(lon), Some(lat)) = (row.x_value().as_number(), row.y_value().as_number())
+            else {
+                return None;
+            };
+            let [fx, fy] = projection.project(lon, lat)?;
+            let x = plot.origin.x + px(plot.size.width.as_f32() * fx as f32);
+            let y = plot.origin.y + px(plot.size.height.as_f32() * fy as f32);
+            Some(point(x, y))
+        })
+        .collect();
+
+    let colors = Colors::resolve(prepared, ctx);
+    ctx.clipped(|ctx| {
+        // A rounded path joining the projected points, in row order.
+        let projected: Vec<Point<Pixels>> = points.iter().flatten().cloned().collect();
+        if projected.len() >= 2 {
+            let mut builder = PathBuilder::stroke(px(prepared.mark.style.stroke_width.max(1.)));
+            builder.move_to(ctx.absolute(projected[0]));
+            for p in &projected[1..] {
+                builder.line_to(ctx.absolute(*p));
+            }
+            paint::paint_path(builder.build().ok(), colors.stroke(0), ctx.window);
+        }
+        // A dot at each projected point.
+        for (index, p) in points.iter().flatten().enumerate() {
+            let _ = index;
+            paint::paint_fill(
+                &crate::paint::circle_points(*p, prepared.mark.style.radius.max(2.), 16),
+                colors.fill(index),
+                ctx.window,
             );
         }
     });

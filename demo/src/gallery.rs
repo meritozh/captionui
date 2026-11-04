@@ -376,6 +376,13 @@ pub fn examples() -> Vec<Example> {
             height: 440.,
             build: image_plot,
         },
+        Example {
+            title: "Ship's track",
+            section: "Marks / geo",
+            description: "Longitude and latitude projected equirectangularly, connected as a path.",
+            height: 440.,
+            build: geo_plot,
+        },
     ]
 }
 
@@ -1349,5 +1356,25 @@ fn image_plot() -> Plot {
         .image(|mark| mark.image(image.clone()).x("x").y("y"))
         .x_domain(-0.5, 3.5)
         .y_domain(-0.5, 3.5)
+        .grid(false)
+}
+
+fn geo_plot() -> Plot {
+    let data = data::route();
+    let projection = gpui_plot::Equirectangular {
+        west: -12.,
+        east: 5.,
+        north: 50.,
+        south: 42.,
+    };
+    Plot::new(data)
+        .title("A ship's track across the Bay of Biscay")
+        .subtitle("Longitude and latitude, projected equirectangularly onto the plot")
+        .geo(|mark| {
+            mark.x("lon")
+                .y("lat")
+                .projection(projection)
+                .stroke_width(2.)
+        })
         .grid(false)
 }
