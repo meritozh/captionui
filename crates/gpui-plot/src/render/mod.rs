@@ -1258,9 +1258,21 @@ mod facet_tests {
         let grid = Grid::from_values(vec![Value::text("one")], Vec::new());
         let dataset = Dataset::new(rows);
 
-        let (first, _) = prepare_facets(&dataset, std::slice::from_ref(&mark), &grid, Some("f"), None);
+        let (first, _) = prepare_facets(
+            &dataset,
+            std::slice::from_ref(&mark),
+            &grid,
+            Some("f"),
+            None,
+        );
         for _ in 0..2 {
-            let (again, _) = prepare_facets(&dataset, std::slice::from_ref(&mark), &grid, Some("f"), None);
+            let (again, _) = prepare_facets(
+                &dataset,
+                std::slice::from_ref(&mark),
+                &grid,
+                Some("f"),
+                None,
+            );
             // PreparedMark is not PartialEq (its mark holds closures), so
             // compare the resolved rows: the shape is the position a hovered
             // datum is placed at, and it must be identical across calls.
@@ -1301,7 +1313,7 @@ mod facet_tests {
 #[cfg(test)]
 mod transform_order_tests {
     use super::*;
-    use crate::mark::{Mark, MarkKind, MapReducer};
+    use crate::mark::{MapReducer, Mark, MarkKind};
     use crate::transform::WindowReducer;
 
     fn nums(values: &[f64]) -> Vec<Table> {
@@ -1329,17 +1341,29 @@ mod transform_order_tests {
         let rows = &prepare(&Dataset::new(nums(&[1., 2., 3., 4.])), &[mark])[0].rows;
         assert_eq!(
             rows.iter().map(|r| r.y_value()).collect::<Vec<_>>(),
-            vec![&Value::Number(1.), &Value::Number(3.), &Value::Number(6.), &Value::Number(10.)]
+            vec![
+                &Value::Number(1.),
+                &Value::Number(3.),
+                &Value::Number(6.),
+                &Value::Number(10.)
+            ]
         );
     }
 
     #[test]
     fn shift_runs_before_resolve() {
-        let mark = Mark::new(MarkKind::BarY).x("x").y("shifted").shift("v", "shifted", 10.);
+        let mark = Mark::new(MarkKind::BarY)
+            .x("x")
+            .y("shifted")
+            .shift("v", "shifted", 10.);
         let rows = &prepare(&Dataset::new(nums(&[1., 2., 3.])), &[mark])[0].rows;
         assert_eq!(
             rows.iter().map(|r| r.y_value()).collect::<Vec<_>>(),
-            vec![&Value::Number(11.), &Value::Number(12.), &Value::Number(13.)]
+            vec![
+                &Value::Number(11.),
+                &Value::Number(12.),
+                &Value::Number(13.)
+            ]
         );
     }
 
@@ -1367,10 +1391,11 @@ mod transform_order_tests {
         // A window rewrites the y value in place; the first row of a backward
         // cumulative window is its own value only if the window ran before the
         // rows were read for placement.
-        let mark = Mark::new(MarkKind::Line)
-            .x("x")
-            .y("v")
-            .window(2, WindowReducer::CumulativeMean, Anchor::Start);
+        let mark = Mark::new(MarkKind::Line).x("x").y("v").window(
+            2,
+            WindowReducer::CumulativeMean,
+            Anchor::Start,
+        );
         let rows = &prepare(&Dataset::new(nums(&[2., 4., 6., 8.])), &[mark])[0].rows;
         // Cumulative means: 2, 3, 4, 5.
         assert_eq!(
@@ -1390,11 +1415,24 @@ mod transform_order_tests {
         // equal rows normalize to the same point, so their group's count sees
         // the normalized value, not the raw one.
         let data = vec![
-            Table::empty().with("x", Value::Number(0.)).with("g", Value::text("a")).with("v", Value::Number(10.)),
-            Table::empty().with("x", Value::Number(1.)).with("g", Value::text("a")).with("v", Value::Number(20.)),
-            Table::empty().with("x", Value::Number(2.)).with("g", Value::text("a")).with("v", Value::Number(0.)),
+            Table::empty()
+                .with("x", Value::Number(0.))
+                .with("g", Value::text("a"))
+                .with("v", Value::Number(10.)),
+            Table::empty()
+                .with("x", Value::Number(1.))
+                .with("g", Value::text("a"))
+                .with("v", Value::Number(20.)),
+            Table::empty()
+                .with("x", Value::Number(2.))
+                .with("g", Value::text("a"))
+                .with("v", Value::Number(0.)),
         ];
-        let mark = Mark::new(MarkKind::BarY).x("g").y("v").normalize().group_x();
+        let mark = Mark::new(MarkKind::BarY)
+            .x("g")
+            .y("v")
+            .normalize()
+            .group_x();
         let rows = &prepare(&Dataset::new(data), &[mark])[0].rows;
         // All three share x="a", so one group. Its count is 3 regardless of
         // the normalized values; the important edge is that normalize ran on
@@ -1409,10 +1447,18 @@ mod transform_order_tests {
         // total. If reduce ran before the rows were resolved, the categories
         // wouldn't be available to group on.
         let data = vec![
-            Table::empty().with("x", Value::text("a")).with("v", Value::Number(1.)),
-            Table::empty().with("x", Value::text("a")).with("v", Value::Number(2.)),
-            Table::empty().with("x", Value::text("b")).with("v", Value::Number(3.)),
-            Table::empty().with("x", Value::text("b")).with("v", Value::Number(4.)),
+            Table::empty()
+                .with("x", Value::text("a"))
+                .with("v", Value::Number(1.)),
+            Table::empty()
+                .with("x", Value::text("a"))
+                .with("v", Value::Number(2.)),
+            Table::empty()
+                .with("x", Value::text("b"))
+                .with("v", Value::Number(3.)),
+            Table::empty()
+                .with("x", Value::text("b"))
+                .with("v", Value::Number(4.)),
         ];
         let mark = Mark::new(MarkKind::BarY).x("x").y("v").reduce(Reducer::Sum);
         let rows = &prepare(&Dataset::new(data), &[mark])[0].rows;

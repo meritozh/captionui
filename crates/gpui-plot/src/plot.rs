@@ -13,7 +13,7 @@ use gpui::{
     TextAlign, Window, point, px,
 };
 use gpui_kit::base::plot::{
-    Plot as PlotTrait, PlotAppear, PlotAxis, PlotElement, PlotHover, TooltipState, axis_gutter,
+    Plot as PlotTrait, PlotAppear, PlotElement, PlotHover, TooltipState, axis_gutter,
 };
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::plot::tooltip::{CrossLine, Dot, Tooltip};
@@ -1657,10 +1657,16 @@ impl PlotTrait for Plot {
             .facet_cache
             .clone()
             .unwrap_or_else(|| self.facet_grid());
-        let mut facets = self
-            .facets_cache
-            .clone()
-            .unwrap_or_else(|| render::prepare_facets(&self.data, &self.marks, &grid, self.fx.as_deref(), self.fy.as_deref()).0);
+        let mut facets = self.facets_cache.clone().unwrap_or_else(|| {
+            render::prepare_facets(
+                &self.data,
+                &self.marks,
+                &grid,
+                self.fx.as_deref(),
+                self.fy.as_deref(),
+            )
+            .0
+        });
         let frame = match self.frame_cache.clone() {
             Some(frame) => frame,
             None => self.resolve_frame(bounds, &theme, window, &facets, &grid),
@@ -1668,7 +1674,7 @@ impl PlotTrait for Plot {
         // A dodge works in pixels, so it needs the frame resolved first. Every
         // facet is the same size, so one facet's frame packs the same way.
         let facet_frame = match grid.is_faceted() {
-            true => frame.facet(facet_marks(grid.facet(frame.plot, 0), &frame)),
+            true => frame.facet(crate::frame::facet_marks(grid.facet(frame.plot, 0), &frame)),
             false => frame.clone(),
         };
         for marks in facets.iter_mut() {
@@ -1683,14 +1689,17 @@ impl PlotTrait for Plot {
         self.paint_legend(bounds, &theme, window, cx, &facets);
         // The grid goes under the marks.
         if self.grid {
-            paint_grid(&frame, &theme, window, self.x_axis, self.y_axis, &grid);
+            crate::frame::paint_grid(&frame, &theme, window, self.x_axis, self.y_axis, &grid);
         }
         // The marks. Every mark shares one ordinal color scale, so a series
         // keeps its color across marks, and across facets.
         let ordinal = self.ordinal_scale(&theme, &facets);
         let mut row_offset = 0;
         for (cell, marks) in facets.iter().enumerate() {
-            let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, cell), &frame));
+            let facet_frame = frame.facet(crate::frame::facet_marks(
+                grid.facet(frame.plot, cell),
+                &frame,
+            ));
             // Plot skips a facet that holds no data: it keeps the slot, and
             // the facet axis, but draws no marks inside it.
             if grid.is_faceted() && grid.is_empty(cell) {
@@ -1730,28 +1739,31 @@ impl PlotTrait for Plot {
                 if grid.is_empty(cell) {
                     continue;
                 }
-                let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, cell), &frame));
-                paint_axes(
+                let facet_frame = frame.facet(crate::frame::facet_marks(
+                    grid.facet(frame.plot, cell),
+                    &frame,
+                ));
+                crate::frame::paint_axes(
                     &facet_frame,
                     &theme,
                     window,
                     cx,
                     self.x_axis,
                     self.y_axis,
-                    &AxisEdges::from_cell(cell, &grid),
+                    &crate::frame::AxisEdges::from_cell(cell, &grid),
                 );
             }
             // The facet axis labels the grid outside the facets.
-            paint_facet_labels(&frame, &theme, window, cx, &grid);
+            crate::frame::paint_facet_labels(&frame, &theme, window, cx, &grid);
         } else {
-            paint_axes(
+            crate::frame::paint_axes(
                 &frame,
                 &theme,
                 window,
                 cx,
                 self.x_axis,
                 self.y_axis,
-                &AxisEdges::default(),
+                &crate::frame::AxisEdges::default(),
             );
         }
     }
@@ -1801,12 +1813,18 @@ impl PlotTrait for Plot {
             .facet_cache
             .clone()
             .unwrap_or_else(|| self.facet_grid());
-        let mut facets = self
-            .facets_cache
-            .clone()
-            .unwrap_or_else(|| render::prepare_facets(&self.data, &self.marks, &grid, self.fx.as_deref(), self.fy.as_deref()).0);
+        let mut facets = self.facets_cache.clone().unwrap_or_else(|| {
+            render::prepare_facets(
+                &self.data,
+                &self.marks,
+                &grid,
+                self.fx.as_deref(),
+                self.fy.as_deref(),
+            )
+            .0
+        });
         // The dodge packs each facet's rows in its own facet's pixels.
-        let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, 0), &frame));
+        let facet_frame = frame.facet(crate::frame::facet_marks(grid.facet(frame.plot, 0), &frame));
         for marks in facets.iter_mut() {
             render::apply_dodge(marks, &facet_frame);
         }
@@ -1825,7 +1843,10 @@ impl PlotTrait for Plot {
         let mut best: Option<(usize, Point<Pixels>, f32)> = None;
         for (flat, (cell, mark_index, row_index)) in hover_targets(&facets).into_iter().enumerate()
         {
-            let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, cell), &frame));
+            let facet_frame = frame.facet(crate::frame::facet_marks(
+                grid.facet(frame.plot, cell),
+                &frame,
+            ));
             let mark = &facets[cell][mark_index];
             let Some(row) = mark.rows.get(row_index) else {
                 continue;
@@ -1845,7 +1866,10 @@ impl PlotTrait for Plot {
         }
         let (flat, hit, _) = best?;
         let (cell, mark_index, row_index) = hover_targets(&facets)[flat];
-        let facet_frame = frame.facet(facet_marks(grid.facet(frame.plot, cell), &frame));
+        let facet_frame = frame.facet(crate::frame::facet_marks(
+            grid.facet(frame.plot, cell),
+            &frame,
+        ));
         let mark = &facets[cell][mark_index];
         let row = mark.rows.get(row_index)?;
 
@@ -1880,10 +1904,16 @@ impl PlotTrait for Plot {
             .facet_cache
             .clone()
             .unwrap_or_else(|| self.facet_grid());
-        let facets = self
-            .facets_cache
-            .clone()
-            .unwrap_or_else(|| render::prepare_facets(&self.data, &self.marks, &grid, self.fx.as_deref(), self.fy.as_deref()).0);
+        let facets = self.facets_cache.clone().unwrap_or_else(|| {
+            render::prepare_facets(
+                &self.data,
+                &self.marks,
+                &grid,
+                self.fx.as_deref(),
+                self.fy.as_deref(),
+            )
+            .0
+        });
 
         // The hover carries the index the pointer resolved to, in the same
         // flattened row list `tooltip_state` searched.
@@ -2172,292 +2202,6 @@ impl Plot {
     }
 }
 
-/// Paint the grid lines behind the marks.
-fn paint_grid(
-    frame: &Frame,
-    theme: &PlotTheme,
-    window: &mut Window,
-    x_axis: bool,
-    y_axis: bool,
-    grid: &Grid,
-) {
-    // A faceted figure draws its grid inside each facet's marks area, the same
-    // way its axes repeat there.
-    let areas: Vec<Bounds<Pixels>> = if grid.is_faceted() {
-        (0..grid.cells.len())
-            .filter(|cell| !grid.is_empty(*cell))
-            .map(|cell| facet_marks(grid.facet(frame.plot, cell), frame))
-            .collect()
-    } else {
-        vec![frame.plot]
-    };
-    let width = theme.line_width;
-    for plot in areas {
-        if y_axis {
-            for tick in frame.y.ticks.iter() {
-                let y = plot.origin.y + px(tick.position);
-                let start = point(plot.origin.x, y);
-                let end = point(plot.origin.x + plot.size.width, y);
-                if theme.grid_dash.is_empty() {
-                    paint::paint_stroke(&[start, end], width.as_f32(), theme.grid, window);
-                } else {
-                    paint_dashed(start, end, &theme.grid_dash, width, theme.grid, window);
-                }
-            }
-        }
-        // Vertical grid lines only for a continuous x scale: a band scale's
-        // categories are already clear from their labels.
-        if x_axis && !frame.x.scale.is_discrete() {
-            for tick in frame.x.ticks.iter() {
-                let x = plot.origin.x + px(tick.position);
-                let start = point(x, plot.origin.y);
-                let end = point(x, plot.origin.y + plot.size.height);
-                if theme.grid_dash.is_empty() {
-                    paint::paint_stroke(&[start, end], width.as_f32(), theme.grid, window);
-                } else {
-                    paint_dashed(start, end, &theme.grid_dash, width, theme.grid, window);
-                }
-            }
-        }
-    }
-}
-
-/// The marks area of one facet band: the band, less the axes the facet draws
-/// inside it.
-fn facet_marks(band: Bounds<Pixels>, frame: &Frame) -> Bounds<Pixels> {
-    let insets = frame.facet_insets;
-    Bounds::new(
-        point(
-            band.origin.x + px(insets.left),
-            band.origin.y + px(insets.top),
-        ),
-        gpui::size(
-            px((band.size.width.as_f32() - insets.left - insets.right).max(1.)),
-            px((band.size.height.as_f32() - insets.top - insets.bottom).max(1.)),
-        ),
-    )
-}
-
-/// Which of a facet's edges draw an axis, Plot's `facetAnchor`.
-///
-/// A left y axis and a bottom x axis run to the outermost facet of each row
-/// and column, so the grid reads like a table of small charts.
-#[derive(Clone, Copy, Debug)]
-struct AxisEdges {
-    left: bool,
-    bottom: bool,
-}
-
-impl Default for AxisEdges {
-    fn default() -> Self {
-        Self {
-            left: true,
-            bottom: true,
-        }
-    }
-}
-
-impl AxisEdges {
-    /// The edges of facet `cell` that draw an axis.
-    ///
-    /// A y axis belongs to the first column and an x axis to the last row,
-    /// which is Plot's `facetAnchorLeft` and `facetAnchorBottom`. A facet
-    /// further in draws the axis too when the neighbour it would share it
-    /// with holds no data, which is the `-empty` variant those anchors take
-    /// by default: the axis then stops where the facets do.
-    fn from_cell(cell: usize, grid: &Grid) -> Self {
-        let (column, row) = (grid.column(cell), grid.row(cell));
-        let left = column == 0 || grid.is_empty(cell - 1);
-        let below = cell + grid.columns();
-        let bottom = row == grid.rows() - 1 || below >= grid.cells.len() || grid.is_empty(below);
-        Self { left, bottom }
-    }
-}
-
-/// Paint a dashed line from `start` to `end`.
-fn paint_dashed(
-    start: Point<Pixels>,
-    end: Point<Pixels>,
-    dash: &[Pixels],
-    width: Pixels,
-    color: Hsla,
-    window: &mut Window,
-) {
-    let dx = end.x.as_f32() - start.x.as_f32();
-    let dy = end.y.as_f32() - start.y.as_f32();
-    let length = (dx * dx + dy * dy).sqrt();
-    if length <= 0. || dash.is_empty() {
-        return;
-    }
-    let (ux, uy) = (dx / length, dy / length);
-    let mut offset = 0.0_f32;
-    let mut on = true;
-    let mut index = 0;
-    while offset < length {
-        let segment = dash[index % dash.len()].as_f32().max(0.5);
-        let end_offset = (offset + segment).min(length);
-        if on {
-            let from = point(
-                px(start.x.as_f32() + ux * offset),
-                px(start.y.as_f32() + uy * offset),
-            );
-            let to = point(
-                px(start.x.as_f32() + ux * end_offset),
-                px(start.y.as_f32() + uy * end_offset),
-            );
-            paint::paint_stroke(&[from, to], width.as_f32(), color, window);
-        }
-        offset = end_offset;
-        on = !on;
-        index += 1;
-    }
-}
-
-/// Paint the axis lines and their tick labels.
-fn paint_axes(
-    frame: &Frame,
-    theme: &PlotTheme,
-    window: &mut Window,
-    cx: &mut App,
-    x_axis: bool,
-    y_axis: bool,
-    edges: &AxisEdges,
-) {
-    let plot = frame.plot;
-    let mut axis = PlotAxis::new().stroke(theme.axis);
-
-    if x_axis && edges.bottom {
-        let labels: Vec<gpui_kit::base::plot::AxisText> = frame
-            .x
-            .ticks
-            .iter()
-            .map(|tick| {
-                gpui_kit::base::plot::AxisText::new(
-                    tick.label.clone(),
-                    px(tick.position),
-                    theme.label,
-                )
-                .font_size(theme.label_size)
-                .align(TextAlign::Center)
-            })
-            .collect();
-        axis = axis.x(plot.size.height).x_axis(false).x_label(labels);
-    }
-    if y_axis && edges.left {
-        let labels: Vec<gpui_kit::base::plot::AxisText> = frame
-            .y
-            .ticks
-            .iter()
-            .map(|tick| {
-                // `PlotAxis` centers a y label by subtracting `TEXT_SIZE / 2`
-                // from its tick, which assumes the default 10px labels. A plot
-                // with a larger font would sit its labels high, so the tick is
-                // nudged by the difference.
-                let shift =
-                    (theme.label_size.as_f32() - gpui_kit::base::plot::label::TEXT_SIZE) / 2.;
-                gpui_kit::base::plot::AxisText::new(
-                    tick.label.clone(),
-                    px(tick.position - shift),
-                    theme.label,
-                )
-                .font_size(theme.label_size)
-                .align(TextAlign::Right)
-            })
-            .collect();
-        // The labels belong in the gutter the frame reserved for them, left
-        // of the line; the default `End` side would draw them inside the plot,
-        // where the line cuts through them.
-        axis = axis
-            .y(px(0.))
-            .y_axis(false)
-            .y_label_side(gpui_kit::base::plot::AxisLabelSide::Start)
-            .y_label(labels);
-    }
-    axis.paint(&plot, window, cx);
-    if y_axis && edges.left {
-        // `PlotAxis` draws the y line only where it was told to, and it
-        // right-aligns its labels against that line, so the line is drawn
-        // here rather than duplicated there.
-        paint::paint_stroke(
-            &[
-                point(plot.origin.x, plot.origin.y),
-                point(plot.origin.x, plot.origin.y + plot.size.height),
-            ],
-            theme.line_width.as_f32(),
-            theme.axis,
-            window,
-        );
-    }
-}
-
-/// Paint the facet axis: the `fx` values above each column, the `fy` values
-/// right of each row.
-///
-/// Plot's facet axes label the grid rather than the data, so each label is
-/// centred on its band and sits outside the plot.
-fn paint_facet_labels(
-    frame: &Frame,
-    theme: &PlotTheme,
-    window: &mut Window,
-    cx: &mut App,
-    grid: &Grid,
-) {
-    let plot = frame.plot;
-    let font = gpui::font(theme.font_family.clone());
-    let color = theme.label;
-
-    if let Some(fx) = &grid.fx {
-        let labels = grid.fx_labels();
-        for (index, text) in labels.into_iter().enumerate() {
-            let (start, width) = crate::facet::band(index, fx.len(), plot.size.width.as_f32());
-            let label = Label::new(
-                text,
-                theme.label_size,
-                color,
-                FontWeight::NORMAL,
-                font.clone(),
-                window,
-            );
-            // Above the plot, in the gutter the insets reserved for it.
-            let y = plot.origin.y - px(theme.label_size.as_f32() + FACET_LABEL_GAP);
-            label.paint_at(
-                point(plot.origin.x + px(start + width / 2.), y),
-                TextAlign::Center,
-                None,
-                window,
-                cx,
-            );
-        }
-    }
-
-    if let Some(fy) = &grid.fy {
-        let labels = grid.fy_labels();
-        for (index, text) in labels.into_iter().enumerate() {
-            let (start, height) = crate::facet::band(index, fy.len(), plot.size.height.as_f32());
-            let label = Label::new(
-                text,
-                theme.label_size,
-                color,
-                FontWeight::NORMAL,
-                font.clone(),
-                window,
-            );
-            // Right of the plot, centred on the facet's band.
-            let x = plot.origin.x + plot.size.width + px(FACET_LABEL_GAP);
-            label.paint_at(
-                point(
-                    x,
-                    plot.origin.y + px(start + height / 2. - theme.label_size.as_f32() / 2.),
-                ),
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-        }
-    }
-}
-
 impl IntoElement for Plot {
     type Element = PlotElement<Self>;
 
@@ -2556,37 +2300,5 @@ mod tests {
         assert_eq!(grid.columns(), 2);
         assert_eq!(grid.rows(), 2);
         assert_eq!(grid.cells.len(), 4);
-    }
-
-    #[test]
-    fn facet_axes_run_along_the_first_column_and_last_row() {
-        let grid = Grid::from_values(
-            vec![Value::text("a"), Value::text("b"), Value::text("c")],
-            vec![Value::text("1"), Value::text("2")],
-        );
-        let edges = |cell: usize| AxisEdges::from_cell(cell, &grid);
-        // The first row: a y axis on the first facet only, an x axis nowhere
-        // because another row sits below it.
-        assert!(edges(0).left && !edges(0).bottom);
-        assert!(!edges(1).left && !edges(1).bottom);
-        // The last row draws the x axis under every facet, and the y axis
-        // still only on the first column.
-        assert!(edges(3).left && edges(3).bottom);
-        assert!(!edges(4).left && edges(4).bottom);
-    }
-
-    #[test]
-    fn an_empty_facet_hands_its_axis_to_its_neighbour() {
-        let mut grid = Grid::from_values(
-            vec![Value::text("a"), Value::text("b")],
-            vec![Value::text("1"), Value::text("2")],
-        );
-        // Only the second row's first facet holds data: the row above it is
-        // empty, so that facet draws the x axis too, and the one beside it
-        // draws the y axis.
-        grid.set_empty(&[false, false, true, false]);
-        assert!(AxisEdges::from_cell(2, &grid).left);
-        assert!(AxisEdges::from_cell(2, &grid).bottom);
-        assert!(!AxisEdges::from_cell(3, &grid).left);
     }
 }
