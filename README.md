@@ -188,6 +188,17 @@ Not implemented yet:
 1. **Geo projections**, which are out of scope for a desktop chart library
    with no basemap ecosystem.
 
+### Adding a mark
+
+A new mark kind is classified exactly once in `MarkKind::category()` and
+drawn by one arm in its renderer family (`render/basic.rs`,
+`render/radial.rs` or `render/delaunay.rs`). The compiler's exhaustive
+match over `MarkKind` — in `category()` and the renderers — turns a
+forgotten kind into a compile error rather than silent misrendering. Every
+predicate (`is_bivariate`, `is_x_only`), the band-and-bin decisions and the
+paint-family dispatch read the same `MarkCategory` table, so adding a mark
+means: one enum variant, one `name`, one `category()` row, one draw arm.
+
 The `tension` option for cardinal curves is also missing; the curves
 themselves (`basis`, `cardinal`, `catmull-rom`, `monotone`, `bump`, `bundle`,
 each with its open and closed variants) are implemented. `raster` lacks

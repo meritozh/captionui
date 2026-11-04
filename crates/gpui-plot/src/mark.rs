@@ -14,6 +14,25 @@ use crate::transform::{
 };
 
 /// The mark types this library draws, matching Plot's mark set.
+///
+/// # Adding a mark kind
+///
+/// A new kind is classified exactly once, in [`MarkKind::category`], and
+/// drawn by one arm in its renderer family. That is the whole contract:
+///
+/// 1. add the variant here,
+/// 2. give it a name in [`MarkKind::name`],
+/// 3. classify it in [`MarkKind::category`] (the compiler makes this
+///    exhaustive, so a forgotten kind is a compile error, not silence),
+/// 4. pick a renderer by its [`MarkFamily`] in [`MarkCategory`], and draw it
+///    with one arm in `render/basic.rs`, `render/radial.rs` or
+///    `render/delaunay.rs`.
+///
+/// Every predicate (`is_bivariate`, `is_x_only`, …), the band-and-bin
+/// decisions and the paint-family dispatch derive from the one [`category`]
+/// table, so nothing else needs to change for a new kind.
+///
+/// [`category`]: MarkKind::category
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MarkKind {
     /// A dot per datum, Plot's `dot`.
