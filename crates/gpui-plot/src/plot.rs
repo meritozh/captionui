@@ -2032,7 +2032,11 @@ impl Plot {
                 (MarkKind::RuleX | MarkKind::TickX | MarkKind::BarX, true)
                     | (MarkKind::RuleY | MarkKind::TickY | MarkKind::BarY, false)
             );
+            // A raster or contour over a grid reads both axes.
+            let gridded = matches!(mark.kind, MarkKind::Raster | MarkKind::Contour)
+                && crate::render::raster_extent(mark).is_some();
             named
+                || gridded
                 || indexed
                 || (by_value
                     && (single
@@ -3142,7 +3146,11 @@ impl Plot {
         let label = self.derived_axis_label(x)?;
         // Plot's `formatAxisLabel`: an inferred "date", "time" or "year" on
         // a temporal axis says nothing the ticks don't.
-        if ["date", "time", "year"].iter().any(|n| label.eq_ignore_ascii_case(n)) && self.axis_is_temporal(x) {
+        if ["date", "time", "year"]
+            .iter()
+            .any(|n| label.eq_ignore_ascii_case(n))
+            && self.axis_is_temporal(x)
+        {
             return None;
         }
         // Plot's `percent` marks a derived label as a percentage.

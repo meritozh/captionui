@@ -294,7 +294,10 @@ fn choose_time_step(target: f64) -> TimeStep {
         (3. * MONTH, TimeStep::Months(3)),
         (YEAR, TimeStep::Months(12)),
     ];
-    let i = ladder.iter().position(|(step, _)| *step > target).unwrap_or(ladder.len());
+    let i = ladder
+        .iter()
+        .position(|(step, _)| *step > target)
+        .unwrap_or(ladder.len());
     if i == ladder.len() {
         let years = nice_step(target / YEAR).max(1.).round() as u32;
         return TimeStep::Months(12 * years.max(1));
@@ -303,7 +306,11 @@ fn choose_time_step(target: f64) -> TimeStep {
         return fixed(nice_step(target).max(1.));
     }
     let (lo, hi) = (&ladder[i - 1], &ladder[i]);
-    if target / lo.0 < hi.0 / target { lo.1 } else { hi.1 }
+    if target / lo.0 < hi.0 / target {
+        lo.1
+    } else {
+        hi.1
+    }
 }
 
 fn floor_to_step(millis: f64, step: TimeStep) -> f64 {
@@ -402,13 +409,21 @@ pub fn plot_time_labels(ticks: &[f64], top: bool) -> Vec<String> {
         .filter_map(|m| Utc.timestamp_millis_opt(*m as i64).single())
         .collect();
     if dates.len() != ticks.len() {
-        return ticks.iter().map(|m| format_time_tick(*m, [ticks[0], *ticks.last().unwrap_or(m)]).to_string()).collect();
+        return ticks
+            .iter()
+            .map(|m| format_time_tick(*m, [ticks[0], *ticks.last().unwrap_or(m)]).to_string())
+            .collect();
     }
-    let max_step = ticks.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0., f64::max);
+    let max_step = ticks
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0., f64::max);
     const DAY: f64 = 86_400_000.;
     const MONTH: f64 = 30. * DAY;
     let on = |f: &dyn Fn(&DateTime<Utc>) -> bool| dates.iter().all(f);
-    let midnight = |d: &DateTime<Utc>| d.hour() == 0 && d.minute() == 0 && d.second() == 0 && d.timestamp_subsec_millis() == 0;
+    let midnight = |d: &DateTime<Utc>| {
+        d.hour() == 0 && d.minute() == 0 && d.second() == 0 && d.timestamp_subsec_millis() == 0
+    };
     // (first line, second line) formats, d3-time-format specifiers.
     let (f1, f2): (&str, Option<&str>) = if on(&|d| midnight(d) && d.day() == 1 && d.month() == 1) {
         ("%Y", None)

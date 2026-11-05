@@ -898,7 +898,9 @@ pub(crate) fn paint_axes(
                 for (i, line) in lines.iter().enumerate() {
                     let label = text(&gpui::SharedString::from(line.to_string()), window);
                     let ty = if top {
-                        edge - px(offset) - label.height - px(line_height * (lines.len() - 1 - i) as f32)
+                        edge - px(offset)
+                            - label.height
+                            - px(line_height * (lines.len() - 1 - i) as f32)
                     } else {
                         edge + px(offset + line_height * i as f32)
                     };

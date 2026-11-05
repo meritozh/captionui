@@ -351,54 +351,128 @@ impl RasterGrid {
     }
 
     /// The closed rings bounding the region at or above `threshold`, in data
-    /// coordinates; filled with the even-odd rule they make the region,
-    /// holes and all.
+    /// coordinates, d3-contour's `contours`: marching squares over the grid
+    /// with each value at its cell's centre, the boundary pinned to the
+    /// grid's edge, and a missing value read as below every threshold.
+    /// Filled with the even-odd rule, the rings make the region, holes and
+    /// all.
     pub fn contour(&self, threshold: f64) -> Vec<Vec<[f64; 2]>> {
         let (w, h) = (self.width, self.height);
-        // Pad with a border below every threshold so every ring closes.
+        // d3 pads the grid with a border below the threshold, so every ring
+        // closes; a crossing into the border sits on the grid's edge.
         let (pw, ph) = (w + 2, h + 2);
         let numbers = self.numbers();
-        let mut padded = vec![f64::NEG_INFINITY; pw * ph];
+        let below = f64::NEG_INFINITY;
+        let mut padded = vec![below; pw * ph];
         for j in 0..h {
             for i in 0..w {
                 let v = numbers[j * w + i];
-                padded[(j + 1) * pw + i + 1] = if v.is_finite() { v } else { f64::NEG_INFINITY };
+                padded[(j + 1) * pw + i + 1] = if v.is_finite() { v } else { below };
             }
         }
-        // A finite stand-in for "below", so crossings interpolate sensibly.
-        let floor = self
-            .extent()
-            .map_or(threshold - 1., |[lo, _]| lo.min(threshold) - 1.);
-        for v in padded.iter_mut() {
-            if !v.is_finite() {
-                *v = floor;
-            }
-        }
-        let grid = crate::density::DensityGrid {
-            columns: pw,
-            rows: ph,
-            cell: 1.,
-            values: padded,
-            origin: -1.5,
-        };
         let (dx, dy) = (
             (self.x2 - self.x1) / w as f64,
             (self.y2 - self.y1) / h as f64,
         );
-        grid.contours(threshold)
-            .into_iter()
-            .filter(|ring| ring.len() >= 3)
-            .map(|ring| {
-                ring.into_iter()
-                    .map(|(gx, gy)| {
-                        [
-                            self.x1 + (gx as f64 + 0.5) * dx,
-                            self.y1 + (gy as f64 + 0.5) * dy,
-                        ]
-                    })
-                    .collect()
-            })
-            .collect()
+        // Node (c, r) of the padded grid is cell (c - 1, r - 1)'s centre;
+        // the border nodes sit on the grid's edge rather than a cell beyond.
+        let node_x = |c: f64| -> f64 { (c - 0.5).clamp(0., w as f64) };
+        let node_y = |r: f64| -> f64 { (r - 0.5).clamp(0., h as f64) };
+        let value = |c: usize, r: usize| padded[r * pw + c];
+        type Edge = (usize, usize, u8);
+        let crossing = |edge: Edge| -> [f64; 2] {
+            let (c, r, dir) = edge;
+            let (a, b) = if dir == 0 {
+                (value(c, r), value(c + 1, r))
+            } else {
+                (value(c, r), value(c, r + 1))
+            };
+            // d3's smooth linear interpolation, with a missing side treated
+            // as the threshold's own level so the crossing hugs the edge.
+            let t = if a.is_finite() && b.is_finite() && (b - a).abs() > f64::EPSILON {
+                ((threshold - a) / (b - a)).clamp(0., 1.)
+            } else if a.is_finite() {
+                1.
+            } else {
+                0.
+            };
+            let (gx, gy) = if dir == 0 {
+                let (x0, x1) = (node_x(c as f64), node_x(c as f64 + 1.));
+                (x0 + (x1 - x0) * t, node_y(r as f64))
+            } else {
+                let (y0, y1) = (node_y(r as f64), node_y(r as f64 + 1.));
+                (node_x(c as f64), y0 + (y1 - y0) * t)
+            };
+            [self.x1 + gx * dx, self.y1 + gy * dy]
+        };
+        let above = |v: f64| v >= threshold;
+        let mut segments: Vec<(Edge, Edge)> = Vec::new();
+        for r in 0..ph - 1 {
+            for c in 0..pw - 1 {
+                let tl = above(value(c, r));
+                let tr = above(value(c + 1, r));
+                let br = above(value(c + 1, r + 1));
+                let bl = above(value(c, r + 1));
+                let code = (tl as u8) << 3 | (tr as u8) << 2 | (br as u8) << 1 | bl as u8;
+                let top = (c, r, 0);
+                let bottom = (c, r + 1, 0);
+                let left = (c, r, 1);
+                let right = (c + 1, r, 1);
+                match code {
+                    0 | 15 => {}
+                    1 | 14 => segments.push((left, bottom)),
+                    2 | 13 => segments.push((bottom, right)),
+                    3 | 12 => segments.push((left, right)),
+                    4 | 11 => segments.push((top, right)),
+                    6 | 9 => segments.push((top, bottom)),
+                    7 | 8 => segments.push((left, top)),
+                    5 => {
+                        segments.push((left, top));
+                        segments.push((bottom, right));
+                    }
+                    10 => {
+                        segments.push((left, bottom));
+                        segments.push((top, right));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        let mut at: std::collections::HashMap<Edge, Vec<usize>> = std::collections::HashMap::new();
+        for (k, (a, b)) in segments.iter().enumerate() {
+            at.entry(*a).or_default().push(k);
+            at.entry(*b).or_default().push(k);
+        }
+        let mut used = vec![false; segments.len()];
+        let mut rings = Vec::new();
+        for first in 0..segments.len() {
+            if used[first] {
+                continue;
+            }
+            let start = segments[first].0;
+            let mut ring = vec![crossing(start)];
+            let (mut segment, mut from) = (first, start);
+            loop {
+                used[segment] = true;
+                let (a, b) = segments[segment];
+                let to = if a == from { b } else { a };
+                ring.push(crossing(to));
+                match at
+                    .get(&to)
+                    .and_then(|ks| ks.iter().copied().find(|k| !used[*k]))
+                {
+                    Some(next) => {
+                        segment = next;
+                        from = to;
+                    }
+                    None => break,
+                }
+            }
+            if ring.len() >= 4 {
+                rings.push(ring);
+            }
+        }
+        rings
     }
 }
 

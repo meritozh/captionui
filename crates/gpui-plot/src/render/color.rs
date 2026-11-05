@@ -223,7 +223,16 @@ pub fn color_scale(
                 .with_transform(transform)
                 .with_unknown(unknown);
             if diverging {
-                scale = scale.with_pivot(options.pivot.unwrap_or(0.));
+                // Plot's diverging scales are symmetric about the pivot: the
+                // shorter side stretches so equal distances get equal color.
+                let pivot = options.pivot.unwrap_or(0.);
+                let [lo, hi] = [extent[0].min(pivot), extent[1].max(pivot)];
+                let delta = (pivot - lo).max(hi - pivot);
+                scale =
+                    ColorScale::continuous([pivot - delta, pivot + delta], scale.range().clone())
+                        .with_transform(transform)
+                        .with_unknown(unknown)
+                        .with_pivot(pivot);
             }
             Some(scale)
         }
