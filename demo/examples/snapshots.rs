@@ -163,7 +163,9 @@ fn main() {
 
         let colors = distinct_colors(&image);
         println!("{id:<36} {colors:>5} colors");
-        if colors < 8 {
+        // A monochrome chart has few colors but still paints: only an image
+        // of the background alone fails.
+        if colors < 2 {
             failures.push(format!("{id}: painted almost nothing"));
         }
         if let Some(reference) = &reference {

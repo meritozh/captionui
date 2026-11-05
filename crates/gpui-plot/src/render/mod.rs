@@ -782,9 +782,10 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
     // A one-dimensional mark has no second position channel. Plot fills it
     // with the datum's index for `lineX`/`rectX`, and leaves it unset for
     // `dotX`, whose dots all sit in the frame's middle.
-    if mark.kind.is_x_only() && mark.kind.cross_axis() == CrossAxis::Index {
+    // A cross channel the mark names wins: `Plot.lineY(data, {x, y})`.
+    if mark.kind.is_x_only() && mark.kind.cross_axis() == CrossAxis::Index && channels.y.is_none() {
         y = Value::Number(index as f64);
-    } else if mark.kind.is_y_only() && mark.kind.cross_axis() == CrossAxis::Index {
+    } else if mark.kind.is_y_only() && mark.kind.cross_axis() == CrossAxis::Index && channels.x.is_none() {
         x = Value::Number(index as f64);
     }
 
@@ -1144,23 +1145,6 @@ pub fn bin_axes(mark: &Mark) -> (bool, bool) {
     }
 }
 
-/// The fields a binned mark reads on its x and y bin axes.
-///
-/// A one-dimensional bin reads the channel on its own axis and falls back to
-/// the other, so `rectX(x: "v")` with a bin along y still finds its field.
-fn bin_fields(mark: &Mark) -> (Option<SharedString>, Option<SharedString>) {
-    let field = |channel: &Option<crate::table::Channel>| match channel {
-        Some(crate::table::Channel::Field(name)) => Some(name.clone()),
-        _ => None,
-    };
-    let (x, y) = (field(&mark.channels.x), field(&mark.channels.y));
-    match bin_axes(mark) {
-        (true, true) => (x, y),
-        (true, false) => (x.or(y), None),
-        (false, true) => (None, y.or(x)),
-        (false, false) => (None, None),
-    }
-}
 
 /// The bin edges a mark lays over `rows` on each of its bin axes.
 ///
@@ -1174,15 +1158,27 @@ fn bin_edges(
     let Some(bin) = &mark.bin else {
         return (None, None);
     };
-    let (x_field, y_field) = bin_fields(mark);
-    let edges = |field: Option<SharedString>, pinned: Option<transform::BinEdges>| {
+    let (x_channel, y_channel) = bin_channels(mark);
+    let edges = |channel: Option<&crate::table::Channel>, pinned: Option<transform::BinEdges>| {
         pinned.or_else(|| {
-            let field = field?;
-            let values: Vec<f64> = rows.iter().filter_map(|row| row.number(&field)).collect();
+            let channel = channel?;
+            let values: Vec<f64> = rows.iter().filter_map(|row| channel.read(row).as_number()).collect();
             transform::BinEdges::of(&values, bin.thresholds)
         })
     };
-    (edges(x_field, bin.edges[0]), edges(y_field, bin.edges[1]))
+    (edges(x_channel, bin.edges[0]), edges(y_channel, bin.edges[1]))
+}
+
+/// The channels a binned mark bins on x and y: [`bin_fields`]' choice, but
+/// any channel form, so `x: (d) => Math.log(d.volume)` bins too.
+fn bin_channels(mark: &Mark) -> (Option<&crate::table::Channel>, Option<&crate::table::Channel>) {
+    let (x, y) = (mark.channels.x.as_ref(), mark.channels.y.as_ref());
+    match bin_axes(mark) {
+        (true, true) => (x, y),
+        (true, false) => (x.or(y), None),
+        (false, true) => (None, y.or(x)),
+        (false, false) => (None, None),
+    }
 }
 
 /// Fix every binned mark's edges over the whole data, before it is split
@@ -1220,7 +1216,7 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
         return rows.to_vec();
     };
     let (bin_x, bin_y) = bin_axes(mark);
-    let (x_field, y_field) = bin_fields(mark);
+    let (x_channel, y_channel) = bin_channels(mark);
     let tables: Vec<Table> = rows.iter().map(|row| row.row.clone()).collect();
     let (x_edges, y_edges) = bin_edges(mark, &tables);
     if (bin_x && x_edges.is_none()) || (bin_y && y_edges.is_none()) {
@@ -1258,16 +1254,16 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
     let mut series: std::collections::BTreeMap<Option<crate::value::ValueKey>, BinCells> =
         std::collections::BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
-        let slot =
-            |field: &Option<SharedString>, edges: Option<transform::BinEdges>| match (field, edges)
-            {
-                (Some(field), Some(edges)) => {
-                    let value = row.row.number(field).filter(|v| v.is_finite())?;
+        let slot = |channel: Option<&crate::table::Channel>, edges: Option<transform::BinEdges>| {
+            match (channel, edges) {
+                (Some(channel), Some(edges)) => {
+                    let value = channel.read(&row.row).as_number().filter(|v| v.is_finite())?;
                     Some(edges.slot(value))
                 }
                 _ => Some(0),
-            };
-        let (Some(xi), Some(yi)) = (slot(&x_field, x_edges), slot(&y_field, y_edges)) else {
+            }
+        };
+        let (Some(xi), Some(yi)) = (slot(x_channel, x_edges), slot(y_channel, y_edges)) else {
             continue;
         };
         series
@@ -1279,8 +1275,9 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
     }
 
     let mut binned: Vec<PreparedRow> = Vec::new();
-    // The running top of each one-dimensional bin's stack.
-    let mut stack_tops: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+    // The running top (and bottom, for negative values) of each
+    // one-dimensional bin's stack.
+    let mut stack_tops: std::collections::HashMap<usize, (f64, f64)> = std::collections::HashMap::new();
     for cells in series.values() {
         for (&(xi, yi), members) in cells {
             let mut row = rows[members[0]].clone();
@@ -1317,30 +1314,44 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
                 row.y2 = Some(Value::Number(y1));
             }
             for output in &outputs {
+                // A reducer reads its input field, else the channel it
+                // outputs to (the mark's own `y` for `{y: "sum"}`), else a
+                // field of its name.
+                let channel = match output.name.as_ref() {
+                    "y" if !bin_y => mark.channels.y.as_ref(),
+                    "x" if !bin_x => mark.channels.x.as_ref(),
+                    "fill" => None,
+                    _ => None,
+                };
                 let input = output.input.clone().or_else(|| match output.name.as_ref() {
-                    "x" => x_field.clone().filter(|_| !bin_x),
-                    "y" => y_field.clone().filter(|_| !bin_y),
+                    "x" | "y" => None,
                     name => Some(SharedString::from(name.to_string())),
                 });
-                let values: Vec<Value> = records
+                let values: Vec<Value> = members
                     .iter()
-                    .map(|record| match &input {
-                        Some(field) => record.value(field),
-                        None => Value::Null,
+                    .map(|index| {
+                        let record = &rows[*index].row;
+                        match (&input, channel) {
+                            (Some(field), _) => record.value(field),
+                            (None, Some(channel)) => channel.read(record),
+                            (None, None) => Value::Null,
+                        }
                     })
                     .collect();
                 let reduced = output.reducer.reduce(&values, &records);
                 let number = reduced.as_number().unwrap_or(0.);
                 match output.name.as_ref() {
                     "y" if bin_x && !bin_y => {
-                        let base = stack_tops.entry(xi).or_insert(0.);
+                        let (up, down) = stack_tops.entry(xi).or_insert((0., 0.));
+                        let base = if number < 0. { down } else { up };
                         row.y = Value::Number(number);
                         row.y1 = Some(Value::Number(*base));
                         row.y2 = Some(Value::Number(*base + number));
                         *base += number;
                     }
                     "x" if bin_y && !bin_x => {
-                        let base = stack_tops.entry(yi).or_insert(0.);
+                        let (up, down) = stack_tops.entry(yi).or_insert((0., 0.));
+                        let base = if number < 0. { down } else { up };
                         row.x = Value::Number(number);
                         row.x1 = Some(Value::Number(*base));
                         row.x2 = Some(Value::Number(*base + number));
