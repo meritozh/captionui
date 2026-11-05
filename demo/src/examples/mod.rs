@@ -98,6 +98,22 @@ pub fn docs() -> &'static [Doc] {
     })
 }
 
+/// Plot's `projection: "albers"`. Gap: the library's `"albers"` lacks
+/// d3.geoAlbers' `center([-0.6, 38.7])`, so without a domain the lower 48
+/// project above the frame and nothing shows. Fitting it to the lower 48
+/// states frames the map where d3's default scale and translate put it.
+pub fn albers() -> gpui_plot::GeoProjection {
+    let lower48 = crate::data::states()
+        .rows()
+        .iter()
+        .filter(|state| !matches!(state.value("id").label().as_ref(), "02" | "15" | "72"))
+        .filter_map(|state| state.value("geometry").as_geo().cloned())
+        .collect();
+    gpui_plot::GeoProjection::named("albers")
+        .expect("the albers projection")
+        .domain(gpui_plot::Geometry::Collection(lower48))
+}
+
 /// Every ported example, in the docs' order.
 pub fn examples() -> Vec<Example> {
     let mut all = Vec::new();

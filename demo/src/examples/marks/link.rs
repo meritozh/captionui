@@ -15,12 +15,6 @@ pub fn examples() -> Vec<Example> {
 }
 
 fn e01() -> Plot {
-    let highlighted: Dataset = data::metros()
-        .rows()
-        .iter()
-        .filter(|d| d.number("highlight").is_some_and(|h| h != 0.))
-        .cloned()
-        .collect();
     Plot::plot()
         .grid(true)
         .inset(10.)
@@ -44,7 +38,8 @@ fn e01() -> Plot {
                 .marker_end("arrow"),
         )
         .mark(
-            text(highlighted)
+            text(data::metros())
+                .filter(|d| d.number("highlight").is_some_and(|h| h != 0.))
                 .x("POP_2015")
                 .y("R90_10_2015")
                 .text("nyt_display")
@@ -73,8 +68,6 @@ fn e02() -> Plot {
         .mark(tree(gods).path(Channel::identity()))
 }
 
-/// Without `projection: "equal-earth"`, the sphere and the world's `land`,
-/// the San Francisco–Paris links are drawn on linear lon/lat axes.
 fn e03() -> Plot {
     let xy = |mark: LinkMark| {
         mark.x1(Value::Number(-122.4194))
@@ -83,8 +76,9 @@ fn e03() -> Plot {
             .y2(Value::Number(48.8566))
     };
     Plot::plot()
-        .x(|x| x.domain([-180., 180.]))
-        .y(|y| y.domain([-90., 90.]))
+        .projection("equal-earth")
+        .mark(geo(gpui_plot::geo::sphere()))
+        .mark(geo(data::land()).fill("currentColor").fill_opacity(0.3))
         .mark(xy(link(Dataset::length(1))
             .curve(Curve::Linear)
             .stroke("red")))

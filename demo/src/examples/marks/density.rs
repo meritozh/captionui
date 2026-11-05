@@ -1,6 +1,5 @@
 //! Density mark <VersionBadge version="0.5.1" />: `marks/density.md`.
 
-use super::geo;
 use crate::prelude::*;
 
 pub fn examples() -> Vec<Example> {
@@ -103,10 +102,9 @@ fn e04() -> Plot {
 }
 
 fn e05() -> Plot {
-    let us = geo::us();
-    // `projection: "albers"` is the lower-48 equirectangular stand-in, with
-    // the x and y scales pinned to it; `bandwidth: 10` has no port.
-    geo::lower_48_scales(Plot::plot())
+    // Gap: the density mark has no `bandwidth` option (the docs ask for 10).
+    Plot::plot()
+        .projection(crate::examples::albers())
         .color(|c| c.scheme("YlGnBu"))
         .mark(
             density(data::walmarts())
@@ -114,8 +112,8 @@ fn e05() -> Plot {
                 .y("latitude")
                 .fill("density"),
         )
-        .mark(geo::statemesh(&us).stroke_opacity(0.3))
-        .mark(geo::nation(&us))
+        .mark(geo(data::statemesh()).stroke_opacity(0.3))
+        .mark(geo(data::nation()))
         .mark(
             dot(data::walmarts())
                 .x("longitude")

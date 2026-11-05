@@ -22,74 +22,6 @@ pub fn examples() -> Vec<Example> {
     ]
 }
 
-/// The docs' `countyboxes`: each US county's `d3.geoBounds` as
-/// `[west, south, east, north]`, read from the TopoJSON's quantized arcs.
-fn countyboxes() -> Dataset {
-    let topology = data::json("us-counties-10m.json");
-    let transform = &topology["transform"];
-    let scale = |i: usize| transform["scale"][i].as_f64().unwrap_or(1.);
-    let translate = |i: usize| transform["translate"][i].as_f64().unwrap_or(0.);
-    // Decode the delta-encoded arcs to longitude/latitude.
-    let arcs: Vec<Vec<[f64; 2]>> = topology["arcs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|arc| {
-            let (mut x, mut y) = (0., 0.);
-            arc.as_array()
-                .into_iter()
-                .flatten()
-                .map(|p| {
-                    x += p[0].as_f64().unwrap_or(0.);
-                    y += p[1].as_f64().unwrap_or(0.);
-                    [x * scale(0) + translate(0), y * scale(1) + translate(1)]
-                })
-                .collect()
-        })
-        .collect();
-    // Every arc index a geometry's (possibly nested) `arcs` references.
-    fn indices(value: &serde_json::Value, out: &mut Vec<usize>) {
-        match value {
-            serde_json::Value::Array(items) => items.iter().for_each(|v| indices(v, out)),
-            serde_json::Value::Number(n) => {
-                let i = n.as_i64().unwrap_or(0);
-                out.push(if i < 0 { !i } else { i } as usize);
-            }
-            _ => {}
-        }
-    }
-    let geometries = topology["objects"]["counties"]["geometries"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    Dataset::new(geometries.iter().filter_map(|geometry| {
-        let mut refs = Vec::new();
-        indices(&geometry["arcs"], &mut refs);
-        let points = refs.iter().filter_map(|&i| arcs.get(i)).flatten();
-        let mut bounds = [
-            f64::INFINITY,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::NEG_INFINITY,
-        ];
-        for [x, y] in points {
-            bounds = [
-                bounds[0].min(*x),
-                bounds[1].min(*y),
-                bounds[2].max(*x),
-                bounds[3].max(*y),
-            ];
-        }
-        bounds[0].is_finite().then(|| {
-            Table::empty()
-                .with("0", bounds[0])
-                .with("1", bounds[1])
-                .with("2", bounds[2])
-                .with("3", bounds[3])
-        })
-    }))
-}
-
 /// The docs' `bins`: `d3.bin()` of a thousand seeded normal samples, with
 /// d3's default Sturges thresholds (nice steps of 0.5).
 fn bins() -> Dataset {
@@ -109,11 +41,9 @@ fn bins() -> Dataset {
     }))
 }
 
-/// Without `projection: "albers-usa"`, the county boxes are drawn on linear
-/// lon/lat axes.
 fn e01() -> Plot {
-    Plot::plot().mark(
-        rect(countyboxes())
+    Plot::plot().projection("albers-usa").mark(
+        rect(data::countyboxes())
             .x1("0") // or ([x1]) => x1
             .y1("1") // or ([, y1]) => y1
             .x2("2") // or ([,, x2]) => x2
@@ -202,16 +132,10 @@ fn e07() -> Plot {
 /// in input order; `insetLeft`/`insetRight: 0.2` are an all-sides
 /// `inset(0.2)`.
 fn e08() -> Plot {
-    let mut covered: Vec<Table> = data::povcalnet()
-        .rows()
-        .iter()
-        .filter(|d| {
-            d.text("CoverageType")
-                .is_some_and(|t| t.as_ref() == "N" || t.as_ref() == "A")
-        })
-        .cloned()
-        .collect();
-    covered.sort_by(|a, b| b.num("HeadCount").total_cmp(&a.num("HeadCount")));
+    // Gap: the stack has no field `order` ("HeadCount", reversed), so the
+    // rows are sorted by it up front and stacked in input order.
+    let mut sorted: Vec<Table> = data::povcalnet().rows().to_vec();
+    sorted.sort_by(|a, b| b.num("HeadCount").total_cmp(&a.num("HeadCount")));
     Plot::plot()
         .x(|x| x.label("Population (millions)"))
         .y(|y| {
@@ -219,7 +143,11 @@ fn e08() -> Plot {
                 .label("Proportion living on less than $30 per day (%)")
         })
         .mark(
-            rect_y(Dataset::new(covered))
+            rect_y(Dataset::new(sorted))
+                .filter(|d| {
+                    d.text("CoverageType")
+                        .is_some_and(|t| t.as_ref() == "N" || t.as_ref() == "A")
+                })
                 .x("ReqYearPopulation")
                 .y2("HeadCount") // y2 to avoid stacking by y
                 .stack_x()

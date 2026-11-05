@@ -3,9 +3,6 @@
 //! Plot's interactive tips (the `tip` mark option and `Plot.tip` with
 //! `Plot.pointer`) map onto the plot's built-in hover tooltip here; the
 //! static tips are `tip` marks.
-//!
-//! `Plot.lineY` with an explicit `x` is ported as `line`: the library's
-//! `line_y` ignores the `x` channel and spreads points by index.
 
 use crate::prelude::*;
 
@@ -24,7 +21,7 @@ pub fn examples() -> Vec<Example> {
 
 /// `Plot.lineY(aapl, {x: "Date", y: "Close", tip: true}).plot({y: {grid: true}})`
 fn e01() -> Plot {
-    line(data::aapl())
+    line_y(data::aapl())
         .x("Date")
         .y("Close")
         .plot()
@@ -48,7 +45,7 @@ fn note(text: &str, (y, m, d): (i32, u32, u32), close: f64) -> Dataset {
 fn e02() -> Plot {
     Plot::plot()
         .y(|y| y.grid(true))
-        .mark(line(data::aapl()).x("Date").y("Close"))
+        .mark(line_y(data::aapl()).x("Date").y("Close"))
         .mark(
             tip(note(
                 "Apple stock reaches a new high of $133 on Feb. 23, 2015. The release of the first Apple Watch, slated for April, is hotly anticipated.",
@@ -128,25 +125,16 @@ fn e05() -> Plot {
         .plot()
 }
 
-/// The bin's `sum` reducer reads only a field, not the docs' `y: (d) =>
-/// d.sex === "male" ? 1 : -1` accessor, so the sign is precomputed into a
-/// `sign` field.
 fn e06() -> Plot {
-    let olympians: Dataset = data::olympians()
-        .rows()
-        .iter()
-        .map(|d| {
-            let sign = if d.value("sex").label() == "male" {
+    rect_y(data::olympians())
+        .x("weight")
+        .y(Channel::number(|d: &Table| {
+            if d.value("sex").label() == "male" {
                 1.
             } else {
                 -1.
-            };
-            d.clone().with("sign", Value::Number(sign))
-        })
-        .collect();
-    rect_y(olympians)
-        .x("weight")
-        .y("sign")
+            }
+        }))
         .fill("sex")
         .bin(Thresholds::Auto)
         .bin_output("y", GroupReducer::Sum)
@@ -197,20 +185,13 @@ fn e08() -> Plot {
     plot
 }
 
-/// `Plot.geoCentroid` and the `albers-usa` projection are done in the
-/// vector page's `us` helper; the states draw as outlines.
+/// Gap: the tip's `anchor: "bottom"` and `textPadding` have no
+/// counterpart, so each tip takes its default placement.
 fn e09() -> Plot {
-    use super::vector::us;
-    us::map(Plot::plot())
-        .mark(us::statemesh())
-        .mark(us::nation())
-        .mark(
-            tip(us::states())
-                .x("cx")
-                .y("cy")
-                .text("name")
-                .frame_anchor(FrameAnchor::Bottom),
-        )
+    Plot::plot()
+        .projection("albers-usa")
+        .mark(geo(data::states()))
+        .mark(tip(data::states()).geo_centroid().text("name"))
 }
 
 fn e10() -> Plot {

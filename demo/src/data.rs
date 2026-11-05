@@ -307,3 +307,108 @@ pub fn land() -> gpui_plot::Geometry {
 pub fn countries() -> Dataset {
     cached("countries", || world().feature("countries"))
 }
+
+/// A FIPS code as d3 reads it from a CSV without `autoType`: text, zero
+/// padded to `width` digits (`d3.autoType` would have made it a number).
+pub fn fips(value: &Value, width: usize) -> String {
+    match value {
+        Value::Number(n) => format!("{:0width$}", *n as i64),
+        other => other.label().to_string(),
+    }
+}
+
+/// The geo page's `counties`: `topojson.feature(us, us.objects.counties)`
+/// with each county's `unemployment` rate joined by id from
+/// us-county-unemployment.csv.
+pub fn counties_unemployment() -> Dataset {
+    cached("counties_unemployment", || {
+        let rate: HashMap<String, f64> = us_county_unemployment()
+            .rows()
+            .iter()
+            .filter_map(|row| Some((fips(&row.value("id"), 5), row.number("rate")?)))
+            .collect();
+        Dataset::new(us().feature("counties").rows().iter().map(|row| {
+            let id = row.value("id").label().to_string();
+            let unemployment = rate.get(&id).map_or(Value::Null, |r| Value::Number(*r));
+            row.clone().with("unemployment", unemployment)
+        }))
+    })
+}
+
+/// The vector page's `counties`: [`counties`] (with `population`) and each
+/// county's `margin2020` and `votes` joined by FIPS code from
+/// us-presidential-election-2020.csv.
+pub fn counties_election() -> Dataset {
+    cached("counties_election", || {
+        let election: HashMap<String, (Value, Value)> = us_presidential_election_2020()
+            .rows()
+            .iter()
+            .map(|row| {
+                (
+                    fips(&row.value("fips"), 5),
+                    (row.value("margin2020"), row.value("votes")),
+                )
+            })
+            .collect();
+        Dataset::new(counties().rows().iter().map(|row| {
+            let id = row.value("id").label().to_string();
+            match election.get(&id) {
+                Some((margin, votes)) => row
+                    .clone()
+                    .with("margin2020", margin.clone())
+                    .with("votes", votes.clone()),
+                None => row.clone(),
+            }
+        }))
+    })
+}
+
+/// The rect page's `countyboxes`: `counties.map((d) => d3.geoBounds(d).flat())`,
+/// each county's `[west, south, east, north]` as fields "0" to "3". The
+/// bounds are the extent of the county's vertices, which is d3's answer for
+/// shapes this small that do not cross the antimeridian.
+pub fn countyboxes() -> Dataset {
+    fn extend(geometry: &gpui_plot::Geometry, b: &mut [f64; 4]) {
+        use gpui_plot::Geometry::*;
+        let mut point = |[x, y]: [f64; 2]| {
+            *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+        };
+        match geometry {
+            Point(p) => point(*p),
+            MultiPoint(ps) | LineString(ps) => ps.iter().copied().for_each(point),
+            MultiLineString(rings) | Polygon(rings) => rings.iter().flatten().copied().for_each(point),
+            MultiPolygon(polygons) => polygons.iter().flatten().flatten().copied().for_each(point),
+            Collection(items) => items.iter().for_each(|g| extend(g, b)),
+            Sphere => {}
+        }
+    }
+    cached("countyboxes", || {
+        Dataset::new(us().feature("counties").rows().iter().filter_map(|row| {
+            let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+            extend(row.value("geometry").as_geo()?, &mut b);
+            b[0].is_finite().then(|| {
+                Table::empty()
+                    .with("0", b[0])
+                    .with("1", b[1])
+                    .with("2", b[2])
+                    .with("3", b[3])
+            })
+        }))
+    })
+}
+
+/// The geo page's `walmarts`: each store a Point feature, its opening
+/// `date` a property.
+pub fn walmart_points() -> Dataset {
+    cached("walmart_points", || {
+        Dataset::new(walmarts().rows().iter().filter_map(|row| {
+            let point =
+                gpui_plot::Geometry::Point([row.number("longitude")?, row.number("latitude")?]);
+            Some(
+                Table::empty()
+                    .with("geometry", point.into_value())
+                    .with("date", row.value("date")),
+            )
+        }))
+    })
+}
