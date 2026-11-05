@@ -12,7 +12,7 @@ use gpui::{
 
 /// A path built from points, filled.
 pub fn fill_path(points: &[Point<Pixels>], color: Hsla) -> Option<Path<Pixels>> {
-    if points.len() < 3 {
+    if points.len() < 3 || !finite(points) {
         return None;
     }
     let mut builder = PathBuilder::fill();
@@ -22,7 +22,9 @@ pub fn fill_path(points: &[Point<Pixels>], color: Hsla) -> Option<Path<Pixels>> 
 
 /// A path built from points, stroked.
 pub fn stroke_path(points: &[Point<Pixels>], width: f32, color: Hsla) -> Option<Path<Pixels>> {
-    if points.is_empty() {
+    // A non-finite point (a NaN that slipped through a channel) would panic
+    // the tessellator; skip the shape instead.
+    if points.is_empty() || !finite(points) {
         return None;
     }
     let mut builder = PathBuilder::stroke(px(width.max(0.1)));
@@ -31,6 +33,11 @@ pub fn stroke_path(points: &[Point<Pixels>], width: f32, color: Hsla) -> Option<
         builder.line_to(*point);
     }
     builder.build().ok().map(|path| with_alpha(path, color))
+}
+
+/// Whether every point is finite, which the tessellator requires.
+pub fn finite(points: &[Point<Pixels>]) -> bool {
+    points.iter().all(|p| p.x.as_f32().is_finite() && p.y.as_f32().is_finite())
 }
 
 /// Paint a filled path.
@@ -324,7 +331,7 @@ pub fn paint_dashed_path(
 pub fn paint_fill_rings(rings: &[Vec<Point<Pixels>>], color: Hsla, window: &mut Window) {
     let mut builder = PathBuilder::fill();
     let mut any = false;
-    for ring in rings.iter().filter(|r| r.len() >= 3) {
+    for ring in rings.iter().filter(|r| r.len() >= 3 && finite(r)) {
         builder.add_polygon(ring, true);
         any = true;
     }

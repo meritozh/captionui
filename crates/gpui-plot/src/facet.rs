@@ -97,6 +97,11 @@ impl Grid {
             // `fy: "sex"` stacks female above male whatever the data order.
             let mut keys = crate::scale::dedup(values.into_iter().map(|value| value.key()));
             keys.sort();
+            // Plot keeps a facet for missing values, after the others.
+            if let Some(i) = keys.iter().position(|k| k.to_value().is_null()) {
+                let null = keys.remove(i);
+                keys.push(null);
+            }
             (!keys.is_empty()).then_some(keys)
         };
         Self::new(domain(fx), domain(fy))
@@ -224,10 +229,7 @@ impl Grid {
         let mut groups: Vec<Vec<crate::table::Table>> = vec![Vec::new(); self.cells.len()];
         for row in data.rows() {
             let key = |channel: Option<&crate::table::Channel>| {
-                channel.map(|channel| {
-                    let value = channel.read(row);
-                    (!value.is_null()).then(|| value.key())
-                })
+                channel.map(|channel| Some(channel.read(row).key()))
             };
             let (x, y) = (key(fx), key(fy));
             for (index, cell) in self.cells.iter().enumerate() {
@@ -256,12 +258,7 @@ impl Grid {
     ) -> (Vec<Vec<crate::table::Table>>, Vec<bool>) {
         let mut groups: Vec<Vec<crate::table::Table>> = vec![Vec::new(); self.cells.len()];
         for row in data.rows() {
-            let key = |field: Option<&str>| {
-                field
-                    .map(|field| row.value(field))
-                    .filter(|value| !value.is_null())
-                    .map(|value| value.key())
-            };
+            let key = |field: Option<&str>| field.map(|field| row.value(field).key());
             let x = key(fx);
             let y = key(fy);
             if let Some(cell) = self.cell(x.as_ref(), y.as_ref()) {

@@ -1507,9 +1507,22 @@ impl Plot {
                 }
             }
         }
-        fx.retain(|value| !value.is_null());
-        fy.retain(|value| !value.is_null());
-        Grid::from_values(fx, fy)
+        // An explicit facet domain wins, in its order.
+        let explicit = |options: &crate::options::ScaleOptions, values: Vec<Value>| match &options.domain {
+            Some(domain) => domain.clone(),
+            None => values,
+        };
+        let mut grid = Grid::from_values(explicit(&self.scales.fx, fx), explicit(&self.scales.fy, fy));
+        if let (Some(domain), Some(keys)) = (&self.scales.fx.domain, grid.fx.as_mut()) {
+            *keys = crate::scale::dedup(domain.iter().map(Value::key));
+        }
+        if let (Some(domain), Some(keys)) = (&self.scales.fy.domain, grid.fy.as_mut()) {
+            *keys = crate::scale::dedup(domain.iter().map(Value::key));
+        }
+        if self.scales.fx.domain.is_some() || self.scales.fy.domain.is_some() {
+            grid = Grid::new(grid.fx.clone(), grid.fy.clone());
+        }
+        grid
     }
 
     /// The resolved layout: the insets the frame reserves.
@@ -1607,10 +1620,10 @@ impl Plot {
                 _ => want(3, 40.),
             }
         }
-        if grid.fx.is_some() && self.scales.fx.axis != Some(None) {
+        if grid.fx.is_some() && self.scales.fx.axis != Some(None) && !self.no_axes {
             want(0, 30.);
         }
-        if grid.fy.is_some() && self.scales.fy.axis != Some(None) {
+        if grid.fy.is_some() && self.scales.fy.axis != Some(None) && !self.no_axes {
             want(1, 40.);
         }
         for (side, explicit) in self.margins.iter().enumerate() {
@@ -2639,7 +2652,20 @@ impl PlotTrait for Plot {
                     &crate::frame::AxisEdges::from_cell(cell, &grid),
                 );
             }
-            crate::frame::paint_facet_labels(&frame, &theme, window, cx, &grid);
+            // Plot's facet axes: hidden by `axis: null` or the facet scale's
+            // own `axis: null`, labelled through its tickFormat.
+            let show = |options: &crate::options::ScaleOptions| {
+                !self.no_axes && options.axis != Some(None)
+            };
+            crate::frame::paint_facet_labels(
+                &frame,
+                &theme,
+                window,
+                cx,
+                &grid,
+                show(&self.scales.fx).then_some(&self.scales.fx),
+                show(&self.scales.fy).then_some(&self.scales.fy),
+            );
         } else {
             crate::frame::paint_axes(
                 &frame,

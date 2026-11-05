@@ -289,7 +289,11 @@ impl Channel {
     pub fn read(&self, row: &Table) -> Value {
         match self {
             Channel::Constant(value) => value.clone(),
-            Channel::Field(name) => row.value(name),
+            // A NaN stored in a record is a missing value, as Plot reads it.
+            Channel::Field(name) => match row.value(name) {
+                Value::Number(n) if n.is_nan() => Value::Null,
+                value => value,
+            },
             Channel::Accessor(accessor) => accessor(row),
         }
     }

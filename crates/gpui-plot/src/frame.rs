@@ -963,13 +963,30 @@ pub(crate) fn paint_facet_labels(
     window: &mut Window,
     cx: &mut App,
     grid: &Grid,
+    fx_options: Option<&crate::options::ScaleOptions>,
+    fy_options: Option<&crate::options::ScaleOptions>,
 ) {
+    let format = |options: Option<&crate::options::ScaleOptions>, keys: &[crate::value::ValueKey]| -> Vec<gpui::SharedString> {
+        keys.iter()
+            .map(|key| {
+                let value = key.to_value();
+                match options.and_then(|o| o.tick_format.as_ref()) {
+                    Some(format) => format.format(&value).into(),
+                    None => match &value {
+                        crate::value::Value::Null => "null".into(),
+                        crate::value::Value::Date(d) => crate::format::format_time("%Y", *d).into(),
+                        other => other.label(),
+                    },
+                }
+            })
+            .collect()
+    };
     let plot = frame.plot;
     let font = font(theme.font_family.clone());
     let color = theme.label;
 
-    if let Some(fx) = &grid.fx {
-        let labels = grid.fx_labels();
+    if let (Some(fx), Some(_)) = (&grid.fx, fx_options) {
+        let labels = format(fx_options, fx);
         for (index, text) in labels.into_iter().enumerate() {
             let (start, width) = band(index, fx.len(), plot.size.width.as_f32());
             let label = Label::new(
@@ -992,8 +1009,8 @@ pub(crate) fn paint_facet_labels(
         }
     }
 
-    if let Some(fy) = &grid.fy {
-        let labels = grid.fy_labels();
+    if let (Some(fy), Some(_)) = (&grid.fy, fy_options) {
+        let labels = format(fy_options, fy);
         for (index, text) in labels.into_iter().enumerate() {
             let (start, height) = band(index, fy.len(), plot.size.height.as_f32());
             let label = Label::new(

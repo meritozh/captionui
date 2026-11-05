@@ -812,6 +812,12 @@ pub struct MarkStyle {
     pub text_stroke_width: f32,
     /// Plot's `textAnchor`.
     pub text_anchor: TextAnchor,
+    /// Whether `textAnchor` was given, so a `frameAnchor` doesn't override it.
+    pub text_anchor_set: bool,
+    /// Whether `lineAnchor` was given.
+    pub line_anchor_set: bool,
+    /// Plot's area `line: true`: stroke the area's top edge.
+    pub area_line: bool,
     /// Plot's `lineAnchor`.
     pub line_anchor: LineAnchor,
     /// Plot's `frameAnchor`.
@@ -983,6 +989,9 @@ impl Default for MarkStyle {
             text_stroke: None,
             text_stroke_width: 3.,
             text_anchor: TextAnchor::Middle,
+            text_anchor_set: false,
+            line_anchor_set: false,
+            area_line: false,
             line_anchor: LineAnchor::Middle,
             frame_anchor: None,
             font_size: None,
@@ -1786,12 +1795,14 @@ impl Mark {
     /// Plot's `textAnchor`.
     pub fn text_anchor(mut self, anchor: TextAnchor) -> Self {
         self.style.text_anchor = anchor;
+        self.style.text_anchor_set = true;
         self
     }
 
     /// Plot's `lineAnchor`.
     pub fn line_anchor(mut self, anchor: LineAnchor) -> Self {
         self.style.line_anchor = anchor;
+        self.style.line_anchor_set = true;
         self
     }
 
@@ -2017,6 +2028,16 @@ impl Mark {
     /// A difference mark's `negativeFill`.
     pub fn negative_fill(mut self, color: &str) -> Self {
         self.style.negative_fill = crate::css::parse(color);
+        self
+    }
+
+    /// Plot's area `line: true`: also stroke the area's top line, and fade
+    /// the fill to 0.3 unless a fill opacity is set.
+    pub fn area_line(mut self, line: bool) -> Self {
+        self.style.area_line = line;
+        if line && self.style.fill_opacity == 1. {
+            self.style.fill_opacity = 0.3;
+        }
         self
     }
 
@@ -2575,6 +2596,12 @@ macro_rules! mark_builder {
             /// Clip the mark to the plot area, Plot's `clip: true`.
             pub fn clip(mut self, clip: bool) -> Self {
                 self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::area_line`], Plot's area `line: true`.
+            pub fn area_line(mut self, line: bool) -> Self {
+                self.0 = self.0.area_line(line);
                 self
             }
 

@@ -577,7 +577,10 @@ fn draw_areas_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                 .unwrap_or_else(|| ctx.default_fill(prepared));
             let polygon = paint::fill_path(
                 &upper,
-                paint::alpha(color, prepared.mark.style.opacity * ctx.appear),
+                paint::alpha(
+                    color,
+                    prepared.mark.style.opacity * prepared.mark.style.fill_opacity * ctx.appear,
+                ),
             );
             paint::paint_path(polygon, color, ctx.window);
 
@@ -844,48 +847,33 @@ fn draw_cells(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             // A one-dimensional cell covers the whole frame across the axis
             // it does not read, since that axis has no bands to fill. Its
             // extent starts at the frame's edge, not at the datum's index.
-            let (x0, y0, width, height) = match prepared.mark.kind {
-                MarkKind::CellX => {
-                    let Some(x) = ctx.frame.x.scale.position(row.x_value()) else {
-                        continue;
-                    };
-                    (
-                        x,
-                        0.,
-                        cell_extent(&ctx.frame.x.scale),
-                        ctx.frame.plot.size.height.as_f32(),
-                    )
-                }
-                MarkKind::CellY => {
-                    let Some(y) = ctx.frame.y.scale.position(row.y_value()) else {
-                        continue;
-                    };
-                    (
-                        0.,
-                        y,
-                        ctx.frame.plot.size.width.as_f32(),
-                        cell_extent(&ctx.frame.y.scale),
-                    )
-                }
-                _ => {
-                    let (Some(x), Some(y)) = (
-                        ctx.frame.x.scale.position(row.x_value()),
-                        ctx.frame.y.scale.position(row.y_value()),
-                    ) else {
-                        continue;
-                    };
-                    (
-                        x,
-                        y,
-                        cell_extent(&ctx.frame.x.scale),
-                        cell_extent(&ctx.frame.y.scale),
-                    )
-                }
+            // A cell without a y spans the frame's height (`cellX`, or a
+            // `cell` given only x), one without an x its width.
+            let no_y = prepared.mark.kind == MarkKind::CellX || row.y_value().is_null();
+            let no_x = prepared.mark.kind == MarkKind::CellY || row.x_value().is_null();
+            let (plot_w, plot_h) = (ctx.frame.plot.size.width.as_f32(), ctx.frame.plot.size.height.as_f32());
+            let (x0, width) = if no_x {
+                (plot_w / 2., plot_w)
+            } else {
+                let Some(x) = ctx.frame.x.scale.position(row.x_value()) else {
+                    continue;
+                };
+                (x, cell_extent(&ctx.frame.x.scale))
             };
+            let (y0, height) = if no_y {
+                (plot_h / 2., plot_h)
+            } else {
+                let Some(y) = ctx.frame.y.scale.position(row.y_value()) else {
+                    continue;
+                };
+                (y, cell_extent(&ctx.frame.y.scale))
+            };
+            let inset = prepared.mark.style.inset.unwrap_or(0.);
+            let (hw, hh) = ((width / 2. - inset).max(0.), (height / 2. - inset).max(0.));
             // A band's position is its center, so the cell straddles it.
             let rect = paint::rect_between(
-                ctx.absolute(point(px(x0 - width / 2.), px(y0 - height / 2.))),
-                ctx.absolute(point(px(x0 + width / 2.), px(y0 + height / 2.))),
+                ctx.absolute(point(px(x0 - hw), px(y0 - hh))),
+                ctx.absolute(point(px(x0 + hw), px(y0 + hh))),
             );
             let color = colors.fill(index);
             paint::paint_rect(
@@ -1068,12 +1056,26 @@ fn draw_texts(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         let line_height = size.as_f32() * 1.2;
         let block = line_height * lines.len() as f32;
         let origin = ctx.absolute(position);
-        let top = match style.line_anchor {
+        // Plot's text infers its anchors from a `frameAnchor` on the
+        // frame's edge: "top-left" reads start-aligned and hangs from the top.
+        use crate::mark::FrameAnchor as F;
+        let frame_anchor = style.frame_anchor;
+        let line_anchor = match (style.line_anchor_set, frame_anchor) {
+            (false, Some(F::Top | F::TopLeft | F::TopRight)) => LineAnchor::Top,
+            (false, Some(F::Bottom | F::BottomLeft | F::BottomRight)) => LineAnchor::Bottom,
+            _ => style.line_anchor,
+        };
+        let text_anchor = match (style.text_anchor_set, frame_anchor) {
+            (false, Some(F::Left | F::TopLeft | F::BottomLeft)) => TextAnchor::Start,
+            (false, Some(F::Right | F::TopRight | F::BottomRight)) => TextAnchor::End,
+            _ => style.text_anchor,
+        };
+        let top = match line_anchor {
             LineAnchor::Top => origin.y.as_f32() + dy,
             LineAnchor::Middle => origin.y.as_f32() + dy - block / 2.,
             LineAnchor::Bottom => origin.y.as_f32() + dy - block,
         };
-        let align = match style.text_anchor {
+        let align = match text_anchor {
             TextAnchor::Start => TextAlign::Left,
             TextAnchor::Middle => TextAlign::Center,
             TextAnchor::End => TextAlign::Right,
@@ -1813,7 +1815,7 @@ pub fn curve_path(
     width: f32,
     appear: f32,
 ) -> Option<gpui::Path<Pixels>> {
-    if points.len() < 2 {
+    if points.len() < 2 || !paint::finite(points) {
         return None;
     }
     let visible = ((points.len() as f32 * appear.clamp(0., 1.)) as usize)
