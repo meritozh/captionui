@@ -103,9 +103,21 @@ pub fn effective_stack(mark: &Mark) -> Option<StackSpec> {
             .is_some_and(|g| g.outputs.iter().any(|o| o.name == a || o.name == b))
             || mark.interval.is_some()
     };
+    // A transform's `y` output is the value to stack, as a `y` channel is.
+    let y_out = mark.group.as_ref().is_some_and(|g| {
+        g.outputs.iter().any(|o| o.name == "y")
+            || (g.outputs.is_empty() && g.axis == Some(Axis::X) && !g.both)
+    });
+    let x_out = mark.group.as_ref().is_some_and(|g| {
+        g.outputs.iter().any(|o| o.name == "x")
+            || (g.outputs.is_empty() && g.axis == Some(Axis::Y) && !g.both)
+    });
     match mark.kind {
         MarkKind::BarY | MarkKind::AreaY | MarkKind::RectY | MarkKind::WaffleY
-            if c.y.is_some() && c.y1.is_none() && c.y2.is_none() && !outputs("y1", "y2") =>
+            if (c.y.is_some() || y_out)
+                && c.y1.is_none()
+                && c.y2.is_none()
+                && !outputs("y1", "y2") =>
         {
             Some(StackSpec {
                 keep_value: true,
@@ -113,7 +125,10 @@ pub fn effective_stack(mark: &Mark) -> Option<StackSpec> {
             })
         }
         MarkKind::BarX | MarkKind::AreaX | MarkKind::RectX | MarkKind::WaffleX
-            if c.x.is_some() && c.x1.is_none() && c.x2.is_none() && !outputs("x1", "x2") =>
+            if (c.x.is_some() || x_out)
+                && c.x1.is_none()
+                && c.x2.is_none()
+                && !outputs("x1", "x2") =>
         {
             Some(StackSpec {
                 keep_value: true,

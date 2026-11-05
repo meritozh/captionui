@@ -135,6 +135,17 @@ pub enum GroupReducer {
     Last,
     /// The value at the first row the test accepts, Plot's `Plot.find`.
     Find(std::rc::Rc<dyn Fn(&Table) -> bool>),
+    /// The most common value, Plot's `"mode"`.
+    Mode,
+    /// The group's share of all rows, Plot's `"proportion"` (and, since
+    /// facets reduce on their own, `"proportion-facet"`).
+    Proportion,
+    /// The variance, Plot's `"variance"`.
+    Variance,
+    /// The `p`-quantile, Plot's `"p25"`, `"p75"` …
+    Quantile(f64),
+    /// A custom reducer over the group's values and records.
+    Custom(std::rc::Rc<dyn Fn(&[Value], &[&Table]) -> Value>),
 }
 
 impl GroupReducer {
@@ -142,6 +153,32 @@ impl GroupReducer {
     /// Plot's `Plot.find`.
     pub fn find(test: impl Fn(&Table) -> bool + 'static) -> Self {
         Self::Find(std::rc::Rc::new(test))
+    }
+
+    /// A custom reducer, Plot's `{reduce: (values) => …}`.
+    pub fn custom(reduce: impl Fn(&[Value], &[&Table]) -> Value + 'static) -> Self {
+        Self::Custom(std::rc::Rc::new(reduce))
+    }
+
+    /// Plot's reducer names: `"count"`, `"sum"`, `"mean"`, `"p25"` …
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "count" => Self::Count,
+            "distinct" => Self::Distinct,
+            "sum" => Self::Sum,
+            "mean" => Self::Mean,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            "median" => Self::Median,
+            "deviation" => Self::Deviation,
+            "variance" => Self::Variance,
+            "first" => Self::First,
+            "last" => Self::Last,
+            "mode" => Self::Mode,
+            "proportion" | "proportion-facet" => Self::Proportion,
+            q if q.starts_with('p') => Self::Quantile(q[1..].parse::<f64>().ok()? / 100.),
+            _ => return None,
+        })
     }
 
     /// Reduce one group: its values, and the records they came from.
@@ -156,7 +193,13 @@ impl GroupReducer {
             GroupReducer::Deviation => Some(Reducer::Deviation),
             GroupReducer::First => Some(Reducer::First),
             GroupReducer::Last => Some(Reducer::Last),
-            GroupReducer::Distinct | GroupReducer::Find(_) => None,
+            GroupReducer::Distinct
+            | GroupReducer::Find(_)
+            | GroupReducer::Mode
+            | GroupReducer::Proportion
+            | GroupReducer::Variance
+            | GroupReducer::Quantile(_)
+            | GroupReducer::Custom(_) => None,
         };
         if let Some(reducer) = simple {
             return reducer.reduce(values);
@@ -178,6 +221,44 @@ impl GroupReducer {
                 .find(|(_, row)| test(row))
                 .map(|(value, _)| value.clone())
                 .unwrap_or(Value::Null),
+            GroupReducer::Mode => {
+                let mut counts: Vec<(ValueKey, Value, usize)> = Vec::new();
+                for value in values.iter().filter(|v| !v.is_null()) {
+                    let key = value.key();
+                    match counts.iter_mut().find(|(k, _, _)| *k == key) {
+                        Some(entry) => entry.2 += 1,
+                        None => counts.push((key, value.clone(), 1)),
+                    }
+                }
+                counts
+                    .into_iter()
+                    .max_by_key(|(_, _, n)| *n)
+                    .map(|(_, v, _)| v)
+                    .unwrap_or(Value::Null)
+            }
+            GroupReducer::Proportion => Value::Number(values.len() as f64),
+            GroupReducer::Variance => {
+                let numbers: Vec<f64> = values.iter().filter_map(Value::as_number).collect();
+                if numbers.len() < 2 {
+                    return Value::Null;
+                }
+                let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                Value::Number(
+                    numbers.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                        / (numbers.len() - 1) as f64,
+                )
+            }
+            GroupReducer::Quantile(p) => {
+                let mut numbers: Vec<f64> = values.iter().filter_map(Value::as_number).collect();
+                if numbers.is_empty() {
+                    return Value::Null;
+                }
+                numbers.sort_by(f64::total_cmp);
+                let h = (numbers.len() - 1) as f64 * p;
+                let (lo, hi) = (h.floor() as usize, h.ceil() as usize);
+                Value::Number(numbers[lo] + (numbers[hi] - numbers[lo]) * (h - h.floor()))
+            }
+            GroupReducer::Custom(f) => f(values, rows),
             _ => Value::Null,
         }
     }
@@ -197,6 +278,11 @@ impl std::fmt::Debug for GroupReducer {
             GroupReducer::First => "First",
             GroupReducer::Last => "Last",
             GroupReducer::Find(_) => "Find(..)",
+            GroupReducer::Mode => "Mode",
+            GroupReducer::Proportion => "Proportion",
+            GroupReducer::Variance => "Variance",
+            GroupReducer::Quantile(_) => "Quantile(..)",
+            GroupReducer::Custom(_) => "Custom(..)",
         };
         f.write_str(name)
     }

@@ -639,7 +639,10 @@ pub struct GroupConfig {
     /// `z` channel alone.
     pub axis: Option<Axis>,
     /// The outputs: which channel each group's reduction lands in, and how.
+    /// Empty means Plot's default, a count into the length channel.
     pub outputs: Vec<GroupOutput>,
+    /// Plot's `group`: group by x and y together.
+    pub both: bool,
 }
 
 /// One grouped output channel: a field or channel name and its reducer.
@@ -2150,18 +2153,33 @@ impl Mark {
     /// into a histogram: every x value becomes one row whose y is how many
     /// readings shared it.
     pub fn group_x(mut self) -> Self {
+        let outputs = self.group.take().map(|g| g.outputs).unwrap_or_default();
         self.group = Some(GroupConfig {
             axis: Some(Axis::X),
-            outputs: vec![GroupOutput::new("y", GroupReducer::Count)],
+            outputs,
+            both: false,
+        });
+        self
+    }
+
+    /// Group the mark's rows by x and y together, Plot's `group`.
+    pub fn group_xy(mut self) -> Self {
+        let outputs = self.group.take().map(|g| g.outputs).unwrap_or_default();
+        self.group = Some(GroupConfig {
+            axis: Some(Axis::X),
+            outputs,
+            both: true,
         });
         self
     }
 
     /// Group the mark's rows by y and reduce them, Plot's `groupY`.
     pub fn group_y(mut self) -> Self {
+        let outputs = self.group.take().map(|g| g.outputs).unwrap_or_default();
         self.group = Some(GroupConfig {
             axis: Some(Axis::Y),
-            outputs: vec![GroupOutput::new("x", GroupReducer::Count)],
+            outputs,
+            both: false,
         });
         self
     }
@@ -2169,9 +2187,11 @@ impl Mark {
     /// Group the mark's rows by its `z` channel and reduce them, Plot's
     /// `groupZ`. Without a `z` the whole dataset is one group.
     pub fn group_z(mut self) -> Self {
+        let outputs = self.group.take().map(|g| g.outputs).unwrap_or_default();
         self.group = Some(GroupConfig {
             axis: None,
-            outputs: vec![GroupOutput::new("fill", GroupReducer::Count)],
+            outputs,
+            both: false,
         });
         self
     }
@@ -2187,6 +2207,7 @@ impl Mark {
                 self.group = Some(GroupConfig {
                     axis: Some(Axis::X),
                     outputs: vec![output],
+                    both: false,
                 });
             }
         }
@@ -2963,6 +2984,12 @@ macro_rules! mark_builder {
             /// Group the mark's rows by x, Plot's `groupX`.
             pub fn group_x(mut self) -> Self {
                 self.0 = self.0.group_x();
+                self
+            }
+
+            /// Group by x and y together, Plot's `group`.
+            pub fn group_xy(mut self) -> Self {
+                self.0 = self.0.group_xy();
                 self
             }
 

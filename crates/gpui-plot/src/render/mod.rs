@@ -248,6 +248,9 @@ fn with_value_defaults(mark: &Mark, data: &Dataset) -> Option<Mark> {
 fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     let defaulted = with_value_defaults(mark, data);
     let mark = defaulted.as_ref().unwrap_or(mark);
+    let original = mark;
+    let bound = bind_outputs(mark);
+    let mark = bound.as_ref().unwrap_or(mark);
     // A furniture mark draws the plot's axes, grid or frame rather than data,
     // so it reads no channels and resolves no rows.
     // A furniture mark without data reads one placeholder record, which its
@@ -355,6 +358,13 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         .enumerate()
         .map(|(index, row)| resolve_row(row, index, channels, mark))
         .collect();
+    // A transform output reads the mark's own channel of that name unless it
+    // names an input (Plot's `maybeInput`): `binX({fill: "x"}, {fill:
+    // "Anomaly"})` averages Anomaly. The channel's value lands on the record
+    // under `$in:<name>`, which the output reads.
+    if bound.is_some() {
+        materialize_inputs(original, &mut rows);
+    }
 
     // A mark's own ordering decides where its shapes land, and a line's order
     // is its path, so sorting happens before anything positional.
@@ -982,81 +992,121 @@ fn group_input(row: &PreparedRow, mark: &Mark, output: &crate::mark::GroupOutput
     }
 }
 
-/// Collapse the rows sharing a category, Plot's `groupX`/`groupY`/`groupZ`.
+/// Collapse the rows sharing a category, Plot's `groupX`/`groupY`/`groupZ`
+/// and `group`.
 ///
-/// Every group becomes one row: its category channel keeps the key, its
-/// outputs hold the reductions, and every other channel — the radius, the
-/// symbol, the record the tooltip reads — carries over from the group's first
-/// member. The groups keep the order they first appear in, so a categorical
-/// axis reads in data order.
+/// Rows group by the transform's axis (or both) and are subdivided by `z`
+/// (the series a fill or stroke field implies), so `groupX` with `fill: "sex"`
+/// gives a bar per sex in each category, which the implicit stack then
+/// stacks. Each group becomes one row: the grouping channels keep their key,
+/// the outputs hold the reductions, and a positional channel neither keeps,
+/// as Plot drops it. The groups keep their first appearance's order.
 fn collapse_groups(
     rows: Vec<PreparedRow>,
     mark: &Mark,
     config: &crate::mark::GroupConfig,
 ) -> Vec<PreparedRow> {
-    let key = |row: &PreparedRow| match config.axis {
-        Some(Axis::X) => row.x_value().clone(),
-        Some(Axis::Y) => row.y_value().clone(),
-        // `groupZ` subdivides by the series, and a row with no `z` is its
-        // own group rather than a missing one.
-        None => row.z.clone().unwrap_or(Value::Null),
+    let by_x = config.both || config.axis == Some(Axis::X);
+    let by_y = config.both || config.axis == Some(Axis::Y);
+    let key = |row: &PreparedRow| -> (
+        crate::value::ValueKey,
+        crate::value::ValueKey,
+        crate::value::ValueKey,
+    ) {
+        let none = Value::Null.key();
+        (
+            if by_x {
+                row.x_value().key()
+            } else {
+                none.clone()
+            },
+            if by_y {
+                row.y_value().key()
+            } else {
+                none.clone()
+            },
+            row.z.as_ref().map(Value::key).unwrap_or(none),
+        )
     };
-
-    let mut groups: Vec<(Value, Vec<PreparedRow>)> = Vec::new();
+    let total = rows.len().max(1) as f64;
+    let mut groups: Vec<(_, Vec<PreparedRow>)> = Vec::new();
     for row in rows {
-        let key = key(&row);
-        match groups.iter_mut().find(|(existing, _)| *existing == key) {
+        let k = key(&row);
+        match groups.iter_mut().find(|(existing, _)| *existing == k) {
             Some((_, members)) => members.push(row),
-            None => groups.push((key, vec![row])),
+            None => groups.push((k, vec![row])),
         }
     }
+    // Plot's default output: a count into the channel the grouping leaves
+    // free — y for groupX, x for groupY, fill for group and groupZ.
+    let default_outputs;
+    let outputs: &[crate::mark::GroupOutput] = if config.outputs.is_empty() {
+        let name = match (by_x, by_y) {
+            (true, false) => "y",
+            (false, true) => "x",
+            _ => "fill",
+        };
+        default_outputs = vec![crate::mark::GroupOutput::new(
+            name,
+            transform::GroupReducer::Count,
+        )];
+        &default_outputs
+    } else {
+        &config.outputs
+    };
 
     groups
         .into_iter()
-        .map(|(key, members)| {
+        .map(|(_, members)| {
             let first = members[0].clone();
             let mut grouped = PreparedRow {
-                x: Value::Null,
-                y: Value::Null,
+                x: if by_x {
+                    first.x_value().clone()
+                } else {
+                    Value::Null
+                },
+                y: if by_y {
+                    first.y_value().clone()
+                } else {
+                    Value::Null
+                },
                 x1: None,
                 x2: None,
                 y1: None,
                 y2: None,
                 ..first
             };
-            for output in &config.outputs {
+            let records: Vec<&Table> = members.iter().map(|row| &row.row).collect();
+            for output in outputs {
                 let values: Vec<Value> = members
                     .iter()
                     .map(|row| group_input(row, mark, output))
                     .collect();
-                let records: Vec<&Table> = members.iter().map(|row| &row.row).collect();
-                let reduced = output.reducer.reduce(&values, &records);
+                let reduced = match output.reducer {
+                    // Plot's `proportion`: the group's share of every row.
+                    transform::GroupReducer::Proportion => {
+                        Value::Number(members.len() as f64 / total)
+                    }
+                    _ => output.reducer.reduce(&values, &records),
+                };
                 match &*output.name {
-                    "x" => grouped.x = reduced,
-                    "y" => grouped.y = reduced,
-                    "x1" => grouped.x1 = (!reduced.is_null()).then_some(reduced),
-                    "x2" => grouped.x2 = (!reduced.is_null()).then_some(reduced),
-                    "y1" => grouped.y1 = (!reduced.is_null()).then_some(reduced),
-                    "y2" => grouped.y2 = (!reduced.is_null()).then_some(reduced),
-                    "z" => grouped.z = (!reduced.is_null()).then_some(reduced),
-                    // Anything else is a field the record gains, so a channel
-                    // that reads it — a fill accessor, a text label — sees the
-                    // reduced value.
-                    field => grouped.row = grouped.row.with(field, reduced),
+                    "x" => grouped.x = reduced.clone(),
+                    "y" => grouped.y = reduced.clone(),
+                    "x1" => grouped.x1 = (!reduced.is_null()).then(|| reduced.clone()),
+                    "x2" => grouped.x2 = (!reduced.is_null()).then(|| reduced.clone()),
+                    "y1" => grouped.y1 = (!reduced.is_null()).then(|| reduced.clone()),
+                    "y2" => grouped.y2 = (!reduced.is_null()).then(|| reduced.clone()),
+                    "z" => grouped.z = (!reduced.is_null()).then(|| reduced.clone()),
+                    "r" => grouped.r_value = reduced.as_number(),
+                    "fillOpacity" | "opacity" | "strokeOpacity" => {
+                        grouped.opacity_value = reduced.as_number()
+                    }
+                    _ => {}
                 }
+                // The record gains every output under its name, so a channel
+                // that reads it — a fill, a text label, a tip — sees it.
+                grouped.row = grouped.row.with(output.name.clone(), reduced);
             }
-            // The category channel keeps the key when no output wrote it,
-            // which is what makes a grouped dot sit at its own category.
-            if grouped.x.is_null() && grouped.x1.is_none() {
-                grouped.x = key.clone();
-            }
-            if grouped.y.is_null() && grouped.y1.is_none() {
-                grouped.y = key;
-            }
-            // The grouping wrote the reduced value into a channel the mark
-            // turns into an interval, so a bar grows from zero to the count
-            // again. Plot derives the interval from the mark's options after
-            // its transforms, not before.
             derive_intervals(
                 mark,
                 &grouped.x,
@@ -1069,6 +1119,104 @@ fn collapse_groups(
             grouped
         })
         .collect()
+}
+
+/// The channel names a transform output can read from the mark itself.
+const BOUND: [&str; 4] = ["fill", "stroke", "text", "title"];
+
+/// Write each bound channel's value onto its row's record as `$in:<name>`.
+fn materialize_inputs(original: &Mark, rows: &mut [PreparedRow]) {
+    let c = &original.channels;
+    for row in rows.iter_mut() {
+        let mut record = row.row.clone();
+        for name in BOUND {
+            let value = match name {
+                "fill" => c.fill.as_ref().and_then(|ch| ch.scaled_value(&row.row)),
+                "stroke" => c.stroke.as_ref().and_then(|ch| ch.scaled_value(&row.row)),
+                "text" => c.text.as_ref().map(|ch| ch.read(&row.row)),
+                "title" => c.title.as_ref().map(|ch| ch.read(&row.row)),
+                _ => None,
+            };
+            if let Some(value) = value {
+                record = record.with(format!("$in:{name}"), value);
+            }
+        }
+        row.row = record;
+    }
+}
+
+/// The mark as its transforms leave it: a group or bin output to `fill`,
+/// `stroke`, `text`, `title` (and so on) becomes that channel, read from the
+/// output's field, as Plot binds a transform's outputs to the mark.
+fn bind_outputs(mark: &Mark) -> Option<Mark> {
+    let outputs: Vec<SharedString> = mark
+        .group
+        .iter()
+        .flat_map(|g| g.outputs.iter().map(|o| o.name.clone()))
+        .chain(
+            mark.bin
+                .iter()
+                .flat_map(|b| b.outputs.iter().map(|o| o.name.clone())),
+        )
+        .collect();
+    let default_fill = mark
+        .group
+        .as_ref()
+        .is_some_and(|g| g.outputs.is_empty() && (g.both || g.axis.is_none()));
+    if outputs.is_empty() && !default_fill {
+        return None;
+    }
+    let mut mark = mark.clone();
+    // Outputs with no input read the mark's channel of their name, from the
+    // value [`materialize_inputs`] writes.
+    let has = |name: &str| match name {
+        "fill" => mark
+            .channels
+            .fill
+            .as_ref()
+            .is_some_and(|c| c.scaled_value(&Table::empty()).is_some()),
+        "stroke" => mark
+            .channels
+            .stroke
+            .as_ref()
+            .is_some_and(|c| c.scaled_value(&Table::empty()).is_some()),
+        "text" => mark.channels.text.is_some(),
+        "title" => mark.channels.title.is_some(),
+        _ => false,
+    };
+    let inputs: Vec<String> = BOUND
+        .iter()
+        .filter(|n| has(n))
+        .map(|n| n.to_string())
+        .collect();
+    for config in mark
+        .group
+        .iter_mut()
+        .map(|g| &mut g.outputs)
+        .chain(mark.bin.iter_mut().map(|b| &mut b.outputs))
+    {
+        for output in config.iter_mut() {
+            if output.input.is_none() && inputs.iter().any(|n| *n == output.name.as_ref()) {
+                output.input = Some(format!("$in:{}", output.name).into());
+            }
+        }
+    }
+    for name in outputs
+        .iter()
+        .map(|n| n.as_ref())
+        .chain(default_fill.then_some("fill"))
+    {
+        match name {
+            "fill" => mark.channels.fill = Some(crate::style::ColorChannel::Field("fill".into())),
+            "stroke" => {
+                mark.channels.stroke = Some(crate::style::ColorChannel::Field("stroke".into()))
+            }
+            "text" => mark.channels.text = Some(crate::table::Channel::Field("text".into())),
+            "title" => mark.channels.title = Some(crate::table::Channel::Field("title".into())),
+            _ => {}
+        }
+    }
+    Some(mark)
 }
 
 fn reduce_rows(rows: Vec<PreparedRow>, mark: &Mark, reducer: Reducer) -> Vec<PreparedRow> {
@@ -1365,7 +1513,12 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
                         }
                     })
                     .collect();
-                let reduced = output.reducer.reduce(&values, &records);
+                let reduced = match output.reducer {
+                    transform::GroupReducer::Proportion => {
+                        Value::Number(members.len() as f64 / rows.len().max(1) as f64)
+                    }
+                    _ => output.reducer.reduce(&values, &records),
+                };
                 let number = reduced.as_number().unwrap_or(0.);
                 match output.name.as_ref() {
                     "y" if bin_x && !bin_y => {

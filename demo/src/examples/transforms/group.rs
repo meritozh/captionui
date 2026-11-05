@@ -46,7 +46,11 @@ fn sport_axis(x: ScaleOptions) -> ScaleOptions {
 /// `groupX({…outputs}, …)` (or `groupZ` when `axis` is `None`).
 fn grouped(mark: impl Into<Mark>, axis: Option<Axis>, outputs: Vec<GroupOutput>) -> Mark {
     let mut mark = mark.into();
-    mark.group = Some(GroupConfig { axis, outputs });
+    mark.group = Some(GroupConfig {
+        axis,
+        outputs,
+        both: false,
+    });
     mark
 }
 
@@ -79,6 +83,7 @@ fn group_xy(
     outputs.push(GroupOutput::new("x", GroupReducer::First));
     outputs.push(GroupOutput::new("y", GroupReducer::First));
     mark.group = Some(GroupConfig {
+        both: false,
         axis: None,
         outputs,
     });

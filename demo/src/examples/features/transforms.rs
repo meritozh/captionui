@@ -66,7 +66,7 @@ fn e02() -> Plot {
                 .y("location")
                 .fill("vehicles")
                 .inset(0.5)
-                .group_x()
+                .group_xy()
                 .group_output("fill", GroupReducer::Median)
                 .sort_domain("y", "fill", false),
         )

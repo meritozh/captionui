@@ -96,6 +96,7 @@ fn e02() -> Plot {
     };
     let mut range = xy(rule_y(stateage.clone()).into_mark());
     range.group = Some(GroupConfig {
+        both: false,
         axis: Some(Axis::Y),
         outputs: vec![
             GroupOutput::new("x1", GroupReducer::Min),

@@ -24,6 +24,7 @@ pub fn examples() -> Vec<Example> {
 fn group_z_count<M: From<Mark> + Into<Mark>>(mark: M) -> M {
     let mut mark: Mark = mark.into();
     mark.group = Some(GroupConfig {
+        both: false,
         axis: None,
         outputs: vec![GroupOutput::new("y", GroupReducer::Count)],
     });
