@@ -834,6 +834,13 @@ pub struct MarkStyle {
     pub italic: bool,
     /// Plot's `lineWidth`: wrap text at this many ems.
     pub line_width: Option<f32>,
+    /// A tip's `anchor`: the side of its point the box sits on; `None`
+    /// picks the side that fits, preferring the bottom.
+    pub tip_anchor: Option<FrameAnchor>,
+    /// A tip's `textPadding`, in pixels (8 by default).
+    pub text_padding: Option<f32>,
+    /// A tip's `pointerSize`, in pixels (12 by default).
+    pub pointer_size: Option<f32>,
     /// Plot's `strokeDasharray`, in pixels.
     pub dash: Vec<f32>,
     /// Plot's `rotate` for text, in degrees.
@@ -1002,6 +1009,9 @@ impl Default for MarkStyle {
             font_weight: None,
             italic: false,
             line_width: None,
+            tip_anchor: None,
+            text_padding: None,
+            pointer_size: None,
             dash: Vec::new(),
             text_rotate: 0.,
         }
@@ -1893,6 +1903,24 @@ impl Mark {
         self
     }
 
+    /// A tip's `anchor`: which side of its point the box sits on.
+    pub fn tip_anchor(mut self, anchor: FrameAnchor) -> Self {
+        self.style.tip_anchor = Some(anchor);
+        self
+    }
+
+    /// A tip's `textPadding`, in pixels.
+    pub fn text_padding(mut self, padding: f32) -> Self {
+        self.style.text_padding = Some(padding);
+        self
+    }
+
+    /// A tip's `pointerSize`, in pixels.
+    pub fn pointer_size(mut self, size: f32) -> Self {
+        self.style.pointer_size = Some(size);
+        self
+    }
+
     /// Plot's `strokeDasharray`.
     pub fn dash(mut self, dash: impl IntoIterator<Item = f32>) -> Self {
         self.style.dash = dash.into_iter().collect();
@@ -2182,6 +2210,15 @@ impl Mark {
     /// `node:path`, `node:internal`, `node:external`, `node:depth` and
     /// `node:height` fields.
     pub fn tree_node(mut self, spec: crate::hierarchy::TreeSpec) -> Self {
+        // Plot's treeNode anchors on the tree's side of the frame, so a text
+        // reads away from its node.
+        if self.style.frame_anchor.is_none() {
+            self.style.frame_anchor = Some(if spec.right {
+                FrameAnchor::Right
+            } else {
+                FrameAnchor::Left
+            });
+        }
         self.tree = Some((spec, false));
         self.channels.x = Some(crate::table::Channel::Field("$tree:x".into()));
         self.channels.y = Some(crate::table::Channel::Field("$tree:y".into()));
@@ -2196,6 +2233,19 @@ impl Mark {
         self.channels.x2 = Some(crate::table::Channel::Field("$tree:x2".into()));
         self.channels.y2 = Some(crate::table::Channel::Field("$tree:y2".into()));
         self.style.curve = Curve::BumpX;
+        // Plot's treeLink defaults: a `#777` stroke, 1.5px at half opacity.
+        let defaults = MarkStyle::default();
+        if self.channels.stroke.is_none() && self.style.stroke == defaults.stroke {
+            self.channels.stroke = Some(ColorChannel::Constant(crate::scale::hsla_from_hex(
+                0x777777,
+            )));
+        }
+        if self.style.stroke_width == defaults.stroke_width {
+            self.style.stroke_width = 1.5;
+        }
+        if self.style.stroke_opacity == defaults.stroke_opacity {
+            self.style.stroke_opacity = 0.5;
+        }
         self
     }
 
@@ -3189,6 +3239,24 @@ macro_rules! mark_builder {
                 self
             }
 
+            /// See [`Mark::tip_anchor`].
+            pub fn tip_anchor(mut self, anchor: FrameAnchor) -> Self {
+                self.0 = self.0.tip_anchor(anchor);
+                self
+            }
+
+            /// See [`Mark::text_padding`].
+            pub fn text_padding(mut self, padding: f32) -> Self {
+                self.0 = self.0.text_padding(padding);
+                self
+            }
+
+            /// See [`Mark::pointer_size`].
+            pub fn pointer_size(mut self, size: f32) -> Self {
+                self.0 = self.0.pointer_size(size);
+                self
+            }
+
             /// See [`Mark::dash`].
             pub fn dash(mut self, dash: impl IntoIterator<Item = f32>) -> Self {
                 self.0 = self.0.dash(dash);
@@ -4093,13 +4161,13 @@ pub fn expand_tree(mark: Mark, spec: crate::hierarchy::TreeSpec) -> Vec<Mark> {
         m
     };
     let mut link = base(MarkKind::Link).tree_link(spec.clone());
-    link.channels.stroke =
-        mark.channels
-            .stroke
-            .clone()
-            .or(Some(ColorChannel::Constant(crate::scale::hsla_from_hex(
-                0x777777,
-            ))));
+    // Plot's tree strokes its links by the fill, else by `node:internal`.
+    link.channels.stroke = mark
+        .channels
+        .stroke
+        .clone()
+        .or_else(|| mark.channels.fill.clone())
+        .or(Some(ColorChannel::Field("node:internal".into())));
     link.style.stroke_opacity = 0.5;
     link.style.stroke_width = if mark.style.stroke_width != MarkStyle::default().stroke_width {
         mark.style.stroke_width
@@ -4119,13 +4187,22 @@ pub fn expand_tree(mark: Mark, spec: crate::hierarchy::TreeSpec) -> Vec<Mark> {
     let dx = if spec.right { -6. } else { 6. };
     let halo = mark.style.text_stroke.or(Some(Hsla::white()));
     let mut labels = Vec::new();
-    for (filter, anchor, dx) in [
-        ("node:external", TextAnchor::Start, dx),
-        ("node:internal", TextAnchor::End, -dx),
-    ] {
-        let mut text = base(MarkKind::Text)
-            .tree_node(spec.clone())
-            .tree_filter(filter);
+    // Plot's `textLayout`: "mirrored" for its tree and cluster layouts,
+    // "normal" (every label after its node) for any other.
+    let mirrored = spec.layout != crate::hierarchy::TreeLayout::Indent;
+    let layouts: &[(Option<&str>, TextAnchor, f32)] = if mirrored {
+        &[
+            (Some("node:external"), TextAnchor::Start, dx),
+            (Some("node:internal"), TextAnchor::End, -dx),
+        ]
+    } else {
+        &[(None, TextAnchor::Start, dx)]
+    };
+    for &(filter, anchor, dx) in layouts {
+        let mut text = base(MarkKind::Text).tree_node(spec.clone());
+        if let Some(filter) = filter {
+            text = text.tree_filter(filter);
+        }
         text.channels.text = Some(crate::table::Channel::Field("node:name".into()));
         text.style.text_anchor = if spec.right {
             if anchor == TextAnchor::Start {

@@ -103,9 +103,13 @@ fn split_path(path: &str, delimiter: char) -> Vec<String> {
 
 impl Hierarchy {
     /// `d3.stratify().path(…)` over the records' paths.
+    ///
+    /// As d3 does, the records come first, in order, and the implied
+    /// interior nodes after them, in the order their children name them; a
+    /// node's children follow that order, so an implied parent sorts after
+    /// its explicit siblings. The root is the topmost implied node, skipping
+    /// implied nodes with a single child.
     pub fn stratify(data: &Dataset, spec: &TreeSpec) -> Option<Self> {
-        let mut nodes: Vec<Node> = Vec::new();
-        let mut index: HashMap<String, usize> = HashMap::new();
         let read = |row: &Table| -> Option<String> {
             let value = match &spec.path {
                 Some(field) => row.value(field),
@@ -113,62 +117,63 @@ impl Hierarchy {
             };
             (!value.is_null()).then(|| value.label().to_string())
         };
-        let mut get = |parts: &[String], nodes: &mut Vec<Node>| -> usize {
-            let mut parent: Option<usize> = None;
-            let mut at = 0;
-            for depth in 0..=parts.len() {
-                let key = parts[..depth].join("/");
-                let id = *index.entry(key.clone()).or_insert_with(|| {
-                    nodes.push(Node {
-                        name: if depth == 0 {
-                            String::new()
-                        } else {
-                            parts[depth - 1].clone()
-                        },
-                        path: if depth == 0 {
-                            String::new()
-                        } else {
-                            format!(
-                                "{}{}",
-                                spec.delimiter,
-                                parts[..depth].join(&spec.delimiter.to_string())
-                            )
-                        },
-                        parent,
-                        children: Vec::new(),
-                        depth,
-                        height: 0,
-                        data: None,
-                        x: 0.,
-                        y: 0.,
-                    });
-                    let id = nodes.len() - 1;
-                    if let Some(p) = parent {
-                        nodes[p].children.push(id);
-                    }
-                    id
-                });
-                parent = Some(id);
-                at = id;
-            }
-            at
-        };
+        let mut keys: Vec<Vec<String>> = Vec::new();
+        let mut records: Vec<Option<Table>> = Vec::new();
         for row in data.rows() {
             let Some(path) = read(row) else { continue };
-            let parts = split_path(&path, spec.delimiter);
-            let id = get(&parts, &mut nodes);
-            nodes[id].data = Some(row.clone());
+            keys.push(split_path(&path, spec.delimiter));
+            records.push(Some(row.clone()));
         }
-        if nodes.is_empty() {
+        if keys.is_empty() {
             return None;
         }
-        // d3's stratify roots at the topmost implied node: drop an empty
-        // root with a single child.
-        let mut root = 0;
-        while nodes[root].data.is_none()
-            && nodes[root].children.len() == 1
-            && nodes[root].name.is_empty()
-        {
+        let mut seen: std::collections::HashSet<Vec<String>> = keys.iter().cloned().collect();
+        let mut i = 0;
+        while i < keys.len() {
+            if let Some((_, parent)) = keys[i].split_last()
+                && seen.insert(parent.to_vec())
+            {
+                keys.push(parent.to_vec());
+                records.push(None);
+            }
+            i += 1;
+        }
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut index: HashMap<Vec<String>, usize> = HashMap::new();
+        let mut ids = Vec::with_capacity(keys.len());
+        for (parts, data) in keys.iter().zip(records) {
+            if let Some(&id) = index.get(parts) {
+                ids.push(None);
+                if nodes[id].data.is_none() {
+                    nodes[id].data = data;
+                }
+                continue;
+            }
+            index.insert(parts.clone(), nodes.len());
+            ids.push(Some(nodes.len()));
+            nodes.push(Node {
+                name: parts.last().cloned().unwrap_or_default(),
+                // Plot's `node:path` is d3's id: the slash-delimited path.
+                path: format!("/{}", parts.join("/")),
+                parent: None,
+                children: Vec::new(),
+                depth: 0,
+                height: 0,
+                data,
+                x: 0.,
+                y: 0.,
+            });
+        }
+        for (parts, id) in keys.iter().zip(ids) {
+            let (Some(id), Some((_, parent))) = (id, parts.split_last()) else {
+                continue;
+            };
+            let parent = index[parent];
+            nodes[id].parent = Some(parent);
+            nodes[parent].children.push(id);
+        }
+        let mut root = *index.get(&Vec::new())?;
+        while nodes[root].data.is_none() && nodes[root].children.len() == 1 {
             root = nodes[root].children[0];
         }
         nodes[root].parent = None;

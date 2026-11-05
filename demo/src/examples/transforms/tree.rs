@@ -28,24 +28,17 @@ const GODS: [&str; 6] = [
 /// ```
 fn e01() -> Plot {
     let gods = || Dataset::values_of(GODS.map(Value::text));
-    let mut link = link(gods()).tree_link(TreeSpec::default());
-    link.0.channels.stroke = Some(ColorChannel::Constant(gpui_plot::scale::hsla_from_hex(
-        0x777777,
-    )));
-    link.0.style.stroke_opacity = 0.5;
-    link.0.style.stroke_width = 1.5;
     Plot::plot()
         .no_axes()
         .height(100.)
         .margin(20.)
         .margin_right(120.)
-        .mark(link)
+        .mark(link(gods()).tree_link(TreeSpec::default()))
         .mark(dot(gods()).tree_node(TreeSpec::default()))
         .mark(
             text(gods())
                 .tree_node(TreeSpec::default())
                 .text(Channel::Field("node:name".into()))
-                .dx(6.)
-                .text_anchor(TextAnchor::Start),
+                .dx(6.),
         )
 }

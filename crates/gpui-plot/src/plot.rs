@@ -1466,6 +1466,30 @@ impl Plot {
         self
     }
 
+    /// Plot's `insetLeft`: the x scale's inset on the left, replacing `inset`.
+    pub fn inset_left(mut self, inset: f32) -> Self {
+        self.scales.x.inset_start = Some(inset);
+        self
+    }
+
+    /// Plot's `insetRight`.
+    pub fn inset_right(mut self, inset: f32) -> Self {
+        self.scales.x.inset_end = Some(inset);
+        self
+    }
+
+    /// Plot's `insetBottom`.
+    pub fn inset_bottom(mut self, inset: f32) -> Self {
+        self.scales.y.inset_start = Some(inset);
+        self
+    }
+
+    /// Plot's `insetTop`.
+    pub fn inset_top(mut self, inset: f32) -> Self {
+        self.scales.y.inset_end = Some(inset);
+        self
+    }
+
     /// Set the inner padding between bands, Plot's `padding`.
     pub fn padding(mut self, padding: f32) -> Self {
         self.frame_options.padding = padding;

@@ -133,6 +133,30 @@ pub fn color_scale(
                 }
             };
             let k = domain.len().max(1);
+            // Plot's `maybeBooleanRange`: an all-boolean domain maps false to
+            // the low and true to the high color of a two-color scheme, greys
+            // by default (ColorBrewer's three greys, favoring the darker two).
+            let all_boolean = explicit.is_none()
+                && options.colors.is_none()
+                && !values.is_empty()
+                && values.iter().all(|value| matches!(value, Value::Bool(_)));
+            if all_boolean {
+                let [f, t] = match options.scheme.as_deref() {
+                    None => [0xbdbdbd, 0x636363].map(crate::scale::hsla_from_hex),
+                    Some(scheme) => {
+                        let two = crate::css::discrete(scheme, 2).unwrap_or_default();
+                        [0, 1].map(|i| two.get(i).copied().unwrap_or(theme.mark_color))
+                    }
+                };
+                // The domain's keys, sorted, put false before true.
+                let has = |b: bool| values.iter().any(|value| *value == Value::Bool(b));
+                let colors = [(false, f), (true, t)]
+                    .into_iter()
+                    .filter(|(b, _)| has(*b))
+                    .map(|(_, color)| color)
+                    .collect();
+                return Some(ColorScale::ordinal(domain, colors).with_unknown(unknown));
+            }
             let colors = match (&options.colors, &options.scheme) {
                 (Some(colors), _) => colors.clone(),
                 (None, Some(scheme)) => {

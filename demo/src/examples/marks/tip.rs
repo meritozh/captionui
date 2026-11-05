@@ -56,7 +56,7 @@ fn e02() -> Plot {
                 .x("Date")
                 .y("Close")
                 .dy(-3.)
-                .frame_anchor(FrameAnchor::Bottom),
+                .tip_anchor(FrameAnchor::Bottom),
         )
         .mark(
             tip(note(
@@ -68,7 +68,7 @@ fn e02() -> Plot {
                 .x("Date")
                 .y("Close")
                 .dy(3.)
-                .frame_anchor(FrameAnchor::Top),
+                .tip_anchor(FrameAnchor::Top),
         )
 }
 
@@ -178,26 +178,34 @@ fn e08() -> Plot {
     for (name, anchor) in anchors {
         plot = plot
             .mark(dot(Dataset::length(1)).frame_anchor(anchor).fill("blue"))
-            // Plot's tip `anchor` (which side of the point the box sits on)
-            // has no counterpart; the tip only takes the frame anchor.
-            .mark(tip([name]).text(Channel::identity()).frame_anchor(anchor));
+            .mark(
+                tip([name])
+                    .text(Channel::identity())
+                    .frame_anchor(anchor)
+                    .tip_anchor(anchor),
+            );
     }
     plot
 }
 
-/// Gap: the tip's `anchor: "bottom"` and `textPadding` have no
-/// counterpart, so each tip takes its default placement.
 fn e09() -> Plot {
     Plot::plot()
         .projection("albers-usa")
         .mark(geo(data::states()))
-        .mark(tip(data::states()).geo_centroid().text("name"))
+        .mark(
+            tip(data::states())
+                .geo_centroid()
+                .text("name")
+                .tip_anchor(FrameAnchor::Bottom)
+                .text_padding(3.),
+        )
 }
 
 fn e10() -> Plot {
     tip(["Danger! This tip is red."])
         .text(Channel::identity())
         .frame_anchor(FrameAnchor::Bottom)
+        .tip_anchor(FrameAnchor::Bottom)
         .fill("red")
         .plot()
 }

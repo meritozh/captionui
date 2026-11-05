@@ -86,7 +86,7 @@ fn e04() -> Plot {
     Plot::plot()
         .no_axes()
         .inset(10.)
-        .margin_right(120.)
+        .inset_right(120.)
         .width(200.)
         .height(3600.)
         .mark(

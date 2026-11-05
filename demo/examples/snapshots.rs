@@ -80,7 +80,7 @@ fn main() {
         .filter(|example| {
             filter
                 .as_ref()
-                .is_none_or(|filter| example.id().contains(filter.as_str()))
+                .is_none_or(|filter| filter.split(',').any(|f| example.id().contains(f)))
         })
         .collect();
     if selected.is_empty() {
@@ -90,7 +90,10 @@ fn main() {
 
     let mut cx = context();
     // Tall enough for the tallest example; each capture is trimmed to its own.
-    let window_height = 1400.;
+    let window_height = selected
+        .iter()
+        .map(|example| height_of(example) + PAD * 2.)
+        .fold(1400., f32::max);
     let (handle, entity) = cx
         .update(|cx| {
             gpui_kit::open_window(

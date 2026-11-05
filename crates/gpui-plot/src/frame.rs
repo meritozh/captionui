@@ -413,8 +413,9 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
     let temporal = inferred == PlotKind::Date || plot.r#type == Some(ScaleType::Utc);
     let range = pinned_range.unwrap_or(range);
     let range = [
-        range[0] + plot.inset_start.unwrap_or(0.) * range_sign(range) + inset * range_sign(range),
-        range[1] - plot.inset_end.unwrap_or(0.) * range_sign(range) - inset * range_sign(range),
+        // Plot's `insetLeft` (…) replaces the `inset` on its side.
+        range[0] + plot.inset_start.unwrap_or(inset) * range_sign(range),
+        range[1] - plot.inset_end.unwrap_or(inset) * range_sign(range),
     ];
     let range = if reverse { [range[1], range[0]] } else { range };
     // Plot's default tick density: one per 80 pixels across x, one per 35
