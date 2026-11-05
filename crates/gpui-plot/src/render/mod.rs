@@ -191,6 +191,17 @@ pub fn prepare_facets(
         let groups = grid.partition_channels(source, mark_fx.as_ref(), mark_fy.as_ref());
         for (cell, rows) in groups.into_iter().enumerate() {
             populated[cell] |= !rows.is_empty();
+            // A furniture mark's placeholder landed in another facet: this
+            // one draws nothing (an empty dataset would read a placeholder).
+            if rows.is_empty()
+                && std::ptr::eq(source, &placeholder)
+                && (mark.fx.is_some() || mark.fy.is_some())
+            {
+                let mut empty = prepare_mark(&placeholder, mark);
+                empty.rows.clear();
+                prepared[cell].push(empty);
+                continue;
+            }
             prepared[cell].push(prepare_mark(&Dataset::new(rows), mark));
         }
     }
@@ -1010,12 +1021,13 @@ fn derive_intervals(
     match mark.kind {
         MarkKind::RuleX => optional_zero(y, y1, y2),
         MarkKind::RuleY => optional_zero(x, x1, x2),
-        // Plot's difference compares y with zero when given only y.
-        MarkKind::DifferenceY if unset(y1, y2) && !y.is_null() => {
+        // Plot's difference compares y with zero when given only y and one
+        // x; with two x's (Plot's `shiftX`) it compares the two placements.
+        MarkKind::DifferenceY if unset(y1, y2) && unset(x1, x2) && !y.is_null() => {
             *y1 = Some(Value::Number(0.));
             *y2 = Some(y.clone());
         }
-        MarkKind::DifferenceX if unset(x1, x2) && !x.is_null() => {
+        MarkKind::DifferenceX if unset(x1, x2) && unset(y1, y2) && !x.is_null() => {
             *x1 = Some(Value::Number(0.));
             *x2 = Some(x.clone());
         }

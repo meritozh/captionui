@@ -434,7 +434,13 @@ impl Plot {
                         .is_some_and(|v| !v.kind().is_quantitative()))
         };
         // Plot's autoHeight counts a y scale whether or not its axis draws.
-        let has_y = !y_values.is_empty() || grid.fy.is_some();
+        // An axisY or gridY mark reads the y scale even without data.
+        let y_scale = !y_values.is_empty()
+            || self
+                .marks
+                .iter()
+                .any(|m| matches!(m.kind, MarkKind::AxisY | MarkKind::GridY));
+        let has_y = y_scale || grid.fy.is_some();
         let projected = self.projection.as_ref().map(|p| {
             // Plot's `projectionAspectRatio`: a domain's bounds at 100 × 100,
             // else the projection's own; clamped as Plot clamps it.
@@ -484,7 +490,8 @@ impl Plot {
                 ratio * w * (1.1 * nfy - 0.1).max(1.) + mt + mb
             }
             (None, None) => {
-                let ny = if !has_y {
+                // Plot's autoHeight: one row per facet without a y scale.
+                let ny = if !y_scale {
                     1.
                 } else if ordinal(&y_values, &self.scales.y) {
                     crate::scale::dedup(y_values.iter().map(Value::key))
@@ -1741,11 +1748,30 @@ impl Plot {
         // above and below. A top x axis or a right y axis move theirs, and the
         // facet axes (fx on top, fy on the right) add theirs. An explicit
         // `margin*` option wins.
-        let (x_axis, y_axis) = (self.x_axis_anchor(), self.y_axis_anchor());
+        use crate::options::AxisAnchor;
+        // Each axis mark brings its own margins; without any, the plot's axis.
+        let anchors = |x: bool| -> Vec<AxisAnchor> {
+            let kind = if x { MarkKind::AxisX } else { MarkKind::AxisY };
+            let default = if x { AxisAnchor::Bottom } else { AxisAnchor::Left };
+            let marks: Vec<AxisAnchor> = self
+                .marks
+                .iter()
+                .filter(|m| m.kind == kind)
+                .map(|m| m.axis.axis.flatten().unwrap_or(default))
+                .collect();
+            if marks.is_empty() {
+                if x { self.x_axis_anchor() } else { self.y_axis_anchor() }
+                    .into_iter()
+                    .collect()
+            } else if (if x { self.x_axis_anchor() } else { self.y_axis_anchor() }).is_none() {
+                Vec::new()
+            } else {
+                marks
+            }
+        };
         let mut margins = [0.0_f32; 4];
         let mut want = |side: usize, value: f32| margins[side] = margins[side].max(value);
-        use crate::options::AxisAnchor;
-        if let Some(anchor) = x_axis {
+        for anchor in anchors(true) {
             want(1, 20.);
             want(3, 20.);
             match anchor {
@@ -1757,7 +1783,7 @@ impl Plot {
                 _ => want(2, 30.),
             }
         }
-        if let Some(anchor) = y_axis {
+        for anchor in anchors(false) {
             want(0, 20.);
             want(2, 20.);
             match anchor {
@@ -3230,6 +3256,16 @@ impl Plot {
         {
             return label.clone();
         }
+        self.scale_label(x)
+    }
+
+    /// The scale's own label, which an axis mark without a `label` shows:
+    /// the `label` option, else the one derived from the channels.
+    fn scale_label(&self, x: bool) -> Option<SharedString> {
+        let scale = if x { &self.scales.x } else { &self.scales.y };
+        if let Some(label) = &scale.label {
+            return label.clone();
+        }
         if self.no_labels {
             return None;
         }
@@ -3373,6 +3409,10 @@ impl Plot {
     /// margin at the figure's left as `↑ label`, the x label in the bottom
     /// margin at the plot's right as `label →`. A categorical axis has no
     /// direction, so no arrow.
+    ///
+    /// Each axis mark labels itself, at its own anchor and `labelAnchor`,
+    /// with its `label` or else the scale's; without axis marks the plot's
+    /// own axes are labelled.
     fn paint_axis_labels(
         &self,
         frame: &Frame,
@@ -3380,7 +3420,7 @@ impl Plot {
         window: &mut Window,
         cx: &mut App,
     ) {
-        use crate::options::AxisAnchor;
+        use crate::options::{AxisAnchor, LabelAnchor};
         let font = gpui::font(theme.font_family.clone());
         let continuous = |scale: &crate::scale::PositionScale| {
             matches!(scale, crate::scale::PositionScale::Continuous(_))
@@ -3407,9 +3447,44 @@ impl Plot {
                 window,
             )
         };
-        if let Some(anchor) = self.y_axis_anchor()
-            && let Some(label) = self.axis_label(false)
-        {
+        // The labels each axis draws: its anchor, label and label anchor.
+        let specs = |x: bool| -> Vec<(AxisAnchor, SharedString, Option<LabelAnchor>)> {
+            let kind = if x { MarkKind::AxisX } else { MarkKind::AxisY };
+            let scale = if x { &self.scales.x } else { &self.scales.y };
+            let marks: Vec<&Mark> = self.marks.iter().filter(|m| m.kind == kind).collect();
+            if marks.is_empty() {
+                let anchor = if x {
+                    self.x_axis_anchor()
+                } else {
+                    self.y_axis_anchor()
+                };
+                return anchor
+                    .zip(self.axis_label(x))
+                    .map(|(anchor, label)| (anchor, label, scale.label_anchor))
+                    .into_iter()
+                    .collect();
+            }
+            let default = if x {
+                AxisAnchor::Bottom
+            } else {
+                AxisAnchor::Left
+            };
+            marks
+                .into_iter()
+                .filter_map(|mark| {
+                    let label = match &mark.axis.label {
+                        Some(label) => label.clone(),
+                        None => self.scale_label(x),
+                    }?;
+                    Some((
+                        mark.axis.axis.flatten().unwrap_or(default),
+                        label,
+                        mark.axis.label_anchor.or(scale.label_anchor),
+                    ))
+                })
+                .collect()
+        };
+        for (anchor, label, label_anchor) in specs(false) {
             let arrow = self.scales.y.label_arrow.unwrap_or(true)
                 && (continuous(&frame.y.scale) || self.scales.y.interval.is_some())
                 && !label.contains(['↑', '↓', '→', '←']);
@@ -3418,14 +3493,22 @@ impl Plot {
                 .y
                 .reverse
                 .unwrap_or(self.frame_options.y_reverse);
-            let text = if arrow {
-                format!("{} {label}", if up { "↑" } else { "↓" })
-            } else {
-                label.to_string()
-            };
-            let text = make(text, window);
-            let center = self.scales.y.label_anchor == Some(crate::options::LabelAnchor::Center);
             let right = anchor == AxisAnchor::Right;
+            let center = label_anchor == Some(LabelAnchor::Center);
+            // Plot's `formatAxisLabel`: a centred y label reads along the axis,
+            // its arrow pointing along x; a right axis puts its arrow last.
+            let text = match (arrow, center) {
+                (false, _) => label.to_string(),
+                (true, true) => format!("{label} {}", if up { "→" } else { "←" }),
+                (true, false) => {
+                    let symbol = if up { "↑" } else { "↓" };
+                    if right {
+                        format!("{label} {symbol}")
+                    } else {
+                        format!("{symbol} {label}")
+                    }
+                }
+            };
             let offset = self
                 .scales
                 .y
@@ -3436,8 +3519,27 @@ impl Plot {
             } else {
                 plot.origin.x - px(offset)
             };
-            let y = if center {
-                plot.origin.y + plot.size.height / 2. - text.height / 2.
+            if center {
+                // Rotated a quarter turn, its top toward the outside.
+                let size = theme.label_size.as_f32();
+                let inward = if right { -0.6 * size } else { 0.6 * size };
+                paint::paint_rotated_text(
+                    &text,
+                    size,
+                    theme.label,
+                    &theme.font_family,
+                    point(x + px(inward), plot.origin.y + plot.size.height / 2.),
+                    -90.,
+                    TextAlign::Center,
+                    window,
+                    cx,
+                );
+                continue;
+            }
+            let text = make(text, window);
+            // A y label's `Start` is the bottom of its range, `End` the top.
+            let y = if label_anchor == Some(LabelAnchor::Start) {
+                plot.origin.y + plot.size.height + px(insets.bottom - 3.) - text.height
             } else {
                 plot.origin.y + px(3. - insets.top)
             };
@@ -3448,9 +3550,7 @@ impl Plot {
             };
             text.paint_at(point(x, y), align, None, window, cx);
         }
-        if let Some(anchor) = self.x_axis_anchor()
-            && let Some(label) = self.axis_label(true)
-        {
+        for (anchor, label, label_anchor) in specs(true) {
             let arrow = self.scales.x.label_arrow.unwrap_or(true)
                 && (continuous(&frame.x.scale) || self.scales.x.interval.is_some())
                 && !label.contains(['↑', '↓', '→', '←']);
@@ -3459,17 +3559,22 @@ impl Plot {
                 .x
                 .reverse
                 .unwrap_or(self.frame_options.x_reverse);
-            let text = if arrow {
-                format!("{label} {}", if forward { "→" } else { "←" })
-            } else {
+            let text = if !arrow {
                 label.to_string()
+            } else if forward {
+                format!("{label} →")
+            } else {
+                format!("← {label}")
             };
             let text = make(text, window);
             let top = anchor == AxisAnchor::Top;
             // A band scale centres its label, as Plot does; a continuous one
             // puts it at the axis's end.
-            let center = self.scales.x.label_anchor == Some(crate::options::LabelAnchor::Center)
-                || (self.scales.x.label_anchor.is_none() && !continuous(&frame.x.scale));
+            let label_anchor = label_anchor.unwrap_or(if continuous(&frame.x.scale) {
+                LabelAnchor::End
+            } else {
+                LabelAnchor::Center
+            });
             let offset = self
                 .scales
                 .x
@@ -3480,13 +3585,13 @@ impl Plot {
             } else {
                 plot.origin.y + plot.size.height + px(offset) - text.height
             };
-            let (x, align) = if center {
-                (plot.origin.x + plot.size.width / 2., TextAlign::Center)
-            } else {
-                (
+            let (x, align) = match label_anchor {
+                LabelAnchor::Center => (plot.origin.x + plot.size.width / 2., TextAlign::Center),
+                LabelAnchor::Start => (plot.origin.x - px(insets.left - 3.), TextAlign::Left),
+                LabelAnchor::End => (
                     plot.origin.x + plot.size.width + px(insets.right - 3.),
                     TextAlign::Right,
-                )
+                ),
             };
             text.paint_at(point(x, y), align, None, window, cx);
         }

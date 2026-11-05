@@ -995,15 +995,22 @@ pub(crate) fn paint_axes(
                 if tick.label.is_empty() {
                     continue;
                 }
-                let label = text(&tick.label, window);
                 let offset = style.tick_size.max(0.) + style.tick_padding;
-                let origin = point(edge + px(offset * direction), ty - label.height / 2.);
                 let align = if right {
                     TextAlign::Left
                 } else {
                     TextAlign::Right
                 };
-                label.paint_at(origin, align, None, window, cx);
+                // A label may run to several lines (`Jan\n2021`), centred on
+                // its tick as Plot's middle line anchor does.
+                let lines: Vec<&str> = tick.label.split('\n').collect();
+                let mut top = ty - size * lines.len() as f32 / 2.;
+                for line in lines {
+                    let label = text(&line.to_string().into(), window);
+                    let origin = point(edge + px(offset * direction), top);
+                    label.paint_at(origin, align, None, window, cx);
+                    top += label.height;
+                }
             }
         }
     }

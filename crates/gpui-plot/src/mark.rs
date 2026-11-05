@@ -1461,6 +1461,10 @@ impl Mark {
         if kind == MarkKind::Hexgrid {
             style.stroke_opacity = 0.1;
         }
+        // Plot's Bollinger band fills at its `opacity`, 0.2 by default.
+        if matches!(kind, MarkKind::BollingerX | MarkKind::BollingerY) {
+            style.fill_opacity = 0.2;
+        }
         if kind == MarkKind::Spike {
             style.stroke_width = 1.;
             style.fill_opacity = 0.3;

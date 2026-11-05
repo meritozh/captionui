@@ -2711,27 +2711,30 @@ fn draw_differences(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let line = ctx.default_stroke(prepared);
     let width = prepared.mark.style.stroke_width.max(1.);
 
-    // Each row is one position with two values: the point on the axis the
-    // mark runs along, and the two series' positions across it.
-    let placed: Vec<(f32, f32, f32)> = prepared
-        .rows
-        .iter()
-        .filter_map(|row| {
-            Some((
-                position_along(ctx, row, along_x)?,
-                position_across(ctx, row, along_x, true)?,
-                position_across(ctx, row, along_x, false)?,
-            ))
+    // Each series is two curves, each placed by its own channels: the first
+    // at (x1, y1) and the second at (x2, y2), so a `shiftX` compares a series
+    // with itself moved along x.
+    let curves: Vec<[Vec<(f32, f32)>; 2]> = series_groups(prepared)
+        .into_iter()
+        .map(|group| {
+            [true, false].map(|first| {
+                group
+                    .iter()
+                    .filter_map(|(_, row)| {
+                        Some((
+                            position_along_of(ctx, row, along_x, first)?,
+                            position_across(ctx, row, along_x, first)?,
+                        ))
+                    })
+                    .collect()
+            })
         })
         .collect();
 
-    // A span is positive where the second series is the larger one. The two
-    // axes invert differently on screen: a larger value sits *higher* on y and
-    // further right on x, so the comparison flips with the axis.
-    let sign =
-        |(_, first, second): &(f32, f32, f32)| difference_is_positive(along_x, *first, *second);
-
     let origin = ctx.frame.plot.origin;
+    // Plot clips the difference's line to the frame (`clip: true`).
+    let clip = ctx.clip;
+    ctx.clip = true;
     ctx.clipped(|ctx| {
         let at = |along: f32, across: f32| {
             origin
@@ -2741,38 +2744,130 @@ fn draw_differences(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                     point(px(across), px(along))
                 }
         };
-
-        // Consecutive spans of one sign are one area, so a run of them fills as
-        // a single path: filling each span on its own leaves a seam where two
-        // quads meet.
-        let mut start = 0;
-        while start + 1 < placed.len() {
-            let positive_run = sign(&placed[start + 1]);
-            let mut end = start + 1;
-            while end + 1 < placed.len() && sign(&placed[end + 1]) == positive_run {
-                end += 1;
+        for [first, second] in &curves {
+            // Plot clips each curve's area by the other's, so the fills cover
+            // only where both curves run, split where they cross.
+            for (along, a, b, positive_run) in difference_spans(first, second, along_x) {
+                let color = if positive_run { positive } else { negative };
+                let mut polygon: Vec<Point<Pixels>> =
+                    along.iter().zip(&a).map(|(t, v)| at(*t, *v)).collect();
+                polygon.extend(along.iter().zip(&b).rev().map(|(t, v)| at(*t, *v)));
+                paint::paint_fill(&polygon, color, ctx.window);
             }
-            let color = if positive_run { positive } else { negative };
-            let mut polygon: Vec<Point<Pixels>> = (start..=end)
-                .map(|index| at(placed[index].0, placed[index].1))
-                .collect();
-            polygon.extend(
-                (start..=end)
-                    .rev()
-                    .map(|index| at(placed[index].0, placed[index].2)),
-            );
-            paint::paint_fill(&polygon, color, ctx.window);
-            start = end;
+            // The second series' line runs over the areas, as one path so it
+            // has no breaks at the sign changes.
+            let line_path: Vec<Point<Pixels>> = second.iter().map(|(t, v)| at(*t, *v)).collect();
+            paint::paint_stroke(&line_path, width, line, ctx.window);
         }
-
-        // The second series' line runs over the areas, as one path so it has no
-        // breaks at the sign changes.
-        let line_path: Vec<Point<Pixels>> = placed
-            .iter()
-            .map(|(along, _, second)| at(*along, *second))
-            .collect();
-        paint::paint_stroke(&line_path, width, line, ctx.window);
     });
+    ctx.clip = clip;
+}
+
+/// The runs of one sign between two piecewise-linear curves, each a list of
+/// `(along, across)` pixels: for each run, its along positions, the first and
+/// second curves' across positions there, and whether the second is the
+/// larger value. Both curves are sampled at every vertex of either within
+/// the span they share, and a crossing splits a run.
+#[allow(clippy::type_complexity)]
+fn difference_spans(
+    first: &[(f32, f32)],
+    second: &[(f32, f32)],
+    along_x: bool,
+) -> Vec<(Vec<f32>, Vec<f32>, Vec<f32>, bool)> {
+    let sorted = |curve: &[(f32, f32)]| {
+        let mut curve = curve.to_vec();
+        curve.sort_by(|a, b| a.0.total_cmp(&b.0));
+        curve
+    };
+    let (first, second) = (sorted(first), sorted(second));
+    let (Some(f0), Some(s0), Some(f1), Some(s1)) =
+        (first.first(), second.first(), first.last(), second.last())
+    else {
+        return Vec::new();
+    };
+    let (lo, hi) = (f0.0.max(s0.0), f1.0.min(s1.0));
+    if hi <= lo {
+        return Vec::new();
+    }
+    let sample = |curve: &[(f32, f32)], t: f32| -> f32 {
+        let i = curve.partition_point(|p| p.0 < t);
+        if i == 0 {
+            return curve[0].1;
+        }
+        if i >= curve.len() {
+            return curve[curve.len() - 1].1;
+        }
+        let (a, b) = (curve[i - 1], curve[i]);
+        if b.0 == a.0 {
+            b.1
+        } else {
+            a.1 + (b.1 - a.1) * (t - a.0) / (b.0 - a.0)
+        }
+    };
+    let mut ts: Vec<f32> = first
+        .iter()
+        .chain(&second)
+        .map(|p| p.0)
+        .filter(|t| *t >= lo && *t <= hi)
+        .chain([lo, hi])
+        .collect();
+    ts.sort_by(f32::total_cmp);
+    ts.dedup();
+    let sign = |a: f32, b: f32| difference_is_positive(along_x, a, b);
+    type Run = (Vec<f32>, Vec<f32>, Vec<f32>, bool);
+    let mut runs: Vec<Run> = Vec::new();
+    let push = |t: f32, a: f32, b: f32, positive: bool, runs: &mut Vec<Run>| {
+        match runs.last_mut() {
+            Some((along, va, vb, p)) if *p == positive => {
+                along.push(t);
+                va.push(a);
+                vb.push(b);
+            }
+            _ => runs.push((vec![t], vec![a], vec![b], positive)),
+        }
+    };
+    let mut previous: Option<(f32, f32, f32)> = None;
+    for &t in &ts {
+        let (a, b) = (sample(&first, t), sample(&second, t));
+        if let Some((pt, pa, pb)) = previous {
+            let (d0, d1) = (pb - pa, b - a);
+            if d0 * d1 < 0. {
+                // The curves cross: both runs meet at the crossing.
+                let u = d0 / (d0 - d1);
+                let (ct, cv) = (pt + (t - pt) * u, pa + (a - pa) * u);
+                let before = sign(pa, pb);
+                push(ct, cv, cv, before, &mut runs);
+                push(ct, cv, cv, !before, &mut runs);
+            }
+        }
+        // A tie takes the sign of the run it continues.
+        let positive = if a == b {
+            runs.last().is_some_and(|r| r.3)
+        } else {
+            sign(a, b)
+        };
+        push(t, a, b, positive, &mut runs);
+        previous = Some((t, a, b));
+    }
+    runs.retain(|run| run.0.len() >= 2);
+    runs
+}
+
+/// A row's first or second position along the axis a difference runs along:
+/// its `x1` or `x2` (for a `differenceY`), else its `x`.
+fn position_along_of(
+    ctx: &DrawContext<'_>,
+    row: &PreparedRow,
+    along_x: bool,
+    first: bool,
+) -> Option<f32> {
+    let (one, two, value, scale) = if along_x {
+        (&row.x1, &row.x2, row.x_value(), &ctx.frame.x.scale)
+    } else {
+        (&row.y1, &row.y2, row.y_value(), &ctx.frame.y.scale)
+    };
+    let chosen = if first { one } else { two };
+    scale.position(chosen.as_ref().unwrap_or(value))
 }
 
 /// Whether a difference span's second series is the larger one, given both
@@ -2785,15 +2880,6 @@ fn difference_is_positive(along_x: bool, first: f32, second: f32) -> bool {
         second < first
     } else {
         second > first
-    }
-}
-
-/// A row's position along the axis a difference mark runs along.
-fn position_along(ctx: &DrawContext<'_>, row: &PreparedRow, along_x: bool) -> Option<f32> {
-    if along_x {
-        ctx.frame.x.scale.position(row.x_value())
-    } else {
-        ctx.frame.y.scale.position(row.y_value())
     }
 }
 

@@ -10,6 +10,15 @@ use gpui::Hsla;
 use crate::scale::{ColorRange, hsla_from_hex, rgb_to_hsla};
 use crate::schemes;
 
+/// `currentColor` in a scale's `range`: a stand-in the color scale replaces
+/// with the theme's foreground, since the options don't know the theme.
+pub const CURRENT_COLOR: Hsla = Hsla {
+    h: -1.,
+    s: 0.,
+    l: 0.,
+    a: 1.,
+};
+
 /// A CSS color: a name, `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` or
 /// `hsl()`/`hsla()`. `transparent` and `none` are fully transparent.
 pub fn parse(text: &str) -> Option<Hsla> {
