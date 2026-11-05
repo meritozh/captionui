@@ -219,10 +219,10 @@ pub fn with_value_defaults(mark: &Mark, data: &Dataset) -> Option<Mark> {
         use MarkKind::*;
         match mark.kind {
             // One-dimensional marks read the value on their axis.
-            DotX | TextX | TickX | RuleX | GridX | AxisX | BoxX | DensityX | ViolinX => {
+            DotX | TextX | TickX | RuleX | GridX | AxisX | BoxX | DensityX | ViolinX | VectorX => {
                 set_x(&mut mark, Channel::identity())
             }
-            DotY | TextY | TickY | RuleY | GridY | AxisY | BoxY | DensityY | ViolinY => {
+            DotY | TextY | TickY | RuleY | GridY | AxisY | BoxY | DensityY | ViolinY | VectorY => {
                 set_y(&mut mark, Channel::identity())
             }
             // Plot's `areaY`, `lineY`, `rectY` and `barY` over values: the
