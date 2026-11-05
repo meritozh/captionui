@@ -1021,6 +1021,7 @@ pub(crate) fn paint_axes(
 ///
 /// Plot's facet axes label the grid rather than the data, so each label is
 /// centred on its band and sits outside the plot.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_facet_labels(
     frame: &Frame,
     theme: &PlotTheme,

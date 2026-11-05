@@ -790,7 +790,8 @@ pub fn apply_hexbin(facets: &mut [Vec<PreparedMark>], frame: &Frame) {
         };
         let dx = width as f64;
         let dy = dx * 1.5 / 3f64.sqrt();
-        let mut bins: Vec<((Option<crate::value::ValueKey>, i64, i64), Vec<usize>)> = Vec::new();
+        type Bins = Vec<((Option<crate::value::ValueKey>, i64, i64), Vec<usize>)>;
+        let mut bins: Bins = Vec::new();
         for (index, row) in prepared.rows.iter().enumerate() {
             let Some(p) = crate::render::basic::position_in(prepared, frame, row) else {
                 continue;

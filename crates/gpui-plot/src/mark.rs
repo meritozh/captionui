@@ -1144,6 +1144,7 @@ pub struct DensitySpec {
     /// Plot's explicit `thresholds`, in Plot's units (density × 100).
     pub values: Option<Vec<f64>>,
     /// Plot's `weight`.
+    #[allow(clippy::type_complexity)]
     pub weight: Option<std::rc::Rc<dyn Fn(&crate::table::Table) -> f64>>,
 }
 

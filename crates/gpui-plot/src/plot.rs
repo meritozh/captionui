@@ -1614,11 +1614,11 @@ impl Plot {
                     let fx = mark
                         .fx
                         .clone()
-                        .or(plot_x.map(|f| crate::table::Channel::Field(f)));
+                        .or(plot_x.map(crate::table::Channel::Field));
                     let fy = mark
                         .fy
                         .clone()
-                        .or(plot_y.map(|f| crate::table::Channel::Field(f)));
+                        .or(plot_y.map(crate::table::Channel::Field));
                     mark.fx = match (fx, ix) {
                         (Some(c), Some(i)) => Some(wrap(c, i)),
                         (c, _) => c,

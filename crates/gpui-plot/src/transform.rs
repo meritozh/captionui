@@ -154,6 +154,7 @@ pub enum GroupReducer {
     /// The `p`-quantile, Plot's `"p25"`, `"p75"` …
     Quantile(f64),
     /// A custom reducer over the group's values and records.
+    #[allow(clippy::type_complexity)]
     Custom(std::rc::Rc<dyn Fn(&[Value], &[&Table]) -> Value>),
 }
 

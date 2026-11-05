@@ -1295,6 +1295,7 @@ fn albers_usa(lon: f64, lat: f64) -> Option<[f64; 2]> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
