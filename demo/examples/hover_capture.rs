@@ -4,6 +4,7 @@
 //! Run with `cargo run -p gpui-plot-demo --example hover_capture`; writes
 //! `demo/snapshots/hover-capture.png`.
 
+use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
     AnyWindowHandle, AppContext, Context, IntoElement, ParentElement, Render, Styled,
@@ -17,10 +18,30 @@ struct Host {
 
 impl Render for Host {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Replicate the demo gallery's use: a custom tooltip formatter (a table
+        // of every field) and an explicit plot id, both of which previously
+        // bypassed the crosshair and left the box unanchored.
+        let plot = (self.build)()
+            .id("gallery-plot")
+            .tooltip(|row, _window, _cx| {
+                let mut table = div().v_flex().gap_1().text_xs();
+                for name in row.field_names() {
+                    let value = row.value(name);
+                    table = table.child(
+                        div()
+                            .h_flex()
+                            .justify_between()
+                            .gap_4()
+                            .child(div().text_color(gpui_kit::black()).child(name.clone()))
+                            .child(div().child(value.label())),
+                    );
+                }
+                table.into_any_element()
+            });
         div()
             .size_full()
             .bg(cx.theme().colors.background)
-            .child((self.build)())
+            .child(plot)
     }
 }
 
@@ -77,7 +98,11 @@ fn main() {
     match cx.capture_screenshot(window) {
         Ok(image) => {
             image.save("demo/snapshots/hover-capture.png").unwrap();
-            println!("saved demo/snapshots/hover-capture.png ({}x{})", image.width(), image.height());
+            println!(
+                "saved demo/snapshots/hover-capture.png ({}x{})",
+                image.width(),
+                image.height()
+            );
         }
         Err(e) => eprintln!("capture_screenshot failed: {e}"),
     }

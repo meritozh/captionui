@@ -9,8 +9,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, FontWeight, Hsla, IntoElement, Pixels, Point, SharedString,
-    TextAlign, Window, point, px,
+    AnyElement, App, Bounds, ElementId, FontWeight, Hsla, IntoElement, ParentElement, Pixels,
+    Point, SharedString, TextAlign, Window, point, px,
 };
 use gpui_kit::base::plot::{
     Plot as PlotTrait, PlotAppear, PlotElement, PlotHover, TooltipState, axis_gutter,
@@ -1983,24 +1983,27 @@ impl PlotTrait for Plot {
         let mark = facets.get(cell)?.get(mark_index)?;
         let row = mark.rows.get(row_index)?;
 
-        // A custom formatter replaces the default rows entirely.
-        if let Some(formatter) = &self.tooltip_formatter {
-            let element = formatter(&row.row, window, cx);
-            return Some(element);
-        }
-
         let color = self.color_for_row(mark_index, mark, row, &theme);
-        let title = self
-            .marks
-            .get(mark_index)
-            .and_then(|mark| mark.channels.title.as_ref())
-            .map(|channel| channel.read(&row.row).label())
-            .unwrap_or_else(|| row.x_value().label());
 
-        let mut tooltip = Tooltip::new(cursor, bounds.size)
-            .gap(px(8.))
-            .title(title)
-            .row(
+        // The box hugs the cursor and carries the crosshair and hovered dots;
+        // the body is either a custom formatter's freeform element or the
+        // default title-and-rows.
+        let mut tooltip = Tooltip::new(cursor, bounds.size).gap(px(8.));
+        if let Some(formatter) = &self.tooltip_formatter {
+            // A custom formatter replaces the default body, but the crosshair
+            // and dots still render and the box still follows the cursor: the
+            // returned element becomes the box's freeform base.
+            let element = formatter(&row.row, window, cx);
+            tooltip.extend([element]);
+        } else {
+            let title = self
+                .marks
+                .get(mark_index)
+                .and_then(|mark| mark.channels.title.as_ref())
+                .map(|channel| channel.read(&row.row).label())
+                .unwrap_or_else(|| row.x_value().label());
+
+            tooltip = tooltip.title(title).row(
                 color,
                 mark.mark
                     .title
@@ -2009,16 +2012,17 @@ impl PlotTrait for Plot {
                 row.y_value().label(),
             );
 
-        // Add the channels a tooltip conventionally reads: the series and any
-        // other fields the mark named.
-        if let Some(z) = &row.z {
-            tooltip = tooltip.plain_row("series", z.label());
-        }
-        for name in ["group", "name", "label"] {
-            if let Some(value) = row.row.get(name)
-                && !value.is_null()
-            {
-                tooltip = tooltip.plain_row(name, value.label());
+            // Add the channels a tooltip conventionally reads: the series and
+            // any other fields the mark named.
+            if let Some(z) = &row.z {
+                tooltip = tooltip.plain_row("series", z.label());
+            }
+            for name in ["group", "name", "label"] {
+                if let Some(value) = row.row.get(name)
+                    && !value.is_null()
+                {
+                    tooltip = tooltip.plain_row(name, value.label());
+                }
             }
         }
 
