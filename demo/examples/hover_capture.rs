@@ -30,12 +30,12 @@ fn main() {
     let mut cx = VisualTestAppContext::new(platform);
     cx.update(gpui_kit::init);
 
-    // The line chart with an area and a moving average: a hover shows the
-    // crosshair and a tooltip box near the pointer.
+    // A sparse dot plot: a hover shows the crosshair crossing the nearest dot,
+    // which is clearest when the dots are not a dense filled band.
     let example = gallery::examples()
         .into_iter()
-        .find(|e| e.title == "Line chart")
-        .expect("line chart example");
+        .find(|e| e.title == "Dot plot")
+        .expect("dot plot example");
     let build = example.build;
 
     let window: AnyWindowHandle = cx
