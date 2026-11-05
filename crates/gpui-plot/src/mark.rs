@@ -1018,6 +1018,8 @@ pub struct Mark {
     /// The mark's own data, Plot's first argument to a mark: `Plot.dot(data,
     /// …)`. `None` reads the plot's data.
     pub data: Option<crate::table::Dataset>,
+    /// A raster or contour mark's grid options.
+    pub raster: Option<crate::raster::RasterSpec>,
     /// Keep only each `z` group's outliers on this axis (beyond 1.5 IQR), the
     /// dots of Plot's box mark.
     pub outliers: Option<Axis>,
@@ -1446,6 +1448,7 @@ impl Mark {
         Self {
             kind,
             data: None,
+            raster: None,
             outliers: None,
             box_value: None,
             filter: None,
@@ -2052,6 +2055,57 @@ impl Mark {
         self
     }
 
+    fn raster_mut(&mut self) -> &mut crate::raster::RasterSpec {
+        self.raster.get_or_insert_with(Default::default)
+    }
+
+    /// A raster or contour's grid size, Plot's `width` and `height`, for
+    /// data that is a dense array of values (row-major, top row first).
+    pub fn grid(mut self, width: usize, height: usize) -> Self {
+        self.raster_mut().size = Some((width, height));
+        self
+    }
+
+    /// A raster or contour's value function, Plot's `fill: (x, y) => …`.
+    pub fn sample(mut self, f: impl Fn(f64, f64) -> f64 + 'static) -> Self {
+        self.raster_mut().function = Some(std::rc::Rc::new(move |x, y| {
+            crate::value::Value::number(f(x, y))
+        }));
+        self
+    }
+
+    /// Plot's `interpolate`: `"nearest"`, `"barycentric"`, `"random-walk"`.
+    pub fn interpolate(mut self, how: &str) -> Self {
+        self.raster_mut().interpolate = crate::raster::Interpolate::parse(how);
+        self
+    }
+
+    /// Plot's `blur`, in grid cells.
+    pub fn blur(mut self, radius: f64) -> Self {
+        self.raster_mut().blur = radius;
+        self
+    }
+
+    /// A contour's `thresholds`: about this many.
+    pub fn contour_thresholds(mut self, count: usize) -> Self {
+        self.raster_mut().thresholds = Some(crate::raster::ContourThresholds::Count(count));
+        self
+    }
+
+    /// A contour's explicit `thresholds`.
+    pub fn contour_threshold_values(mut self, values: impl IntoIterator<Item = f64>) -> Self {
+        self.raster_mut().thresholds = Some(crate::raster::ContourThresholds::Values(
+            values.into_iter().collect(),
+        ));
+        self
+    }
+
+    /// A contour's `interval`: a threshold at every multiple.
+    pub fn contour_interval(mut self, step: f64) -> Self {
+        self.raster_mut().thresholds = Some(crate::raster::ContourThresholds::Interval(step));
+        self
+    }
+
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
         let outputs = self.bin.take().map(|bin| bin.outputs).unwrap_or_default();
@@ -2625,6 +2679,48 @@ macro_rules! mark_builder {
             /// Clip the mark to the plot area, Plot's `clip: true`.
             pub fn clip(mut self, clip: bool) -> Self {
                 self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::grid`].
+            pub fn grid(mut self, width: usize, height: usize) -> Self {
+                self.0 = self.0.grid(width, height);
+                self
+            }
+
+            /// See [`Mark::sample`].
+            pub fn sample(mut self, f: impl Fn(f64, f64) -> f64 + 'static) -> Self {
+                self.0 = self.0.sample(f);
+                self
+            }
+
+            /// See [`Mark::interpolate`].
+            pub fn interpolate(mut self, how: &str) -> Self {
+                self.0 = self.0.interpolate(how);
+                self
+            }
+
+            /// See [`Mark::blur`].
+            pub fn blur(mut self, radius: f64) -> Self {
+                self.0 = self.0.blur(radius);
+                self
+            }
+
+            /// See [`Mark::contour_thresholds`].
+            pub fn contour_thresholds(mut self, count: usize) -> Self {
+                self.0 = self.0.contour_thresholds(count);
+                self
+            }
+
+            /// See [`Mark::contour_threshold_values`].
+            pub fn contour_threshold_values(mut self, values: impl IntoIterator<Item = f64>) -> Self {
+                self.0 = self.0.contour_threshold_values(values);
+                self
+            }
+
+            /// See [`Mark::contour_interval`].
+            pub fn contour_interval(mut self, step: f64) -> Self {
+                self.0 = self.0.contour_interval(step);
                 self
             }
 

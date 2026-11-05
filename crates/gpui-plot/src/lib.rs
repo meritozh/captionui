@@ -49,6 +49,7 @@ pub mod options;
 pub mod paint;
 pub mod plot;
 pub mod projection;
+pub mod raster;
 pub mod render;
 pub mod scale;
 pub mod schemes;

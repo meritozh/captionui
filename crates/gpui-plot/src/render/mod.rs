@@ -27,6 +27,9 @@ use crate::value::Value;
 pub struct PreparedMark {
     pub mark: Mark,
     pub rows: Vec<PreparedRow>,
+    /// A raster or contour mark's grid, resolved from its rows (or sampled
+    /// once the frame is known, for a function).
+    pub raster: Option<std::rc::Rc<crate::raster::RasterGrid>>,
     /// Whether a dodge packed this mark's rows along x, so its offsets are
     /// vertical; meaningless when the mark does not dodge.
     pub dodge_along_x: bool,
@@ -360,6 +363,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         source = transform::shuffle(&source, seed);
     }
 
+    let source_rows_for_raster = source.clone();
     let mut rows: Vec<PreparedRow> = source
         .rows()
         .iter()
@@ -428,6 +432,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
 
     PreparedMark {
         mark: mark.clone(),
+        raster: dense_raster(mark, &source_rows_for_raster),
         rows,
         dodge_along_x: false,
     }
@@ -1181,6 +1186,116 @@ fn collapse_groups(
             grouped
         })
         .collect()
+}
+
+/// The extent a raster or contour mark covers, `[x1, y1, x2, y2]`, from its
+/// constant `x1`/`y1`/`x2`/`y2` channels, else its grid (`[0, width] ×
+/// [0, height]`, Plot's default for dense values).
+pub fn raster_extent(mark: &Mark) -> Option<[f64; 4]> {
+    let constant = |c: &Option<crate::table::Channel>| match c {
+        Some(crate::table::Channel::Constant(v)) => v.as_number(),
+        _ => None,
+    };
+    let c = &mark.channels;
+    match (
+        constant(&c.x1),
+        constant(&c.y1),
+        constant(&c.x2),
+        constant(&c.y2),
+    ) {
+        (Some(x1), Some(y1), Some(x2), Some(y2)) => Some([x1, y1, x2, y2]),
+        _ => mark
+            .raster
+            .as_ref()?
+            .size
+            .map(|(w, h)| [0., 0., w as f64, h as f64]),
+    }
+}
+
+/// A raster from dense values: the mark's records in order, each its fill
+/// (or its value, for plain-value data), laid out `width` across.
+fn dense_raster(mark: &Mark, source: &Dataset) -> Option<std::rc::Rc<crate::raster::RasterGrid>> {
+    if !matches!(mark.kind, MarkKind::Raster | MarkKind::Contour) {
+        return None;
+    }
+    let spec = mark.raster.as_ref()?;
+    let (w, h) = spec.size?;
+    let extent = raster_extent(mark)?;
+    let read = |row: &Table| -> Value {
+        if let Some(fill) = &mark.channels.fill
+            && let Some(v) = fill.scaled_value(row)
+        {
+            return v;
+        }
+        row.value(crate::table::VALUE)
+    };
+    let values: Vec<Value> = source.rows().iter().map(read).collect();
+    let mut grid = crate::raster::RasterGrid::from_values(values, w, h, extent);
+    grid.blur(spec.blur);
+    Some(std::rc::Rc::new(grid))
+}
+
+/// The grid a raster or contour mark draws once the frame is known: its
+/// dense grid, a function sampled at Plot's `pixelSize` (one cell per two
+/// pixels), or its scattered rows interpolated.
+pub fn resolve_raster(
+    prepared: &PreparedMark,
+    frame: &crate::frame::Frame,
+) -> Option<std::rc::Rc<crate::raster::RasterGrid>> {
+    if let Some(grid) = &prepared.raster {
+        return Some(grid.clone());
+    }
+    let spec = prepared.mark.raster.clone().unwrap_or_default();
+    let (pw, ph) = (
+        frame.plot.size.width.as_f32() as f64,
+        frame.plot.size.height.as_f32() as f64,
+    );
+    let size = spec.size.unwrap_or((
+        (pw / 2.).round().max(1.) as usize,
+        (ph / 2.).round().max(1.) as usize,
+    ));
+    let invert = |scale: &crate::scale::PositionScale, p: f64| match scale {
+        crate::scale::PositionScale::Continuous(s) => s.invert(p as f32),
+        _ => p,
+    };
+    // The data extent: the mark's own, else the frame's.
+    let extent = raster_extent(&prepared.mark).unwrap_or_else(|| {
+        [
+            invert(&frame.x.scale, 0.),
+            invert(&frame.y.scale, ph),
+            invert(&frame.x.scale, pw),
+            invert(&frame.y.scale, 0.),
+        ]
+    });
+    let mut grid = if let Some(f) = &spec.function {
+        crate::raster::RasterGrid::from_function(&|x, y| f(x, y), size.0, size.1, extent)
+    } else {
+        let samples: Vec<(f64, f64, Value)> = prepared
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let value = match &prepared.mark.channels.fill {
+                    Some(fill) => fill.scaled_value(&row.row)?,
+                    None => row.row.value(crate::table::VALUE),
+                };
+                Some((
+                    row.x_value().as_number()?,
+                    row.y_value().as_number()?,
+                    value,
+                ))
+            })
+            .collect();
+        let how = spec
+            .interpolate
+            .unwrap_or(if prepared.mark.kind == MarkKind::Contour {
+                crate::raster::Interpolate::Nearest
+            } else {
+                crate::raster::Interpolate::None
+            });
+        crate::raster::RasterGrid::from_samples(&samples, size.0, size.1, extent, how)
+    };
+    grid.blur(spec.blur);
+    Some(std::rc::Rc::new(grid))
 }
 
 /// The channel names a transform output can read from the mark itself.

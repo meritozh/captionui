@@ -29,7 +29,7 @@ pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         MarkKind::DensityX => draw_density(prepared, ctx, true),
         MarkKind::DensityY => draw_density(prepared, ctx, false),
         MarkKind::Hexbin => draw_hexbin(prepared, ctx),
-        MarkKind::Contour => draw_contour(prepared, ctx),
+        MarkKind::Contour => crate::render::basic::draw_contour_grid(prepared, ctx),
         MarkKind::Density => draw_density_2d(prepared, ctx),
         _ => {}
     }
@@ -697,65 +697,6 @@ fn draw_density_2d(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                     paint::paint_stroke(&points, stroke_width, color, ctx.window);
                 }
             }
-        }
-    });
-}
-
-fn draw_contour(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
-    // Contours need a raster; without one this mark draws the density of its
-    // two channels as nested rings, which is the same shape a contour
-    // threshold traces.
-    let colors = Colors::resolve(prepared, ctx);
-    let plot = ctx.frame.plot;
-    let (width, height) = (
-        plot.size.width.as_f32() as usize,
-        plot.size.height.as_f32() as usize,
-    );
-    let (width, height) = (width.clamp(8, 120), height.clamp(8, 120));
-
-    // A coarse raster of counts, one cell per datum.
-    let mut raster = vec![0.0_f64; width * height];
-    for row in prepared.rows.iter() {
-        let Some(position) = ctx.frame.point(row.x_value(), row.y_value()) else {
-            continue;
-        };
-        let column =
-            ((position.x.as_f32() / plot.size.width.as_f32()) * width as f32).floor() as usize;
-        let line =
-            ((position.y.as_f32() / plot.size.height.as_f32()) * height as f32).floor() as usize;
-        if column < width && line < height {
-            raster[line * width + column] += 1.;
-        }
-    }
-
-    let max = raster.iter().cloned().fold(0.0_f64, f64::max);
-    if max <= 0. {
-        return;
-    }
-    let color = colors.fill(0);
-
-    ctx.clipped(|ctx| {
-        for (index, count) in raster.iter().enumerate() {
-            if *count <= 0. {
-                continue;
-            }
-            let column = (index % width) as f32;
-            let line = (index / width) as f32;
-            let cell_width = plot.size.width.as_f32() / width as f32;
-            let cell_height = plot.size.height.as_f32() / height as f32;
-            let rect = paint::rect_between(
-                ctx.absolute(gpui::point(px(column * cell_width), px(line * cell_height))),
-                ctx.absolute(gpui::point(
-                    px((column + 1.) * cell_width),
-                    px((line + 1.) * cell_height),
-                )),
-            );
-            paint::paint_rect(
-                rect,
-                0.,
-                paint::alpha(color, (count / max) as f32 * 0.8),
-                ctx.window,
-            );
         }
     });
 }
