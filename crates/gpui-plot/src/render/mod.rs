@@ -263,6 +263,9 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // the channels may read. Plot applies them to the mark's data in the same
     // order, and a mark's `shuffle` is only a reordering of what is left.
     let mut source = data.clone();
+    if let Some(keep) = &mark.filter {
+        source = Dataset::new(source.rows().iter().filter(|row| (keep.0)(row)).cloned());
+    }
     if let Some(config) = mark.select.as_ref().filter(|config| config.axis.is_none()) {
         let group = config.group.as_deref().map(|field| field.to_string());
         let selector = match (&config.selector, config.axis) {

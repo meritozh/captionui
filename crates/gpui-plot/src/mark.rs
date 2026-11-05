@@ -803,6 +803,10 @@ pub struct MarkStyle {
     pub clip: bool,
     /// Plot's `markerStart`, `markerMid` and `markerEnd`.
     pub markers: [Option<Marker>; 3],
+    /// Plot's `textStroke`: a halo behind a text mark's glyphs.
+    pub text_stroke: Option<Hsla>,
+    /// Plot's `textStrokeWidth`.
+    pub text_stroke_width: f32,
     /// Plot's `textAnchor`.
     pub text_anchor: TextAnchor,
     /// Plot's `lineAnchor`.
@@ -830,9 +834,9 @@ pub struct MarkStyle {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Curve {
     /// A smooth curve through every point, Plot's `natural`.
-    #[default]
     Natural,
-    /// Straight segments, Plot's `linear`.
+    /// Straight segments, Plot's `linear` and its default.
+    #[default]
     Linear,
     /// Straight segments that close back to the first point, Plot's
     /// `linear-closed`.
@@ -876,6 +880,41 @@ pub enum Curve {
 }
 
 impl Curve {
+    /// Plot's curve names: `"linear"`, `"step"`, `"monotone-x"`, `"basis"` …
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "linear" | "auto" => Curve::Linear,
+            "linear-closed" => Curve::LinearClosed,
+            "natural" => Curve::Natural,
+            "step" => Curve::Step,
+            "step-after" => Curve::StepAfter,
+            "step-before" => Curve::StepBefore,
+            "basis" => Curve::Basis,
+            "basis-open" => Curve::BasisOpen,
+            "basis-closed" => Curve::BasisClosed,
+            "cardinal" => Curve::Cardinal,
+            "cardinal-open" => Curve::CardinalOpen,
+            "cardinal-closed" => Curve::CardinalClosed,
+            "catmull-rom" => Curve::CatmullRom,
+            "catmull-rom-open" => Curve::CatmullRomOpen,
+            "catmull-rom-closed" => Curve::CatmullRomClosed,
+            "monotone-x" => Curve::MonotoneX,
+            "monotone-y" => Curve::MonotoneY,
+            "bump-x" => Curve::BumpX,
+            "bump-y" => Curve::BumpY,
+            "bundle" => Curve::Bundle,
+            _ => return None,
+        })
+    }
+}
+
+impl From<&str> for Curve {
+    fn from(name: &str) -> Self {
+        Curve::parse(name).unwrap_or(Curve::Linear)
+    }
+}
+
+impl Curve {
     /// Whether the curve closes its path back to the first point.
     pub fn is_closed(self) -> bool {
         matches!(
@@ -914,7 +953,7 @@ impl Default for MarkStyle {
             stroke_width: 1.5,
             radius: 3.,
             symbol: Symbol::Circle,
-            curve: Curve::Natural,
+            curve: Curve::Linear,
             fill_opacity: 1.,
             stroke_opacity: 1.,
             opacity: 1.,
@@ -936,6 +975,8 @@ impl Default for MarkStyle {
             inset: None,
             clip: false,
             markers: [None; 3],
+            text_stroke: None,
+            text_stroke_width: 3.,
             text_anchor: TextAnchor::Middle,
             line_anchor: LineAnchor::Middle,
             frame_anchor: None,
@@ -960,6 +1001,8 @@ pub struct Mark {
     /// The mark's own data, Plot's first argument to a mark: `Plot.dot(data,
     /// …)`. `None` reads the plot's data.
     pub data: Option<crate::table::Dataset>,
+    /// Plot's `filter` option: only the records it accepts are drawn.
+    pub filter: Option<RowFilter>,
     /// The mark's horizontal facet channel, Plot's mark-level `fx` option.
     pub fx: Option<crate::table::Channel>,
     /// The mark's vertical facet channel, Plot's mark-level `fy` option.
@@ -1035,6 +1078,16 @@ pub struct DomainSort {
     pub reverse: bool,
     /// Keep only the first `limit` values, Plot's `limit`.
     pub limit: Option<usize>,
+}
+
+/// A predicate over records, Plot's `filter` option.
+#[derive(Clone)]
+pub struct RowFilter(pub std::rc::Rc<dyn Fn(&crate::table::Table) -> bool>);
+
+impl std::fmt::Debug for RowFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RowFilter(..)")
+    }
 }
 
 /// A marker drawn at a line's vertices, Plot's `marker` options.
@@ -1370,6 +1423,7 @@ impl Mark {
         Self {
             kind,
             data: None,
+            filter: None,
             fx: None,
             fy: None,
             channels: Channels::default(),
@@ -1550,7 +1604,8 @@ impl Mark {
     }
 
     /// Set how the mark connects its points.
-    pub fn curve(mut self, curve: Curve) -> Self {
+    pub fn curve(mut self, curve: impl Into<Curve>) -> Self {
+        let curve = curve.into();
         self.style.curve = curve;
         self
     }
@@ -1928,6 +1983,24 @@ impl Mark {
     /// shapes the size of a county or a country.
     pub fn centroid(self) -> Self {
         self.geo_centroid()
+    }
+
+    /// Plot's `filter` option: draw only the records `keep` accepts.
+    pub fn filter(mut self, keep: impl Fn(&crate::table::Table) -> bool + 'static) -> Self {
+        self.filter = Some(RowFilter(std::rc::Rc::new(keep)));
+        self
+    }
+
+    /// Plot's `textStroke`: a halo of `color` behind the glyphs.
+    pub fn text_stroke(mut self, color: &str) -> Self {
+        self.style.text_stroke = crate::css::parse(color).or(Some(Hsla::white()));
+        self
+    }
+
+    /// Plot's `textStrokeWidth`.
+    pub fn text_stroke_width(mut self, width: f32) -> Self {
+        self.style.text_stroke_width = width;
+        self
     }
 
     /// Bin the mark's data.
@@ -2421,7 +2494,7 @@ macro_rules! mark_builder {
             }
 
             /// Set how the mark connects its points.
-            pub fn curve(mut self, curve: Curve) -> Self {
+            pub fn curve(mut self, curve: impl Into<Curve>) -> Self {
                 self.0 = self.0.curve(curve);
                 self
             }
@@ -2485,6 +2558,24 @@ macro_rules! mark_builder {
             /// Clip the mark to the plot area, Plot's `clip: true`.
             pub fn clip(mut self, clip: bool) -> Self {
                 self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::filter`].
+            pub fn filter(mut self, keep: impl Fn(&crate::table::Table) -> bool + 'static) -> Self {
+                self.0 = self.0.filter(keep);
+                self
+            }
+
+            /// See [`Mark::text_stroke`].
+            pub fn text_stroke(mut self, color: &str) -> Self {
+                self.0 = self.0.text_stroke(color);
+                self
+            }
+
+            /// See [`Mark::text_stroke_width`].
+            pub fn text_stroke_width(mut self, width: f32) -> Self {
+                self.0 = self.0.text_stroke_width(width);
                 self
             }
 

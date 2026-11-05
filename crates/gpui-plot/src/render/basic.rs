@@ -1076,8 +1076,33 @@ fn draw_texts(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             TextAnchor::End => TextAlign::Right,
         };
         for (i, line) in lines.into_iter().enumerate() {
+            let y_line = top + i as f32 * line_height;
+            // Plot's `textStroke`: a halo, painted as the glyphs offset in a
+            // ring around their place, under the glyphs themselves.
+            if let Some(halo) = style.text_stroke {
+                let halo_label = Label::new(
+                    line.clone().into(),
+                    size,
+                    halo,
+                    weight,
+                    font.clone(),
+                    ctx.window,
+                );
+                let w = style.text_stroke_width / 2.;
+                for k in 0..8 {
+                    let a = std::f32::consts::TAU * k as f32 / 8.;
+                    let y = y_line + (line_height - halo_label.height.as_f32()) / 2. + w * a.sin();
+                    halo_label.paint_at(
+                        point(px(origin.x.as_f32() + dx + w * a.cos()), px(y)),
+                        align,
+                        None,
+                        ctx.window,
+                        ctx.cx,
+                    );
+                }
+            }
             let label = Label::new(line.into(), size, color, weight, font.clone(), ctx.window);
-            let y = top + i as f32 * line_height + (line_height - label.height.as_f32()) / 2.;
+            let y = y_line + (line_height - label.height.as_f32()) / 2.;
             label.paint_at(
                 point(px(origin.x.as_f32() + dx), px(y)),
                 align,
