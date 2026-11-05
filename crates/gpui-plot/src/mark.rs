@@ -615,6 +615,13 @@ pub struct BinConfig {
     /// from the whole data so every facet's bins line up. `None` computes
     /// them from the rows being binned.
     pub edges: [Option<crate::transform::BinEdges>; 2],
+    /// Plot's `cumulative`: positive, each bin also holds every bin before
+    /// it; negative, every bin after it (the complementary distribution);
+    /// zero, a plain histogram.
+    pub cumulative: i8,
+    /// Plot's `filter: null`: keep the empty bins rather than dropping them,
+    /// so a line or area over the bins falls to zero between the data.
+    pub keep_empty: bool,
 }
 
 impl Default for BinConfig {
@@ -623,6 +630,8 @@ impl Default for BinConfig {
             thresholds: Thresholds::Auto,
             outputs: Vec::new(),
             edges: [None, None],
+            cumulative: 0,
+            keep_empty: false,
         }
     }
 }
@@ -803,6 +812,9 @@ pub struct MarkStyle {
     pub unit: f32,
     /// The gap between a waffle's cells, Plot's `gap`, in pixels.
     pub gap: f32,
+    /// How many cells a waffle's row (or column) holds, Plot's `multiple`;
+    /// `None` fits as many as keep the cells roughly square.
+    pub multiple: Option<usize>,
     /// Whether the mark clips to the plot area, Plot's `clip`.
     pub clip: bool,
     /// Plot's `markerStart`, `markerMid` and `markerEnd`.
@@ -841,6 +853,36 @@ pub struct MarkStyle {
     /// How far a rect is shrunk on each side, Plot's `inset`; `None` takes
     /// the mark's default (half a pixel along a binned axis, else zero).
     pub inset: Option<f32>,
+    /// Plot's `mixBlendMode`, for the marks that honour it (rects and bars).
+    pub mix_blend_mode: Option<BlendMode>,
+}
+
+/// A CSS `mix-blend-mode`, Plot's `mixBlendMode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlendMode {
+    /// The product of the colors, `multiply`: overlaps darken.
+    Multiply,
+    /// The inverted product of the inverses, `screen`: overlaps lighten.
+    Screen,
+}
+
+impl BlendMode {
+    /// The CSS names `"multiply"` and `"screen"`.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "multiply" => Some(Self::Multiply),
+            "screen" => Some(Self::Screen),
+            _ => None,
+        }
+    }
+
+    /// One channel of a source `s` blended onto a backdrop `b`, both in 0–1.
+    pub fn channel(self, b: f32, s: f32) -> f32 {
+        match self {
+            Self::Multiply => b * s,
+            Self::Screen => b + s - b * s,
+        }
+    }
 }
 
 /// How a line or area connects its points, Plot's `curve`.
@@ -985,7 +1027,9 @@ impl Default for MarkStyle {
             bin_width: 20.,
             unit: 1.,
             gap: 1.,
+            multiple: None,
             inset: None,
+            mix_blend_mode: None,
             clip: false,
             markers: [None; 3],
             positive_fill: None,
@@ -1459,6 +1503,12 @@ impl Mark {
                 | MarkKind::TickY
                 | MarkKind::Link
                 | MarkKind::Frame
+                | MarkKind::Rect
+                | MarkKind::RectX
+                | MarkKind::RectY
+                | MarkKind::BarX
+                | MarkKind::BarY
+                | MarkKind::Cell
                 | MarkKind::Hull
                 | MarkKind::Geo
                 | MarkKind::DelaunayLink
@@ -2225,12 +2275,29 @@ impl Mark {
 
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
-        let outputs = self.bin.take().map(|bin| bin.outputs).unwrap_or_default();
+        let bin = self.bin.take().unwrap_or_default();
         self.bin = Some(BinConfig {
             thresholds,
-            outputs,
             edges: [None, None],
+            ..bin
         });
+        self
+    }
+
+    /// Plot's bin `cumulative` option: `1` accumulates each bin with those
+    /// before it, `-1` with those after it.
+    pub fn bin_cumulative(mut self, cumulative: i8) -> Self {
+        let mut bin = self.bin.take().unwrap_or_default();
+        bin.cumulative = cumulative.signum();
+        self.bin = Some(bin);
+        self
+    }
+
+    /// Plot's bin `filter: null`: keep empty bins.
+    pub fn bin_keep_empty(mut self) -> Self {
+        let mut bin = self.bin.take().unwrap_or_default();
+        bin.keep_empty = true;
+        self.bin = Some(bin);
         self
     }
 
@@ -2256,6 +2323,13 @@ impl Mark {
     /// adjacent bins read apart; `inset(0.)` closes the gap.
     pub fn inset(mut self, pixels: f32) -> Self {
         self.style.inset = Some(pixels);
+        self
+    }
+
+    /// Plot's `mixBlendMode`: how a rect or bar's fill blends with what it
+    /// overlaps, `"multiply"` or `"screen"`.
+    pub fn mix_blend_mode(mut self, mode: BlendMode) -> Self {
+        self.style.mix_blend_mode = Some(mode);
         self
     }
 
@@ -2538,6 +2612,12 @@ impl Mark {
         self.style.gap = pixels;
         self
     }
+
+    /// Set how many cells a waffle's row holds, Plot's `multiple`.
+    pub fn multiple(mut self, cells: usize) -> Self {
+        self.style.multiple = Some(cells.max(1));
+        self
+    }
 }
 
 /// Generates a typed mark builder over [`Mark`].
@@ -2790,6 +2870,18 @@ macro_rules! mark_builder {
                 reducer: GroupReducer,
             ) -> Self {
                 self.0 = self.0.bin_output(name, reducer);
+                self
+            }
+
+            /// See [`Mark::bin_cumulative`].
+            pub fn bin_cumulative(mut self, cumulative: i8) -> Self {
+                self.0 = self.0.bin_cumulative(cumulative);
+                self
+            }
+
+            /// See [`Mark::bin_keep_empty`].
+            pub fn bin_keep_empty(mut self) -> Self {
+                self.0 = self.0.bin_keep_empty();
                 self
             }
 
@@ -3207,6 +3299,12 @@ macro_rules! mark_builder {
                 self
             }
 
+            /// See [`Mark::mix_blend_mode`].
+            pub fn mix_blend_mode(mut self, mode: BlendMode) -> Self {
+                self.0 = self.0.mix_blend_mode(mode);
+                self
+            }
+
             /// Bucket a date or number into an interval, Plot's `interval`.
             pub fn interval(mut self, interval: Interval) -> Self {
                 self.0 = self.0.interval(interval);
@@ -3415,6 +3513,12 @@ macro_rules! mark_builder {
             /// Set the gap between a waffle's cells, Plot's `gap`.
             pub fn gap(mut self, pixels: f32) -> Self {
                 self.0 = self.0.gap(pixels);
+                self
+            }
+
+            /// Set how many cells a waffle's row holds, Plot's `multiple`.
+            pub fn multiple(mut self, cells: usize) -> Self {
+                self.0 = self.0.multiple(cells);
                 self
             }
         }

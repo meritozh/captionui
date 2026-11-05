@@ -109,9 +109,10 @@ fn e04() -> Plot {
         ))
 }
 
-/// Plot's `axisFx({lineWidth: 10, anchor: "bottom", dy: 20})` and `rx:
-/// "100%"` have no counterpart: the fx axis is the default one at the bottom
-/// and the cells are rounded by a large corner radius.
+/// Plot's `axisFx({lineWidth: 10, anchor: "bottom", dy: 20})` has no
+/// counterpart: the fx axis is the default one at the bottom. `rx: "100%"`
+/// is a corner radius past half the cell, which clamps to a circle as SVG's
+/// does.
 fn e05() -> Plot {
     Plot::plot()
         .no_axes()

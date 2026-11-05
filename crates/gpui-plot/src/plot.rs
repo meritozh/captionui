@@ -484,7 +484,8 @@ impl Plot {
                 ratio * w * (1.1 * nfy - 0.1).max(1.) + mt + mb
             }
             (None, None) => {
-                let ny = if !has_y {
+                // Plot's `ny` counts the y scale alone; fy multiplies it.
+                let ny = if y_values.is_empty() {
                     1.
                 } else if ordinal(&y_values, &self.scales.y) {
                     crate::scale::dedup(y_values.iter().map(Value::key))
@@ -1630,6 +1631,14 @@ impl Plot {
                 }
             }
         }
+        // Plot's interval domain is the range of the intervals between the
+        // values' extent, so a missing value has no facet.
+        if self.scales.fx.interval.is_some() {
+            fx.retain(|v| !v.is_null());
+        }
+        if self.scales.fy.interval.is_some() {
+            fy.retain(|v| !v.is_null());
+        }
         // An explicit facet domain wins, in its order.
         let explicit =
             |options: &crate::options::ScaleOptions, values: Vec<Value>| match &options.domain {
@@ -2077,6 +2086,30 @@ impl Plot {
             } else {
                 c.y.is_some() || c.y1.is_some() || c.y2.is_some()
             };
+            // A group or bin output to the axis (`groupZ({y: "count"})`)
+            // gives the mark that channel too; a `groupX` with no outputs
+            // counts into y.
+            let letter = if x { "x" } else { "y" };
+            let output_named = mark
+                .group
+                .iter()
+                .flat_map(|g| g.outputs.iter())
+                .chain(mark.bin.iter().flat_map(|b| b.outputs.iter()))
+                .any(|o| {
+                    o.name
+                        .strip_prefix(letter)
+                        .is_some_and(|r| matches!(r, "" | "1" | "2"))
+                })
+                || mark.group.as_ref().is_some_and(|g| {
+                    g.outputs.is_empty()
+                        && g.axis
+                            == Some(if x {
+                                crate::mark::Axis::Y
+                            } else {
+                                crate::mark::Axis::X
+                            })
+                });
+            let named = named || output_named;
             // A mark over plain values reads its single axis by default, and a
             // one-dimensional mark spreads along the other by index.
             let single = mark.kind.category().single_axis;

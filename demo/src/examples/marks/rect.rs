@@ -86,7 +86,6 @@ fn e04() -> Plot {
         .mark(rule_y([0.]))
 }
 
-/// `mixBlendMode: "multiply"` has no counterpart: the bins overlap opaquely.
 fn e05() -> Plot {
     Plot::plot()
         .x(|x| x.round(true))
@@ -96,6 +95,7 @@ fn e05() -> Plot {
             rect_y(data::olympians())
                 .x("weight")
                 .fill("sex")
+                .mix_blend_mode(BlendMode::Multiply)
                 .bin(Thresholds::Auto)
                 .bin_output("y2", GroupReducer::Count),
         )
@@ -175,7 +175,8 @@ fn e09() -> Plot {
         .y(|y| {
             y.ticks(12).tick_format(|v: &Value| {
                 // Plot.formatMonth("en", "narrow")
-                let month = v.as_number().unwrap_or(0.) as usize;
+                // d3's formatMonth wraps month 12 back to January.
+                let month = (v.as_number().unwrap_or(0.) as usize) % 12;
                 "JFMAMJJASOND"
                     .chars()
                     .nth(month)

@@ -248,69 +248,42 @@ const LIKERT: [(&str, f64); 5] = [
 ];
 
 /// The survey as a diverging stacked bar per question, with the docs'
-/// custom Likert `offset`.
-///
-/// Gap: a custom stack `offset` function is missing; the port counts each
-/// question's responses and computes the Likert-centered `x1`/`x2` itself.
+/// custom Likert stack `order` and `offset`.
 fn e11() -> Plot {
-    let survey = data::survey();
-    let mut questions: Vec<Value> = Vec::new();
-    for d in survey.rows() {
-        let q = d.value("Question");
-        if !questions.contains(&q) {
-            questions.push(q);
-        }
-    }
-    let mut rows = Vec::new();
-    for question in &questions {
-        let counts: Vec<f64> = LIKERT
-            .iter()
-            .map(|(response, _)| {
-                survey
-                    .rows()
-                    .iter()
-                    .filter(|d| {
-                        d.value("Question") == *question
-                            && &*d.value("Response").label() == *response
-                    })
-                    .count() as f64
-            })
-            .collect();
-        // Stack in the Likert order from zero, then shift the stack so the
-        // neutral responses straddle zero: `k = Σ count × (1 − weight) / 2`.
-        let shift: f64 = counts
-            .iter()
-            .zip(LIKERT.iter())
-            .map(|(n, (_, w))| n * (1. - w))
-            .sum::<f64>()
-            / 2.;
-        let mut x = 0.;
-        for (n, (response, _)) in counts.iter().zip(LIKERT.iter()) {
-            if *n > 0. {
-                rows.push(
-                    Table::empty()
-                        .with("Question", question.clone())
-                        .with("Response", Value::text(*response))
-                        .with("x1", Value::Number(x - shift))
-                        .with("x2", Value::Number(x + n - shift)),
-                );
+    let order: Vec<Value> = LIKERT.iter().map(|(r, _)| Value::text(*r)).collect();
+    // The docs' `Likert(responses).offset`: shift each stack so the
+    // negative responses (and half the neutral ones) fall left of zero.
+    let offset = Offset::custom(|stacks, x1, x2, z| {
+        let weight = |z: &Value| {
+            LIKERT
+                .iter()
+                .find(|(r, _)| *r == &*z.label())
+                .map_or(0., |(_, w)| *w)
+        };
+        for stack in stacks {
+            let k: f64 = stack
+                .iter()
+                .map(|&i| (x2[i] - x1[i]) * (1. - weight(&z[i])))
+                .filter(|v| v.is_finite())
+                .sum::<f64>()
+                / 2.;
+            for &i in stack {
+                x1[i] -= k;
+                x2[i] -= k;
             }
-            x += n;
         }
-    }
+    });
     Plot::plot()
         .x(|x| x.tick_format(|v: &Value| format!("{}", v.as_number().unwrap_or(0.).abs())))
-        .color(|c| {
-            c.domain(LIKERT.iter().map(|(r, _)| Value::text(*r)))
-                .scheme("RdBu")
-                .legend(true)
-        })
+        .color(|c| c.domain(order.clone()).scheme("RdBu").legend(true))
         .mark(
-            bar_x(Dataset::new(rows))
+            bar_x(data::survey())
                 .fy("Question")
-                .x1("x1")
-                .x2("x2")
-                .fill("Response"),
+                .fill("Response")
+                .group_output("x", GroupReducer::Count)
+                .group_z()
+                .stack_order(StackOrder::Explicit(order))
+                .stack_offset(offset),
         )
         .mark(rule_x([0.]))
 }

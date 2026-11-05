@@ -15,10 +15,7 @@ pub fn examples() -> Vec<Example> {
         example("transforms", "bin", 9, e09),
         example("transforms", "bin", 10, e10),
         example("transforms", "bin", 11, e11),
-        Example {
-            height: 1100.,
-            ..example("transforms", "bin", 12, e12)
-        },
+        example("transforms", "bin", 12, e12),
         example("transforms", "bin", 13, e13),
     ]
 }
@@ -59,9 +56,6 @@ fn e03() -> Plot {
 }
 
 /// `Plot.binX({y2: "count"}, {x: "weight", fill: "sex", mixBlendMode: "multiply"})`
-///
-/// Gap: a `y2` output (overlapping rather than stacked bins) and
-/// `mixBlendMode` are missing; the bins stack, at half opacity.
 fn e04() -> Plot {
     Plot::plot()
         .y(|y| y.grid(true))
@@ -69,7 +63,7 @@ fn e04() -> Plot {
             rect_y(data::olympians())
                 .x("weight")
                 .fill("sex")
-                .fill_opacity(0.5)
+                .mix_blend_mode(BlendMode::Multiply)
                 .bin_output("y2", GroupReducer::Count),
         )
         .mark(rule_y([0.]))
@@ -128,8 +122,6 @@ fn e09() -> Plot {
 }
 
 /// `Plot.areaY(…, Plot.binX({y: "count", filter: null}, …))` and a `lineY`.
-///
-/// Gap: `filter: null` (keeping empty bins) is missing.
 fn e10() -> Plot {
     Plot::plot()
         .y(|y| y.grid(true))
@@ -137,20 +129,20 @@ fn e10() -> Plot {
             area_y(data::olympians())
                 .x("weight")
                 .fill_opacity(0.2)
-                .bin_output("y", GroupReducer::Count),
+                .bin_output("y", GroupReducer::Count)
+                .bin_keep_empty(),
         )
         .mark(
             line_y(data::olympians())
                 .x("weight")
-                .bin_output("y", GroupReducer::Count),
+                .bin_output("y", GroupReducer::Count)
+                .bin_keep_empty(),
         )
         .mark(rule_y([0.]))
 }
 
-/// `Plot.rectY(olympians, Plot.binX({y: "count"}, {x: "weight", cumulative}))`
-///
-/// Gap: the bin's `cumulative` option is missing; this draws the plain
-/// histogram.
+/// `Plot.rectY(olympians, Plot.binX({y: "count"}, {x: "weight", cumulative}))`,
+/// with the docs' `cumulative` toggle on.
 fn e11() -> Plot {
     Plot::plot()
         .margin_left(60.)
@@ -158,6 +150,7 @@ fn e11() -> Plot {
         .mark(
             rect_y(data::olympians())
                 .x("weight")
+                .bin_cumulative(1)
                 .bin_output("y", GroupReducer::Count),
         )
         .mark(rule_y([0.]))
@@ -190,7 +183,11 @@ fn sports_by_median_weight() -> Vec<Value> {
         .into_iter()
         .map(|(sport, mut weights)| (median(&mut weights), sport))
         .collect();
-    keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // d3.groupSort breaks ties by the key, ascending.
+    keyed.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then_with(|| a.1.as_text().cmp(&b.1.as_text()))
+    });
     keyed.into_iter().map(|(_, sport)| sport).collect()
 }
 

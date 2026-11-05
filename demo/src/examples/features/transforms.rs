@@ -110,13 +110,13 @@ fn e04() -> Plot {
         .color(|c| c.legend(true))
 }
 
-/// The docs blend the overlapping series with `mixBlendMode: "multiply"`;
-/// there is no blend mode here.
+/// The docs blend the overlapping series with `mixBlendMode: "multiply"`.
 fn e05() -> Plot {
     Plot::plot().y(|y| y.percent(true)).mark(
         rect_y(data::olympians())
             .x("weight")
             .fill("sex")
+            .mix_blend_mode(BlendMode::Multiply)
             .bin(Thresholds::Auto)
             .bin_output("y2", GroupReducer::Count)
             .normalize_y(NormalizeBasis::Sum),

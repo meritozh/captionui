@@ -468,7 +468,9 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     if mark.normalize {
         normalize_rows(&mut rows);
     }
-    if let Some((axis, basis)) = mark.normalize_by {
+    // Plot's `normalizeY(binX(…))` normalizes the bins, so a binned mark
+    // normalizes after binning.
+    if let Some((axis, basis)) = mark.normalize_by.filter(|_| mark.bin.is_none()) {
         stack::normalize(&mut rows, axis, basis);
     }
     if let Some(axis) = mark.outliers {
@@ -497,6 +499,9 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // Binning replaces the rows with one row per bin.
     if mark.bin.is_some() {
         rows = bin_rows(mark, &rows);
+        if let Some((axis, basis)) = mark.normalize_by {
+            stack::normalize(&mut rows, axis, basis);
+        }
     }
 
     // Stacking rewrites the y interval of every row.
@@ -973,12 +978,26 @@ fn derive_intervals(
         // the mark reads an x, else y — so a `rectY` over dates buckets its
         // date axis and leaves the value axis to the baseline derivation below.
         // Bucketing both would turn the count into an extent too.
-        if mark.channels.x.is_some() && unset(x1, x2) && !x.is_null() {
-            if let Some((start, end)) = interval.extent(x) {
-                *x1 = Some(interval_value(x, start));
-                *x2 = Some(interval_value(x, end));
-            }
-        } else if mark.channels.x.is_none()
+        //
+        // Plot names the axes per mark: a `rect` buckets both
+        // (`maybeTrivialIntervalX(maybeTrivialIntervalY)`), a `barY` its
+        // value, y (`maybeIntervalY`), and a `barX` its value, x.
+        let (on_x, on_y) = match mark.kind {
+            MarkKind::Rect => (true, true),
+            MarkKind::BarY => (false, true),
+            MarkKind::BarX => (true, false),
+            _ if mark.channels.x.is_some() => (true, false),
+            _ => (false, true),
+        };
+        if on_x
+            && unset(x1, x2)
+            && !x.is_null()
+            && let Some((start, end)) = interval.extent(x)
+        {
+            *x1 = Some(interval_value(x, start));
+            *x2 = Some(interval_value(x, end));
+        }
+        if on_y
             && unset(y1, y2)
             && !y.is_null()
             && let Some((start, end)) = interval.extent(y)
@@ -1826,7 +1845,7 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
 
     // Group the rows by series, then by bin cell. The series keep their
     // sorted order, the order the color scale and the stack use.
-    let mut series: std::collections::BTreeMap<Option<crate::value::ValueKey>, BinCells> =
+    let mut series: std::collections::BTreeMap<Option<crate::value::ValueKey>, (usize, BinCells)> =
         std::collections::BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
         let slot =
@@ -1847,10 +1866,48 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
         };
         series
             .entry(row.z.as_ref().map(|z| z.key()))
-            .or_default()
+            .or_insert_with(|| (index, BinCells::new()))
+            .1
             .entry((xi, yi))
             .or_default()
             .push(index);
+    }
+
+    // Plot's `cumulative` and `filter: null` see every bin, empty or not:
+    // a cumulative bin gathers its predecessors' rows (or, negative, its
+    // successors'), and only then are the empty bins dropped, unless the
+    // filter is null.
+    if bin.keep_empty || bin.cumulative != 0 {
+        let slots = |edges: Option<transform::BinEdges>, binned: bool| {
+            if binned {
+                edges.map_or(1, |e| e.count)
+            } else {
+                1
+            }
+        };
+        let (nx, ny) = (slots(x_edges, bin_x), slots(y_edges, bin_y));
+        for (_, cells) in series.values_mut() {
+            for xi in 0..nx {
+                for yi in 0..ny {
+                    cells.entry((xi, yi)).or_default();
+                }
+            }
+            if bin.cumulative != 0 && bin_x != bin_y {
+                let mut keys: Vec<(usize, usize)> = cells.keys().copied().collect();
+                if bin.cumulative < 0 {
+                    keys.reverse();
+                }
+                for pair in keys.windows(2) {
+                    let before = cells[&pair[0]].clone();
+                    if let Some(cell) = cells.get_mut(&pair[1]) {
+                        cell.extend(before);
+                    }
+                }
+            }
+            if !bin.keep_empty {
+                cells.retain(|_, members| !members.is_empty());
+            }
+        }
     }
 
     let mut binned: Vec<PreparedRow> = Vec::new();
@@ -1858,9 +1915,11 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
     // one-dimensional bin's stack.
     let mut stack_tops: std::collections::HashMap<usize, (f64, f64)> =
         std::collections::HashMap::new();
-    for cells in series.values() {
+    for (first, cells) in series.values() {
         for (&(xi, yi), members) in cells {
-            let mut row = rows[members[0]].clone();
+            // An empty bin (kept by `filter: null`) takes its series' first
+            // row, as Plot reads z, fill and stroke from the group's first.
+            let mut row = rows[members.first().copied().unwrap_or(*first)].clone();
             let records: Vec<&Table> = members.iter().map(|index| &rows[*index].row).collect();
             // A bin outputs its extent (`x1`, `x2`) and, for the marks that
             // read a point (a dot, a text), its midpoint as `x`.
@@ -1944,6 +2003,22 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
                     }
                     "y" => row.y = reduced.clone(),
                     "x" => row.x = reduced.clone(),
+                    // An explicit end (`{y2: "count"}`) is unstacked: the bar
+                    // runs from zero, or from a `y1` output, to it.
+                    "y1" => row.y1 = Some(reduced.clone()),
+                    "y2" => {
+                        row.y2 = Some(reduced.clone());
+                        if !outputs.iter().any(|o| o.name.as_ref() == "y1") {
+                            row.y1 = Some(Value::Number(0.));
+                        }
+                    }
+                    "x1" => row.x1 = Some(reduced.clone()),
+                    "x2" => {
+                        row.x2 = Some(reduced.clone());
+                        if !outputs.iter().any(|o| o.name.as_ref() == "x1") {
+                            row.x1 = Some(Value::Number(0.));
+                        }
+                    }
                     "fillOpacity" | "opacity" => row.opacity_value = Some(number),
                     "r" => row.r_value = Some(number),
                     _ => {}

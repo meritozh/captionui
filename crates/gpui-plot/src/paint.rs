@@ -20,6 +20,53 @@ pub fn fill_path(points: &[Point<Pixels>], color: Hsla) -> Option<Path<Pixels>> 
     builder.build().ok().map(|path| with_alpha(path, color))
 }
 
+/// Fill a polygon by SVG's `nonzero` rule, scanline by scanline: the
+/// fallback for an outline that folds over itself so often the tessellator
+/// gives up (an area over unsorted data). Each half-pixel row paints the
+/// spans where the polygon's winding number is not zero.
+pub fn paint_fill_nonzero(points: &[Point<Pixels>], color: Hsla, window: &mut Window) {
+    if points.len() < 3 || !finite(points) {
+        return;
+    }
+    let ys = points.iter().map(|p| p.y.as_f32());
+    let (lo, hi) = ys.fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), y| {
+        (a.min(y), b.max(y))
+    });
+    const STEP: f32 = 0.5;
+    let mut crossings: Vec<(f32, i32)> = Vec::new();
+    let mut y = (lo / STEP).floor() * STEP;
+    while y < hi {
+        let center = y + STEP / 2.;
+        crossings.clear();
+        for (i, a) in points.iter().enumerate() {
+            let b = points[(i + 1) % points.len()];
+            let (ay, by) = (a.y.as_f32(), b.y.as_f32());
+            if (ay <= center) == (by <= center) {
+                continue;
+            }
+            let t = (center - ay) / (by - ay);
+            let x = a.x.as_f32() + t * (b.x.as_f32() - a.x.as_f32());
+            crossings.push((x, if by > ay { 1 } else { -1 }));
+        }
+        crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut winding = 0;
+        let mut start = 0.;
+        for &(x, direction) in &crossings {
+            let was = winding;
+            winding += direction;
+            if was == 0 && winding != 0 {
+                start = x;
+            } else if was != 0 && winding == 0 && x > start {
+                window.paint_quad(gpui::fill(
+                    Bounds::new(point(px(start), px(y)), size(px(x - start), px(STEP))),
+                    color,
+                ));
+            }
+        }
+        y += STEP;
+    }
+}
+
 /// A path built from points, stroked.
 pub fn stroke_path(points: &[Point<Pixels>], width: f32, color: Hsla) -> Option<Path<Pixels>> {
     // A non-finite point (a NaN that slipped through a channel) would panic

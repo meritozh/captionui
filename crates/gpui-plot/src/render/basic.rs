@@ -575,14 +575,17 @@ fn draw_areas_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                 .as_ref()
                 .and_then(|colors| group.first().map(|(index, _)| colors[*index]))
                 .unwrap_or_else(|| ctx.default_fill(prepared));
-            let polygon = paint::fill_path(
-                &upper,
-                paint::alpha(
-                    color,
-                    prepared.mark.style.opacity * prepared.mark.style.fill_opacity * ctx.appear,
-                ),
+            let fill = paint::alpha(
+                color,
+                prepared.mark.style.opacity * prepared.mark.style.fill_opacity * ctx.appear,
             );
-            paint::paint_path(polygon, color, ctx.window);
+            match paint::fill_path(&upper, fill) {
+                Some(polygon) => paint::paint_path(Some(polygon), color, ctx.window),
+                // Plot draws an area in input order, so unsorted data folds
+                // the outline over itself until the tessellator gives up;
+                // fill it by scanlines instead, under SVG's nonzero rule.
+                None => paint::paint_fill_nonzero(&upper, fill, ctx.window),
+            }
 
             // Plot draws the area's edge too when a stroke is set.
             if prepared.mark.channels.stroke.is_some() {
@@ -775,24 +778,51 @@ fn draw_bars_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
 
 fn draw_rects(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
+    // With a `mixBlendMode`, the pieces painted so far with the opaque color
+    // each shows, so an overlap paints its blend.
+    let mut blended = BlendedPieces::new(prepared.mark.style.mix_blend_mode, ctx.theme.background);
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let Some((x_start, x_end)) = row.x_interval() else {
-                continue;
+            // Under a projection, Plot projects the corners (x1, y1) and
+            // (x2, y2) as points, and the rect spans them.
+            let projected = ctx.frame.projection.as_ref().map(|projection| {
+                let (x_start, x_end) = row.x_interval()?;
+                let (y_start, y_end) = row.y_interval()?;
+                let a = projection.project(x_start.as_number()?, y_start.as_number()?)?;
+                let b = projection.project(x_end.as_number()?, y_end.as_number()?)?;
+                Some([a[0] as f32, a[1] as f32, b[0] as f32, b[1] as f32])
+            });
+            // Plot's rect spans the frame along an axis it has no channel
+            // on (`rect(…, binX({fill: "count"}, {x}))` fills the height).
+            let x_span = match row.x_interval() {
+                _ if projected.is_some() => match projected.flatten() {
+                    Some([x0, _, x1, _]) => (Some(x0), Some(x1)),
+                    None => continue,
+                },
+                Some((start, end)) => (
+                    ctx.frame.x.scale.position(&start),
+                    ctx.frame.x.scale.position(&end),
+                ),
+                None if row.x1.is_none() && row.x2.is_none() => {
+                    (Some(0.), Some(ctx.frame.plot.size.width.as_f32()))
+                }
+                None => continue,
             };
-            let Some((y_start, y_end)) = row.y_interval() else {
-                continue;
+            let y_span = match row.y_interval() {
+                _ if projected.is_some() => match projected.flatten() {
+                    Some([_, y0, _, y1]) => (Some(y0), Some(y1)),
+                    None => continue,
+                },
+                Some((start, end)) => (
+                    ctx.frame.y.scale.position(&start),
+                    ctx.frame.y.scale.position(&end),
+                ),
+                None if row.y1.is_none() && row.y2.is_none() => {
+                    (Some(0.), Some(ctx.frame.plot.size.height.as_f32()))
+                }
+                None => continue,
             };
-            let (Some(x0), Some(x1)) = (
-                ctx.frame.x.scale.position(&x_start),
-                ctx.frame.x.scale.position(&x_end),
-            ) else {
-                continue;
-            };
-            let (Some(y0), Some(y1)) = (
-                ctx.frame.y.scale.position(&y_start),
-                ctx.frame.y.scale.position(&y_end),
-            ) else {
+            let ((Some(x0), Some(x1)), (Some(y0), Some(y1))) = (x_span, y_span) else {
                 continue;
             };
             // Plot's `inset`: an explicit inset shrinks every side; a binned
@@ -819,13 +849,10 @@ fn draw_rects(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             );
             // Plot's rect fills nothing when given only a stroke.
             if !(prepared.mark.channels.stroke.is_some() && prepared.mark.channels.fill.is_none()) {
-                let color = colors.fill(index);
-                paint::paint_rect(
-                    rect,
-                    prepared.mark.style.corner_radius,
-                    paint::alpha(color, ctx.row_fill_opacity(prepared, row)),
-                    ctx.window,
-                );
+                let color = paint::alpha(colors.fill(index), ctx.row_fill_opacity(prepared, row));
+                if !blended.paint(rect, color, ctx.window) {
+                    paint::paint_rect(rect, prepared.mark.style.corner_radius, color, ctx.window);
+                }
             }
             if prepared.mark.channels.stroke.is_some() {
                 paint::paint_rect_outline(
@@ -838,6 +865,64 @@ fn draw_rects(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             }
         }
     });
+}
+
+/// Rect fills under a CSS `mix-blend-mode`, which GPUI cannot composite: the
+/// pieces painted so far, each with the opaque color it shows over the
+/// background. A new rect paints its blend over the background, then over
+/// every piece it overlaps, in painting order so the topmost piece wins, as
+/// the browser composites the mark's group.
+struct BlendedPieces {
+    mode: Option<crate::mark::BlendMode>,
+    background: Hsla,
+    pieces: Vec<(Bounds<Pixels>, Hsla)>,
+}
+
+impl BlendedPieces {
+    fn new(mode: Option<crate::mark::BlendMode>, background: Hsla) -> Self {
+        Self {
+            mode,
+            background: paint::alpha(background, 1.),
+            pieces: Vec::new(),
+        }
+    }
+
+    /// `color` blended onto the opaque `backdrop`, opaque.
+    fn blend(mode: crate::mark::BlendMode, backdrop: Hsla, color: Hsla) -> Hsla {
+        let (b, s) = (backdrop.to_rgb(), color.to_rgb());
+        let a = s.a;
+        let mix = |b: f32, s: f32| (1. - a) * b + a * mode.channel(b, s);
+        Hsla::from(gpui::Rgba {
+            r: mix(b.r, s.r),
+            g: mix(b.g, s.g),
+            b: mix(b.b, s.b),
+            a: 1.,
+        })
+    }
+
+    /// Paint `rect` blended, returning whether the mark blends at all.
+    fn paint(&mut self, rect: Bounds<Pixels>, color: Hsla, window: &mut Window) -> bool {
+        let Some(mode) = self.mode else {
+            return false;
+        };
+        let base = Self::blend(mode, self.background, color);
+        paint::paint_rect(rect, 0., base, window);
+        let mut added = vec![(rect, base)];
+        for (piece, shown) in &self.pieces {
+            if !piece.intersects(&rect) {
+                continue;
+            }
+            let overlap = piece.intersect(&rect);
+            if overlap.size.width <= px(0.) || overlap.size.height <= px(0.) {
+                continue;
+            }
+            let over = Self::blend(mode, *shown, color);
+            paint::paint_rect(overlap, 0., over, window);
+            added.push((overlap, over));
+        }
+        self.pieces.extend(added);
+        true
+    }
 }
 
 fn draw_cells(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
@@ -2619,24 +2704,76 @@ fn position_across(
 /// Plot's `waffleX`/`waffleY`: a bar's interval divided into unit cells, so a
 /// value reads as a count of squares rather than as a length.
 ///
-/// The cells wrap: the bar's thickness sets how many fit across it, and the
-/// interval's length fills rows (or columns) of that many cells. A bar whose
-/// value is not a whole number of cells ends with a partial row.
+/// Plot's geometry: one unit is `unit` times the value scale's pixels per
+/// value; a row (or column) holds `multiple` cells — by default as many as
+/// keep the cells about square — and the cells, `multiple` units tall, are
+/// numbered from the scale's zero, so the interval `[y1, y2]` covers cells
+/// `y1 / unit` to `y2 / unit` of that grid, wrapping row by row. A
+/// fractional end cuts its cell short. A waffle with no cross channel spans
+/// the frame.
 fn draw_waffle_bars(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
     let style = &prepared.mark.style;
     let along_x = prepared.mark.kind == MarkKind::WaffleX;
-    let unit = style.unit.max(f32::MIN_POSITIVE);
+    let unit = style.unit.max(f32::MIN_POSITIVE) as f64;
     let gap = style.gap;
+    let (value_scale, cross_scale) = if along_x {
+        (&ctx.frame.x.scale, &ctx.frame.y.scale)
+    } else {
+        (&ctx.frame.y.scale, &ctx.frame.x.scale)
+    };
+    let (Some(zero), Some(one)) = (
+        value_scale.position(&Value::Number(0.)),
+        value_scale.position(&Value::Number(unit)),
+    ) else {
+        return;
+    };
+    // The length of a unit in pixels, and which way the values grow.
+    let scale = (one - zero).abs();
+    let sign = if one >= zero { 1. } else { -1. };
+    if !scale.is_finite() || scale <= 0. {
+        return;
+    }
+    let cross_channel = if along_x {
+        prepared.mark.channels.y.is_some()
+    } else {
+        prepared.mark.channels.x.is_some()
+    };
+    let frame_cross = if along_x {
+        ctx.frame.plot.size.height.as_f32()
+    } else {
+        ctx.frame.plot.size.width.as_f32()
+    };
+    let bar = if !cross_channel {
+        frame_cross
+    } else if along_x {
+        bar_width_x(ctx.frame, prepared)
+    } else {
+        bar_width_y(ctx.frame, prepared)
+    };
+    let multiple = style
+        .multiple
+        .unwrap_or_else(|| ((bar / scale).sqrt().floor() as usize).max(1));
+    let m = multiple as f32;
+    // The outer size of a cell, gap included: across, and along the value.
+    let cx = (bar / m).min(scale * m);
+    let cy = scale * m;
+    let tx = (bar - m * cx) / 2.;
 
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let Some(centre) = (if along_x {
-                ctx.frame.y.scale.position(row.y_value())
+            let cross_start = if !cross_channel {
+                0.
             } else {
-                ctx.frame.x.scale.position(row.x_value())
-            }) else {
-                continue;
+                let value = if along_x {
+                    row.y_value()
+                } else {
+                    row.x_value()
+                };
+                let Some(centre) = cross_scale.position(value) else {
+                    continue;
+                };
+                centre - bar / 2.
             };
             let interval = if along_x {
                 row.x_interval()
@@ -2646,72 +2783,59 @@ fn draw_waffle_bars(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             let Some((start, end)) = interval else {
                 continue;
             };
-            let (Some(a), Some(b)) = (
-                if along_x {
-                    ctx.frame.x.scale.position(&start)
-                } else {
-                    ctx.frame.y.scale.position(&start)
-                },
-                if along_x {
-                    ctx.frame.x.scale.position(&end)
-                } else {
-                    ctx.frame.y.scale.position(&end)
-                },
-            ) else {
+            let (Some(v1), Some(v2)) = (start.as_number(), end.as_number()) else {
                 continue;
             };
-
-            // One unit along the value axis, in pixels: the interval's
-            // pixel length divided by how many units it spans.
-            let span = (end.as_number().unwrap_or(0.) - start.as_number().unwrap_or(0.)).abs();
-            let scale = (b - a).abs() / (span / unit as f64) as f32;
-            if !scale.is_finite() || scale <= 0. {
+            let (i1, i2) = {
+                let (a, b) = (v1 / unit, v2 / unit);
+                if a <= b { (a, b) } else { (b, a) }
+            };
+            if !(i1.is_finite() && i2.is_finite()) || i2 <= i1 {
                 continue;
             }
-            let bar = if along_x {
-                bar_width_x(ctx.frame, prepared)
-            } else {
-                bar_width_y(ctx.frame, prepared)
-            };
-            // How many cells fit across the bar, Plot's `multiple`: the bar
-            // stays roughly as wide as its cells are tall.
-            let across = ((bar / scale).sqrt().floor() as usize).max(1);
-            // A cell is as wide as the bar allows and one row tall, where a
-            // row holds `across` units.
-            let cell_width = (bar / across as f32).min(scale * across as f32);
-            let cell_height = scale * across as f32;
-            let low = a.min(b);
-            let count = ((b - a).abs() / scale).round().max(1.) as usize;
-            let color = colors.fill(index);
-
-            for step in 0..count {
-                let line = step / across;
-                let column = step % across;
-                let (x, y, w, h) = if along_x {
-                    (
-                        low + line as f32 * cell_height,
-                        centre - bar / 2. + column as f32 * cell_width,
-                        cell_width - gap,
-                        cell_height - gap,
-                    )
+            // Plot sets a constant `fillOpacity` on the waffle's group, which
+            // both the pattern's cell (inheriting it) and the path the
+            // pattern fills apply: the opacity counts twice.
+            let color = paint::alpha(
+                colors.fill(index),
+                ctx.row_fill_opacity(prepared, row) * style.fill_opacity,
+            );
+            let radius = style.corner_radius;
+            let mut k = i1.floor() as i64;
+            while (k as f64) < i2 {
+                let (lo, hi) = (
+                    (i1 - k as f64).max(0.) as f32,
+                    (i2 - k as f64).min(1.) as f32,
+                );
+                let column = k.rem_euclid(multiple as i64) as f32;
+                let line = k.div_euclid(multiple as i64) as f32;
+                k += 1;
+                // The cell's pattern rect, inset by half the gap, and the
+                // part of it the interval covers, in value-axis pixels from
+                // zero.
+                let (c0, c1) = (line * cy + gap / 2., line * cy + cy - gap / 2.);
+                let (v0, v1) = (c0.max(line * cy + lo * cy), c1.min(line * cy + hi * cy));
+                if v1 <= v0 {
+                    continue;
+                }
+                let across0 = cross_start + tx + column * cx + gap / 2.;
+                let across1 = across0 + cx - gap;
+                if across1 <= across0 {
+                    continue;
+                }
+                let (a, b) = (zero + sign * v0, zero + sign * v1);
+                let (p0, p1) = if along_x {
+                    (point(px(a), px(across0)), point(px(b), px(across1)))
                 } else {
-                    (
-                        centre - bar / 2. + column as f32 * cell_width,
-                        low + line as f32 * cell_height,
-                        cell_width - gap,
-                        cell_height - gap,
-                    )
+                    (point(px(across0), px(a)), point(px(across1), px(b)))
                 };
-                let rect = paint::rect_between(
-                    ctx.absolute(point(px(x), px(y))),
-                    ctx.absolute(point(px(x + w), px(y + h))),
-                );
-                paint::paint_rect(
-                    rect,
-                    style.corner_radius,
-                    paint::alpha(color, ctx.row_fill_opacity(prepared, row)),
-                    ctx.window,
-                );
+                let rect = paint::rect_between(ctx.absolute(p0), ctx.absolute(p1));
+                // SVG clamps a corner radius to half the rect (`rx: "100%"`
+                // draws a circle).
+                let r = radius
+                    .min(rect.size.width.as_f32() / 2.)
+                    .min(rect.size.height.as_f32() / 2.);
+                paint::paint_rect(rect, r, color, ctx.window);
             }
         }
     });

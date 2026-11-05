@@ -42,7 +42,7 @@ pub enum StackOrder {
 }
 
 /// Plot's stack `offset`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Offset {
     /// Stack up from zero, Plot's default.
     #[default]
@@ -53,6 +53,40 @@ pub enum Offset {
     Center,
     /// Center and minimize the weighted change in slope, a streamgraph.
     Wiggle,
+    /// Plot's custom `offset` function, `(stacks, X1, X2, Z) => …`, which
+    /// shifts the stacked intervals in place (the docs' Likert offset).
+    Custom(CustomOffset),
+}
+
+/// The signature of a custom stack offset: the facet's stacks (each the row
+/// indices sharing a position, in stack order), the rows' interval starts
+/// and ends to rewrite, and the rows' `z` values.
+pub type OffsetFn = dyn Fn(&[Vec<usize>], &mut [f64], &mut [f64], &[Value]);
+
+/// A custom stack offset, compared by identity.
+#[derive(Clone)]
+pub struct CustomOffset(pub std::rc::Rc<OffsetFn>);
+
+impl Offset {
+    /// A custom offset, Plot's `offset: (facets, X1, X2, Z) => …`, called
+    /// with each facet's stacks.
+    pub fn custom(
+        offset: impl Fn(&[Vec<usize>], &mut [f64], &mut [f64], &[Value]) + 'static,
+    ) -> Self {
+        Self::Custom(CustomOffset(std::rc::Rc::new(offset)))
+    }
+}
+
+impl std::fmt::Debug for CustomOffset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CustomOffset")
+    }
+}
+
+impl PartialEq for CustomOffset {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// One stack transform's options.
@@ -286,7 +320,7 @@ pub fn stack(rows: &mut [PreparedRow], spec: &StackSpec) {
             }
         }
         match spec.offset {
-            Offset::Zero => {}
+            Offset::Zero | Offset::Custom(_) => {}
             Offset::Normalize => {
                 let span = positive - negative;
                 if span > 0. {
@@ -307,6 +341,16 @@ pub fn stack(rows: &mut [PreparedRow], spec: &StackSpec) {
     }
     if spec.offset == Offset::Wiggle {
         wiggle(rows, &groups, &mut intervals, &rank);
+    }
+    if let Offset::Custom(CustomOffset(offset)) = &spec.offset {
+        let stacks: Vec<Vec<usize>> = groups.iter().map(|(_, members)| members.clone()).collect();
+        let (mut x1, mut x2): (Vec<f64>, Vec<f64>) = intervals.iter().copied().unzip();
+        let z: Vec<Value> = rows
+            .iter()
+            .map(|row| row.z.clone().unwrap_or(Value::Null))
+            .collect();
+        offset(&stacks, &mut x1, &mut x2, &z);
+        intervals = x1.into_iter().zip(x2).collect();
     }
 
     for (row, (a, b)) in rows.iter_mut().zip(intervals) {
@@ -437,17 +481,47 @@ pub fn normalize(rows: &mut [PreparedRow], axis: Axis, basis: NormalizeBasis) {
             None => series.push((key, vec![i])),
         }
     }
-    let read = |row: &PreparedRow| -> f64 {
-        if along_x {
-            row.x_value()
-        } else {
-            row.y_value()
+    // Plot's normalizeY maps each of y, y1 and y2 on its own basis; a mark
+    // with a value normalizes that (and drops its interval), one with only
+    // an interval (`binX({y2: "count"})`) normalizes the interval's ends. An
+    // all-zero end is the bar's baseline and stays put.
+    let has_value = rows
+        .iter()
+        .any(|row| !if along_x { &row.x } else { &row.y }.is_null());
+    if has_value {
+        normalize_field(rows, &series, along_x, basis, 0);
+    } else {
+        normalize_field(rows, &series, along_x, basis, 1);
+        normalize_field(rows, &series, along_x, basis, 2);
+    }
+}
+
+/// Normalize one of a channel's fields, `0` the value, `1` the interval's
+/// start, `2` its end, per series.
+fn normalize_field(
+    rows: &mut [PreparedRow],
+    series: &[(ValueKey, Vec<usize>)],
+    along_x: bool,
+    basis: NormalizeBasis,
+    field: usize,
+) {
+    let slot = |row: &PreparedRow| -> Option<Value> {
+        match (along_x, field) {
+            (true, 0) => Some(row.x.clone()),
+            (false, 0) => Some(row.y.clone()),
+            (true, 1) => row.x1.clone(),
+            (false, 1) => row.y1.clone(),
+            (true, _) => row.x2.clone(),
+            (false, _) => row.y2.clone(),
         }
-        .as_number()
-        .unwrap_or(f64::NAN)
     };
+    let read =
+        |row: &PreparedRow| -> f64 { slot(row).and_then(|v| v.as_number()).unwrap_or(f64::NAN) };
     for (_, members) in series {
         let values: Vec<f64> = members.iter().map(|i| read(&rows[*i])).collect();
+        if field != 0 && values.iter().all(|v| *v == 0. || !v.is_finite()) {
+            continue;
+        }
         let finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
         if finite.is_empty() {
             continue;
@@ -504,21 +578,28 @@ pub fn normalize(rows: &mut [PreparedRow], axis: Axis, basis: NormalizeBasis) {
                 })
             }
         };
-        for i in members {
+        for &i in members {
             let v = read(&rows[i]);
             if !v.is_finite() {
                 continue;
             }
             let normalized = Value::Number(map(v));
             let row = &mut rows[i];
-            if along_x {
-                row.x = normalized;
-                row.x1 = None;
-                row.x2 = None;
-            } else {
-                row.y = normalized;
-                row.y1 = None;
-                row.y2 = None;
+            match (along_x, field) {
+                (true, 0) => {
+                    row.x = normalized;
+                    row.x1 = None;
+                    row.x2 = None;
+                }
+                (false, 0) => {
+                    row.y = normalized;
+                    row.y1 = None;
+                    row.y2 = None;
+                }
+                (true, 1) => row.x1 = Some(normalized),
+                (false, 1) => row.y1 = Some(normalized),
+                (true, _) => row.x2 = Some(normalized),
+                (false, _) => row.y2 = Some(normalized),
             }
         }
     }
