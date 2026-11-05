@@ -160,7 +160,7 @@ fn e07() -> Plot {
     Plot::plot()
         .margin_left(0.)
         .margin_right(0.)
-        .projection(crate::examples::albers())
+        .projection("albers")
         .fx_scale(|fx| {
             fx.interval("10 years")
                 .tick_format(|v: &Value| {

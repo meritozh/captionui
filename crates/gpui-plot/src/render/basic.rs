@@ -1534,6 +1534,9 @@ fn draw_geometries(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
     let style = &prepared.mark.style;
     let channel = prepared.mark.channels.path.clone();
+    // Plot clips a projection to the frame.
+    let clip = ctx.clip;
+    ctx.clip = clip || ctx.frame.projection.is_some();
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
             let value = match &channel {
@@ -1606,6 +1609,7 @@ fn draw_geometries(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             }
         }
     });
+    ctx.clip = clip;
 }
 
 fn collect_points(geometry: &crate::geo::Geometry, out: &mut Vec<[f64; 2]>) {

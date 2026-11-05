@@ -112,7 +112,7 @@ fn e04() -> Plot {
 
 fn e05() -> Plot {
     Plot::plot()
-        .projection(crate::examples::albers())
+        .projection("albers")
         .color(|c| c.scheme("YlGnBu"))
         .mark(
             density(data::walmarts())

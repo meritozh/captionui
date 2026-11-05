@@ -197,7 +197,8 @@ fn draw_cells(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                 );
                 paint::paint_fill(&outline, fill, ctx.window);
             }
-            if prepared.mark.channels.stroke.is_some() {
+            // Plot's voronoi strokes `currentColor` unless it is filled.
+            if prepared.mark.channels.stroke.is_some() || prepared.mark.channels.fill.is_none() {
                 let stroke = paint::alpha(
                     colors.stroke(*index),
                     ctx.row_stroke_opacity(prepared, &prepared.rows[*index]) * ctx.appear,

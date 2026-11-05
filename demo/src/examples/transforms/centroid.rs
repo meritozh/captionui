@@ -35,18 +35,12 @@ fn e01() -> Plot {
         )
 }
 
-/// Gap: the library's `voronoi` strokes nothing by default (Plot's strokes
-/// `currentColor`), so the stroke is explicit; and it ignores the plot's
-/// projection, so the centroids are pre-projected (see
-/// [`crate::examples::pre_projected`]). The faithful form is
-/// `voronoi(counties).centroid().plot().projection(albers)`.
+/// `Plot.voronoi(counties, Plot.centroid()).plot({projection: "albers"})`
 fn e02() -> Plot {
-    let (counties, plot) = crate::examples::pre_projected(
-        data::counties(),
-        &crate::examples::albers(),
-        crate::examples::geo_centroid,
-    );
-    plot.mark(voronoi(counties).x("x").y("y").stroke("currentColor"))
+    voronoi(data::counties())
+        .centroid()
+        .plot()
+        .projection("albers")
 }
 
 fn e03() -> Plot {

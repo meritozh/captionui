@@ -136,7 +136,7 @@ fn e06() -> Plot {
     Plot::plot()
         .margin(0.)
         .padding(0.)
-        .projection(crate::examples::albers())
+        .projection("albers")
         .fy_scale(|fy| fy.interval("10 years"))
         .mark(geo(data::statemesh()).stroke_opacity(0.2))
         .mark(geo(data::nation()))

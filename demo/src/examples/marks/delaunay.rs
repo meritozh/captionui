@@ -107,7 +107,7 @@ fn e06() -> Plot {
 
 fn e07() -> Plot {
     Plot::plot()
-        .projection(crate::examples::albers())
+        .projection("albers")
         .mark(geo(data::nation()))
         .mark(
             dot(data::walmarts())
