@@ -60,40 +60,15 @@ fn e01() -> Plot {
         )
 }
 
-/// The docs reduce each site and variety's yields with
-/// `Plot.groupY({x1: "first", x2: "last", stroke: ([x1, x2]) => x2 - x1})`;
-/// a group reducer can't be a function here, so the groups are reduced up
-/// front into `x1`, `x2` and `change` and the arrow draws one per row.
+/// `Plot.groupY({x1: "first", x2: "last", stroke: ([x1, x2]) => x2 - x1})`:
+/// the custom stroke reducer sees each group's yields.
 fn e02() -> Plot {
-    let barley = data::barley();
-    let mut keys: Vec<(String, String)> = Vec::new();
-    let mut groups: HashMap<(String, String), Vec<f64>> = HashMap::new();
-    for row in barley.rows() {
-        let key = (
-            row.value("site").label().to_string(),
-            row.value("variety").label().to_string(),
-        );
-        if !groups.contains_key(&key) {
-            keys.push(key.clone());
-        }
-        groups.entry(key).or_default().push(row.num("yield"));
-    }
-    let grouped = Dataset::new(keys.into_iter().map(|key| {
-        let yields = &groups[&key];
-        let (x1, x2) = (yields[0], yields[yields.len() - 1]);
-        Table::empty()
-            .with("site", Value::text(key.0))
-            .with("variety", Value::text(key.1))
-            .with("x1", Value::Number(x1))
-            .with("x2", Value::Number(x2))
-            .with("change", Value::Number(x2 - x1))
-    }));
     Plot::plot()
         .height(800.)
         .margin_left(110.)
         .margin_right(90.)
         .grid(true)
-        .x(|x| x.nice(true).label("yield"))
+        .x(|x| x.nice(true))
         .y(|y| y.inset(5.))
         .color(|c| {
             c.scheme("spectral")
@@ -103,20 +78,36 @@ fn e02() -> Plot {
         })
         .mark(frame())
         .mark(
-            arrow(grouped)
-                .x1("x1")
-                .x2("x2")
+            arrow(data::barley())
+                .x("yield")
                 .y("variety")
                 .fy("site")
-                .stroke("change")
+                .stroke("yield")
+                // Gap: a stroke field implies `z` even when stroke is a group
+                // output (Plot's maybeSubgroup skips outputs), splitting every
+                // group by yield; `z: null` undoes that.
+                .z(Value::Null)
                 .stroke_width(2.)
+                .group_y()
+                .group_output("x1", GroupReducer::First)
+                .group_output("x2", GroupReducer::Last)
+                .group_output(
+                    "stroke",
+                    GroupReducer::custom(|values, _| {
+                        let first = values.first().and_then(Value::as_number);
+                        let last = values.last().and_then(Value::as_number);
+                        match (first, last) {
+                            (Some(x1), Some(x2)) => Value::Number(x2 - x1),
+                            _ => Value::Null,
+                        }
+                    }),
+                )
                 .sort_domain_by(sort_by("y", "x1", GroupReducer::Median, true))
                 .sort_domain_by(sort_by("fy", "x1", GroupReducer::Median, true)),
         )
 }
 
-/// The olympians with a height, each height floored to its 10cm facet as
-/// Plot's `fy: {interval: 0.1}` does.
+/// `olympians.filter((d) => d.height)`, faceted by 10cm of height.
 fn e03() -> Plot {
     let olympians = Dataset::new(
         data::olympians()
@@ -129,14 +120,10 @@ fn e03() -> Plot {
         .fy_scale(|fy| {
             fy.grid(true)
                 .tick_format(".1f")
+                .interval(0.1) // 10cm
                 .reverse(true)
-                .label("height")
         })
-        .mark(
-            box_x(olympians)
-                .x("weight")
-                .fy(Channel::number(|d| (d.num("height") * 10.).floor() / 10.)),
-        )
+        .mark(box_x(olympians).x("weight").fy("height"))
 }
 
 fn e04() -> Plot {

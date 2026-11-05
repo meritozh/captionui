@@ -48,8 +48,6 @@ fn e01() -> Plot {
         )
 }
 
-/// `Plot.group({fill: "median"}, {x: hour, y: "location", …})` groups on
-/// both x and y; a group here reads one axis, so this groups by x.
 fn e02() -> Plot {
     Plot::plot()
         .margin_left(120.)
@@ -126,19 +124,18 @@ fn e05() -> Plot {
 }
 
 /// The docs' custom `transform: (data, facets) => …` keeps the Michigan
-/// divisions; a mark takes no custom transform here, so the data is
-/// filtered up front.
+/// divisions of each facet; a mark takes no custom transform here, and the
+/// mark's `filter` does the same job.
 fn e06() -> Plot {
-    let bls = Dataset::new(
-        data::bls_metro_unemployment()
-            .rows()
-            .iter()
-            .filter(|d| d.text("division").is_some_and(|d| d.contains(", MI ")))
-            .cloned(),
-    );
     Plot::plot()
         .y(|y| y.grid(true).label("Unemployment (%)"))
         .color(|c| c.domain([false, true]).colors(["#ccc", "red"]))
         .mark(rule_y([0.]))
-        .mark(line(bls).x("date").y("unemployment").z("division"))
+        .mark(
+            line(data::bls_metro_unemployment())
+                .filter(|d| d.text("division").is_some_and(|d| d.contains(", MI ")))
+                .x("date")
+                .y("unemployment")
+                .z("division"),
+        )
 }
