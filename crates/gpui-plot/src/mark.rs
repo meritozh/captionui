@@ -1019,6 +1019,11 @@ pub struct Mark {
     /// The mark's own data, Plot's first argument to a mark: `Plot.dot(data,
     /// …)`. `None` reads the plot's data.
     pub data: Option<crate::table::Dataset>,
+    /// Whether `z` was implied by a color field rather than given: Plot drops
+    /// it when the field turns out quantitative.
+    pub implied_z: bool,
+    /// Plot's `hexbin` transform: its outputs and its `binWidth`, in pixels.
+    pub hexbin: Option<(Vec<GroupOutput>, f32)>,
     /// Plot's `treeNode` (`false`) or `treeLink` (`true`) transform.
     pub tree: Option<(crate::hierarchy::TreeSpec, bool)>,
     /// A tree transform's `treeFilter`: `node:internal` or `node:external`.
@@ -1477,6 +1482,8 @@ impl Mark {
         Self {
             kind,
             data: None,
+            implied_z: false,
+            hexbin: None,
             tree: None,
             tree_filter: None,
             density: None,
@@ -1573,6 +1580,7 @@ impl Mark {
 
     /// Set the series channel.
     pub fn z(mut self, channel: impl IntoChannel) -> Self {
+        self.implied_z = false;
         self.channels.z = Some(channel.into_channel());
         self
     }
@@ -1596,10 +1604,13 @@ impl Mark {
     /// A color named by field is also the mark's series, Plot's implicit
     /// `z`: `fill: "sex"` groups, stacks and legends by sex.
     fn series_from_color(&mut self, color: &ColorChannel) {
+        // Plot's `maybeZ`: a color field is the series only when its values
+        // are ordinal, which the rows decide (see `implied_z`).
         if let Some(field) = color.field()
             && self.channels.z.is_none()
         {
             self.channels.z = Some(crate::table::Channel::Field(field.clone()));
+            self.implied_z = true;
         }
     }
 
@@ -2194,6 +2205,24 @@ impl Mark {
         self
     }
 
+    /// Plot's `hexbin` transform: bin the projected points into hexagons
+    /// `bin_width` pixels across and reduce each into `outputs` — `"fill"`,
+    /// `"stroke"`, `"r"`, `"text"` … A dot drawn through it is a hexagon
+    /// unless given another symbol.
+    pub fn hexbin_output(mut self, name: impl Into<SharedString>, reducer: GroupReducer) -> Self {
+        let (mut outputs, width) = self.hexbin.take().unwrap_or((Vec::new(), 20.));
+        outputs.push(GroupOutput::new(name, reducer));
+        self.hexbin = Some((outputs, width));
+        self
+    }
+
+    /// The hexbin transform's `binWidth`.
+    pub fn hexbin_width(mut self, pixels: f32) -> Self {
+        let (outputs, _) = self.hexbin.take().unwrap_or((Vec::new(), 20.));
+        self.hexbin = Some((outputs, pixels));
+        self
+    }
+
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
         let outputs = self.bin.take().map(|bin| bin.outputs).unwrap_or_default();
@@ -2767,6 +2796,18 @@ macro_rules! mark_builder {
             /// Clip the mark to the plot area, Plot's `clip: true`.
             pub fn clip(mut self, clip: bool) -> Self {
                 self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::hexbin_output`].
+            pub fn hexbin_output(mut self, name: impl Into<SharedString>, reducer: GroupReducer) -> Self {
+                self.0 = self.0.hexbin_output(name, reducer);
+                self
+            }
+
+            /// See [`Mark::hexbin_width`].
+            pub fn hexbin_width(mut self, pixels: f32) -> Self {
+                self.0 = self.0.hexbin_width(pixels);
                 self
             }
 

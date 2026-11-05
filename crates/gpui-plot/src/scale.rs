@@ -619,6 +619,8 @@ pub struct ColorScale {
     thresholds: Option<Vec<f64>>,
     /// Plot's `unknown`: the color of a value the scale cannot place.
     unknown: Option<Hsla>,
+    /// Whether the scale's domain is dates.
+    temporal: bool,
 }
 
 impl ColorScale {
@@ -634,6 +636,7 @@ impl ColorScale {
             transform: Transform::Linear,
             thresholds: None,
             unknown: None,
+            temporal: false,
         }
     }
 
@@ -647,7 +650,19 @@ impl ColorScale {
             transform: Transform::Linear,
             thresholds: None,
             unknown: None,
+            temporal: false,
         }
+    }
+
+    /// Mark the scale's domain as dates, for its legend.
+    pub fn with_temporal(mut self, temporal: bool) -> Self {
+        self.temporal = temporal;
+        self
+    }
+
+    /// Whether the scale's domain is dates.
+    pub fn is_temporal(&self) -> bool {
+        self.temporal
     }
 
     /// Center the scale on `pivot`, Plot's diverging scales.

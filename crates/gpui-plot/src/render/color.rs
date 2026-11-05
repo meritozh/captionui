@@ -110,8 +110,11 @@ pub fn color_scale(
         .scheme
         .as_deref()
         .is_some_and(crate::css::is_diverging);
+    let temporal = sample.iter().any(|v| matches!(v, Value::Date(_)));
     let kind = options.r#type.unwrap_or(if !quantitative {
         ScaleType::Categorical
+    } else if temporal {
+        ScaleType::Utc
     } else if scheme_diverging || options.pivot.is_some() {
         ScaleType::Diverging
     } else {
@@ -221,7 +224,8 @@ pub fn color_scale(
             };
             let mut scale = ColorScale::continuous(extent, range)
                 .with_transform(transform)
-                .with_unknown(unknown);
+                .with_unknown(unknown)
+                .with_temporal(temporal);
             if diverging {
                 // Plot's diverging scales are symmetric about the pivot: the
                 // shorter side stretches so equal distances get equal color.

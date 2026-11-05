@@ -55,17 +55,26 @@ impl Reducer {
                     Value::Number(numbers.iter().sum::<f64>() / numbers.len() as f64)
                 }
             }
-            Reducer::Min => numbers
+            // The least or greatest value itself, so dates stay dates.
+            Reducer::Min => values
                 .iter()
-                .copied()
-                .reduce(f64::min)
-                .map(Value::Number)
+                .filter(|v| v.as_number().is_some_and(|n| !n.is_nan()))
+                .min_by(|a, b| {
+                    a.as_number()
+                        .unwrap_or(0.)
+                        .total_cmp(&b.as_number().unwrap_or(0.))
+                })
+                .cloned()
                 .unwrap_or(Value::Null),
-            Reducer::Max => numbers
+            Reducer::Max => values
                 .iter()
-                .copied()
-                .reduce(f64::max)
-                .map(Value::Number)
+                .filter(|v| v.as_number().is_some_and(|n| !n.is_nan()))
+                .max_by(|a, b| {
+                    a.as_number()
+                        .unwrap_or(0.)
+                        .total_cmp(&b.as_number().unwrap_or(0.))
+                })
+                .cloned()
                 .unwrap_or(Value::Null),
             Reducer::First => values
                 .iter()

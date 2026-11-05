@@ -2789,6 +2789,8 @@ impl PlotTrait for Plot {
             render::apply_dodge(marks, &dodge_frame);
         }
         let peak_frame = cell_frame(&frame, &grid, 0);
+        render::apply_hexbin(&mut facets, &peak_frame);
+        render::apply_quantity_scales(&mut facets, &self.scales.r, &self.scales.opacity);
         for mark in facets.iter_mut().flatten() {
             mark.density_max = render::radial::density_peak(mark, &peak_frame);
         }
@@ -3761,9 +3763,15 @@ impl Plot {
                 window,
             );
         }
-        // Plot's ramp ticks: about one per 64 pixels, labelled below the bar.
+        // Plot's ramp ticks: about one per 64 pixels, labelled below the bar;
+        // a temporal scale ticks at calendar boundaries.
         let count = (RAMP_WIDTH / 64.).round() as usize;
-        let ticks = crate::ticks::linear_ticks([lo, hi], count, crate::scale::Transform::Linear);
+        let temporal = scale.is_temporal();
+        let ticks = if temporal {
+            crate::ticks::time_ticks([lo, hi], count)
+        } else {
+            crate::ticks::linear_ticks([lo, hi], count, crate::scale::Transform::Linear)
+        };
         let format = crate::format::tick_format(
             lo,
             hi,
@@ -3787,6 +3795,13 @@ impl Plot {
             );
             let label: SharedString = match &self.scales.color.tick_format {
                 Some(crate::options::TickFormat::Fn(f)) => f(&Value::Number(tick)).into(),
+                _ if temporal => crate::format::format_time(
+                    "%Y",
+                    Value::date_from_millis(tick as i64)
+                        .as_date()
+                        .unwrap_or_default(),
+                )
+                .into(),
                 _ => format.format(tick).into(),
             };
             text(label, window).paint_at(

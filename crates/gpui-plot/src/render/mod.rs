@@ -70,6 +70,9 @@ pub struct PreparedRow {
     /// Where the row sits across the axis a dodge packs along, in pixels from
     /// that axis's start. Set by [`apply_dodge`] once the frame is known.
     pub dodge_offset: Option<f32>,
+    /// A position in plot pixels that overrides the scales, for transforms
+    /// that work in pixels (Plot's `hexbin`).
+    pub pixel: Option<(f32, f32)>,
 }
 
 impl PreparedRow {
@@ -420,6 +423,27 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     }
 
     let source_rows_for_raster = source.clone();
+    // Plot's `maybeZ`: a `z` implied by a color field is dropped when the
+    // field is quantitative (numbers or dates), so a continuous fill colors
+    // rows without splitting them into series.
+    let dropped_z;
+    let channels = if mark.implied_z
+        && let Some(z) = &channels.z
+        && source
+            .rows()
+            .iter()
+            .map(|row| z.read(row))
+            .find(|v| !v.is_null())
+            .is_some_and(|v| v.kind().is_quantitative())
+    {
+        dropped_z = Channels {
+            z: None,
+            ..channels.clone()
+        };
+        &dropped_z
+    } else {
+        channels
+    };
     let mut rows: Vec<PreparedRow> = source
         .rows()
         .iter()
@@ -609,8 +633,17 @@ pub fn apply_quantity_scales(
     if !radii.is_empty() {
         let max = radii.iter().copied().fold(0., f64::max);
         let [d0, d1] = r.numeric_domain().unwrap_or([0., max]);
-        let range = match &r.range {
-            Some(range) if range.len() >= 2 => [range[0], range[1]],
+        // Plot's radius hint: a hexbin's `r` output runs to half its bin.
+        let hint = facets.iter().flatten().find_map(|m| {
+            m.mark
+                .hexbin
+                .as_ref()
+                .filter(|(o, _)| o.iter().any(|o| o.name == "r"))
+                .map(|(_, w)| *w as f64 / 2.)
+        });
+        let range = match (&r.range, hint) {
+            (Some(range), _) if range.len() >= 2 => [range[0], range[1]],
+            (_, Some(hint)) => [0., hint],
             _ => {
                 // Plot's `inferRadialRange`: the median of the marks' first
                 // quartiles of positive values maps to three pixels.
@@ -732,6 +765,135 @@ pub fn apply_symbol_scale(
                 row.symbol = Some(range[index % range.len()]);
             }
         }
+    }
+}
+
+/// Plot's `hexbin` transform, run once the frame is known: each mark's
+/// rows are placed in pixels, binned into pointy-top hexagons `binWidth`
+/// across (offset half a pixel, as Plot's are), per `z` series, and each bin
+/// becomes a row at its centre carrying its outputs.
+pub fn apply_hexbin(facets: &mut [Vec<PreparedMark>], frame: &Frame) {
+    for prepared in facets.iter_mut().flatten() {
+        let Some((outputs, width)) = prepared.mark.hexbin.clone() else {
+            continue;
+        };
+        let dx = width as f64;
+        let dy = dx * 1.5 / 3f64.sqrt();
+        let mut bins: Vec<((Option<crate::value::ValueKey>, i64, i64), Vec<usize>)> = Vec::new();
+        for (index, row) in prepared.rows.iter().enumerate() {
+            let Some(p) = crate::render::basic::position_in(prepared, frame, row) else {
+                continue;
+            };
+            let (px, py) = (p.x.as_f32() as f64, p.y.as_f32() as f64);
+            // d3-hexbin's rounding, as Plot's `hbin`.
+            let mut py = py / dy;
+            let mut pj = py.round();
+            let mut px = (px - 0.5) / dx - ((pj as i64) & 1) as f64 / 2.;
+            let mut pi = px.round();
+            let py1 = py - pj;
+            if py1.abs() * 3. > 1. {
+                let px1 = px - pi;
+                let pi2 = pi + if px < pi { -0.5 } else { 0.5 };
+                let pj2 = pj + if py < pj { -1. } else { 1. };
+                let px2 = px - pi2;
+                let py2 = py - pj2;
+                if px1 * px1 + py1 * py1 > px2 * px2 + py2 * py2 {
+                    pi = pi2 + if (pj as i64) & 1 == 1 { 0.5 } else { -0.5 };
+                    pj = pj2;
+                }
+            }
+            let _ = (&mut px, &mut py);
+            let key = (row.z.as_ref().map(Value::key), (pi * 2.) as i64, pj as i64);
+            match bins.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, members)) => members.push(index),
+                None => bins.push((key, vec![index])),
+            }
+        }
+        let mark = prepared.mark.clone();
+        let rows: Vec<PreparedRow> = bins
+            .into_iter()
+            .map(|((_, pi2, pj), members)| {
+                let (pi, pj) = (pi2 as f64 / 2., pj as f64);
+                let cx = (pi + ((pj as i64) & 1) as f64 / 2.) * dx + 0.5;
+                let cy = pj * dy;
+                let mut row = prepared.rows[members[0]].clone();
+                // The bin's size and opacity come from its outputs alone.
+                row.r = None;
+                row.r_value = None;
+                row.opacity = None;
+                row.opacity_value = None;
+                let records: Vec<&Table> = members.iter().map(|i| &prepared.rows[*i].row).collect();
+                for output in &outputs {
+                    let channel_value = |r: &PreparedRow| -> Value {
+                        match output.name.as_ref() {
+                            "fill" => mark
+                                .channels
+                                .fill
+                                .as_ref()
+                                .and_then(|c| c.scaled_value(&r.row))
+                                .unwrap_or(Value::Null),
+                            "stroke" => mark
+                                .channels
+                                .stroke
+                                .as_ref()
+                                .and_then(|c| c.scaled_value(&r.row))
+                                .unwrap_or(Value::Null),
+                            "x" => r.x_value().clone(),
+                            "y" => r.y_value().clone(),
+                            name => r.row.value(name),
+                        }
+                    };
+                    let values: Vec<Value> = members
+                        .iter()
+                        .map(|i| match &output.input {
+                            Some(field) => prepared.rows[*i].row.value(field),
+                            None => channel_value(&prepared.rows[*i]),
+                        })
+                        .collect();
+                    let reduced = output.reducer.reduce(&values, &records);
+                    match output.name.as_ref() {
+                        "r" => row.r_value = reduced.as_number(),
+                        "fillOpacity" | "opacity" => row.opacity_value = reduced.as_number(),
+                        _ => {}
+                    }
+                    row.row = row
+                        .row
+                        .clone()
+                        .with(format!("$hexbin:{}", output.name), reduced);
+                }
+                row.pixel = Some((cx as f32, cy as f32));
+                row
+            })
+            .collect();
+        // The outputs bind to the mark's channels.
+        let mut mark = prepared.mark.clone();
+        for output in &outputs {
+            let field = || format!("$hexbin:{}", output.name);
+            match output.name.as_ref() {
+                "fill" => {
+                    mark.channels.fill = Some(crate::style::ColorChannel::Field(field().into()))
+                }
+                "stroke" => {
+                    mark.channels.stroke = Some(crate::style::ColorChannel::Field(field().into()))
+                }
+                "text" => mark.channels.text = Some(crate::table::Channel::Field(field().into())),
+                "title" => mark.channels.title = Some(crate::table::Channel::Field(field().into())),
+                _ => {}
+            }
+        }
+        // A dot through a hexbin is a hexagon, its radius half the bin width
+        // unless an output sizes it.
+        if mark.kind == MarkKind::Dot {
+            if mark.channels.symbol.is_none() {
+                mark.style.symbol = crate::style::Symbol::Hexagon;
+            }
+            if !outputs.iter().any(|o| o.name == "r") && mark.channels.r.is_none() {
+                mark.style.radius = width / 2.;
+            }
+            // Plot's dot fills when a fill output or channel is given.
+        }
+        prepared.mark = mark;
+        prepared.rows = rows;
     }
 }
 
@@ -987,6 +1149,7 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
             .filter(|channel| !channel.is_scaled())
             .map(|channel| channel.read(row)),
         dodge_offset: None,
+        pixel: None,
     }
 }
 
@@ -1898,6 +2061,7 @@ fn stack_rows_from_series(
                 r_value: None,
                 opacity_value: None,
                 dodge_offset: None,
+                pixel: None,
             });
             if group_by_y {
                 row.x1 = Some(Value::Number(point.y0));

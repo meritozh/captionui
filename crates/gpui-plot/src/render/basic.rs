@@ -1728,6 +1728,10 @@ pub fn position_in(
     frame: &Frame,
     row: &PreparedRow,
 ) -> Option<Point<Pixels>> {
+    // A pixel-space transform (Plot's hexbin) placed the row itself.
+    if let Some((x, y)) = row.pixel {
+        return Some(point(px(x), px(y)));
+    }
     // Under Plot's `projection`, x and y are longitude and latitude.
     if let Some(projection) = &frame.projection {
         let (lon, lat) = (row.x_value().as_number()?, row.y_value().as_number()?);
