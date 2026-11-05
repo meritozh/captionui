@@ -266,6 +266,14 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // the channels may read. Plot applies them to the mark's data in the same
     // order, and a mark's `shuffle` is only a reordering of what is left.
     let mut source = data.clone();
+    if let Some(channel) = &mark.box_value {
+        source = Dataset::new(source.rows().iter().map(|row| {
+            let value = channel.read(row);
+            row.clone()
+                .with("$box:x", value.clone())
+                .with("$box:y", value)
+        }));
+    }
     if let Some(keep) = &mark.filter {
         source = Dataset::new(source.rows().iter().filter(|row| (keep.0)(row)).cloned());
     }
@@ -379,6 +387,9 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     if let Some((axis, basis)) = mark.normalize_by {
         stack::normalize(&mut rows, axis, basis);
     }
+    if let Some(axis) = mark.outliers {
+        rows = outlier_rows(rows, axis);
+    }
     // A select over an axis (`selectMinX`) reads the mark's resolved channel,
     // after the transforms that rewrite it, per `z` series (or group field).
     if let Some(config) = mark.select.as_ref().filter(|config| config.axis.is_some()) {
@@ -420,6 +431,57 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         rows,
         dodge_along_x: false,
     }
+}
+
+/// Keep each `z` group's rows beyond its whiskers, Plot's box outliers.
+fn outlier_rows(rows: Vec<PreparedRow>, axis: Axis) -> Vec<PreparedRow> {
+    let read = |row: &PreparedRow| {
+        if axis == Axis::X {
+            row.x_value().clone()
+        } else {
+            row.y_value().clone()
+        }
+    };
+    let mut groups: Vec<(crate::value::ValueKey, Vec<Value>)> = Vec::new();
+    for row in &rows {
+        let key = row
+            .z
+            .as_ref()
+            .map(Value::key)
+            .unwrap_or_else(|| Value::Null.key());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, values)) => values.push(read(row)),
+            None => groups.push((key, vec![read(row)])),
+        }
+    }
+    let bounds: Vec<(crate::value::ValueKey, f64, f64)> = groups
+        .into_iter()
+        .map(|(key, values)| {
+            let lo = crate::mark::whisker_low(&values)
+                .as_number()
+                .unwrap_or(f64::NEG_INFINITY);
+            let hi = crate::mark::whisker_high(&values)
+                .as_number()
+                .unwrap_or(f64::INFINITY);
+            (key, lo, hi)
+        })
+        .collect();
+    rows.into_iter()
+        .filter(|row| {
+            let key = row
+                .z
+                .as_ref()
+                .map(Value::key)
+                .unwrap_or_else(|| Value::Null.key());
+            let Some(v) = read(row).as_number() else {
+                return false;
+            };
+            bounds
+                .iter()
+                .find(|(k, _, _)| *k == key)
+                .is_some_and(|(_, lo, hi)| v < *lo || v > *hi)
+        })
+        .collect()
 }
 
 /// Keep the row of each group with the least or greatest value on the

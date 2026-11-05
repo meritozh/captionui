@@ -965,6 +965,8 @@ pub(crate) fn paint_facet_labels(
     grid: &Grid,
     fx_options: Option<&crate::options::ScaleOptions>,
     fy_options: Option<&crate::options::ScaleOptions>,
+    fx_bottom: bool,
+    fy_left: bool,
 ) {
     let format = |options: Option<&crate::options::ScaleOptions>,
                   keys: &[crate::value::ValueKey]|
@@ -999,8 +1001,13 @@ pub(crate) fn paint_facet_labels(
                 font.clone(),
                 window,
             );
-            // Above the plot, in the gutter the insets reserved for it.
-            let y = plot.origin.y - px(theme.label_size.as_f32() + FACET_LABEL_GAP);
+            // Above the plot (below it when the x axis is absent or on
+            // top), in the margin reserved for it.
+            let y = if fx_bottom {
+                plot.origin.y + plot.size.height + px(FACET_LABEL_GAP + 3.)
+            } else {
+                plot.origin.y - px(theme.label_size.as_f32() + FACET_LABEL_GAP)
+            };
             label.paint_at(
                 point(plot.origin.x + px(start + width / 2.), y),
                 TextAlign::Center,
@@ -1023,14 +1030,22 @@ pub(crate) fn paint_facet_labels(
                 font.clone(),
                 window,
             );
-            // Right of the plot, centred on the facet's band.
-            let x = plot.origin.x + plot.size.width + px(FACET_LABEL_GAP);
+            // Right of the plot (left when the y axis is absent or on the
+            // right), centred on the facet's band.
+            let (x, align) = if fy_left {
+                (plot.origin.x - px(FACET_LABEL_GAP), TextAlign::Right)
+            } else {
+                (
+                    plot.origin.x + plot.size.width + px(FACET_LABEL_GAP),
+                    TextAlign::Left,
+                )
+            };
             label.paint_at(
                 point(
                     x,
                     plot.origin.y + px(start + height / 2. - theme.label_size.as_f32() / 2.),
                 ),
-                TextAlign::Left,
+                align,
                 None,
                 window,
                 cx,

@@ -910,7 +910,12 @@ fn draw_rules_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         for (index, row) in prepared.rows.iter().enumerate() {
             // A rule reads its own `x`; an `x1` stands in when only the
             // interval is set.
-            let Some(x) = ctx.frame.x.scale.position(row.x_value()) else {
+            // A rule without an x sits at the frame's middle, as Plot's does.
+            let Some(x) = (if row.x_value().is_null() {
+                Some(ctx.frame.plot.size.width.as_f32() / 2.)
+            } else {
+                ctx.frame.x.scale.position(row.x_value())
+            }) else {
                 continue;
             };
             // Plot's ruleX spans `y1`..`y2` when given them, else the frame.
@@ -960,7 +965,11 @@ fn draw_rules_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let stroke_width = prepared.mark.style.stroke_width;
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let Some(y) = ctx.frame.y.scale.position(row.y_value()) else {
+            let Some(y) = (if row.y_value().is_null() {
+                Some(ctx.frame.plot.size.height.as_f32() / 2.)
+            } else {
+                ctx.frame.y.scale.position(row.y_value())
+            }) else {
                 continue;
             };
             let (left, right) = match (&row.x1, &row.x2) {
