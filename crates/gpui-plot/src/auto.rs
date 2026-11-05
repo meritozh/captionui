@@ -80,6 +80,17 @@ pub fn build(data: &[Table], x: Option<&str>, y: Option<&str>, color: Option<&st
                 })
             }
         }
+        // Two ordinal dimensions → a dot per category pair. A bar needs a
+        // quantitative length, which neither axis has.
+        (Some(xk), Some(yk)) if !xk.is_quantitative() && !yk.is_quantitative() => {
+            plot.dot(|mark| {
+                let mark = mark.x(x.unwrap()).y(y.unwrap());
+                match &color {
+                    Some(field) if field != "count" => mark.z(field.as_str()),
+                    _ => mark,
+                }
+            })
+        }
         // x ordinal, y quantitative → vertical bars.
         (Some(_), Some(yk)) if yk.is_quantitative() => plot.bar_y(|mark| {
             let mark = mark.x(x.unwrap()).y(y.unwrap());
@@ -193,18 +204,19 @@ fn bin2(data: &[Table], x: &str, y: &str, per_axis: usize) -> Vec<[f64; 5]> {
         None => return Vec::new(),
     };
     let (xw, yw) = ((x1 - x0) / per_axis as f64, (y1 - y0) / per_axis as f64);
-    let xslots = ((x1 - x0) / xw).round() as usize;
-    let yslots = ((y1 - y0) / yw).round() as usize;
-    let mut grid = vec![0usize; (xslots + 1) * (yslots + 1)];
+    // `per_axis` cells per axis; the maximum lands in the last cell rather
+    // than in an extra one past the extent.
+    let slots = per_axis.max(1);
+    let mut grid = vec![0usize; slots * slots];
     for (px, py) in &points {
-        let xi = (((px - x0) / xw).floor() as usize).min(xslots);
-        let yi = (((py - y0) / yw).floor() as usize).min(yslots);
-        grid[xi + yi * (xslots + 1)] += 1;
+        let xi = (((px - x0) / xw).floor().max(0.) as usize).min(slots - 1);
+        let yi = (((py - y0) / yw).floor().max(0.) as usize).min(slots - 1);
+        grid[xi + yi * slots] += 1;
     }
     let mut cells = Vec::new();
-    for yi in 0..=yslots {
-        for xi in 0..=xslots {
-            let count = grid[xi + yi * (xslots + 1)];
+    for yi in 0..slots {
+        for xi in 0..slots {
+            let count = grid[xi + yi * slots];
             if count > 0 {
                 cells.push([
                     x0 + xi as f64 * xw,
@@ -255,7 +267,10 @@ fn monotonic_x(dataset: &Dataset, field: &str) -> bool {
         .map(|row| row.value(field))
         .filter(|v| !v.is_null())
         .collect();
-    values.windows(2).all(|pair| pair[0] < pair[1])
+    // Plot's `isMonotonic`: never decreasing or never increasing, so sorted
+    // data with ties, or data sorted descending, still reads as a line.
+    values.windows(2).all(|pair| pair[0] <= pair[1])
+        || values.windows(2).all(|pair| pair[0] >= pair[1])
 }
 
 #[cfg(test)]

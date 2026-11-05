@@ -159,9 +159,9 @@ pub fn convex_hull(points: &[Point2]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..points.len()).collect();
     order.sort_by(|a, b| {
         let (a, b) = (points[*a], points[*b]);
-        a[0].partial_cmp(&b[0])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a[1].partial_cmp(&b[1]).unwrap_or(std::cmp::Ordering::Equal))
+        // `total_cmp` is a total order even with a NaN coordinate, which
+        // `sort_by` requires.
+        a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1]))
     });
     if order.len() < 3 {
         return order;

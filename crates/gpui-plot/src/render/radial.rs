@@ -44,7 +44,7 @@ fn center(ctx: &DrawContext<'_>) -> Point<gpui::Pixels> {
 
 fn radius(ctx: &DrawContext<'_>) -> f32 {
     let plot = ctx.frame.plot;
-    plot.size.width.as_f32().min(plot.size.height.as_f32()) / 2. - 8.
+    (plot.size.width.as_f32().min(plot.size.height.as_f32()) / 2. - 8.).max(0.)
 }
 
 fn values(prepared: &PreparedMark) -> Vec<Value> {
@@ -53,8 +53,14 @@ fn values(prepared: &PreparedMark) -> Vec<Value> {
         .iter()
         .map(|row| {
             // A pie reads its length from the value channel, which the bar
-            // interval carries after resolution.
-            row.y2.clone().unwrap_or_else(|| row.y_value().clone())
+            // interval carries after resolution. A share has to be a finite,
+            // non-negative number: a NaN would poison the total and a
+            // negative one would push the other slices past a full turn.
+            let value = row.y2.clone().unwrap_or_else(|| row.y_value().clone());
+            match value.as_number() {
+                Some(share) if share.is_finite() && share >= 0. => value,
+                _ => Value::Null,
+            }
         })
         .collect()
 }

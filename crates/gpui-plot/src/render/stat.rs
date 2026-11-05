@@ -93,44 +93,54 @@ pub fn draw_bollinger(prepared: &PreparedMark, ctx: &mut DrawContext<'_>, along_
     let style = &prepared.mark.style;
     let window = style.window.max(1);
     let k = style.k as f64;
-    let values: Vec<Option<f64>> = prepared
-        .rows
-        .iter()
-        .map(|row| {
-            if along_x {
-                row.x_value().as_number()
-            } else {
-                row.y_value().as_number()
-            }
-        })
-        .collect();
-
-    // Plot's window is anchored at its end and strict by default: a datum
-    // only gets a band once a full window of values precedes it.
-    let band: Vec<(usize, f64, f64)> = values
-        .iter()
-        .enumerate()
-        .skip(window - 1)
-        .filter_map(|(index, _)| {
-            let slice: Vec<f64> = values[index + 1 - window..=index]
-                .iter()
-                .copied()
-                .collect::<Option<Vec<f64>>>()?;
-            let mean = slice.iter().sum::<f64>() / window as f64;
-            let deviation = if window > 1 {
-                (slice
+    // The band summarizes each series on its own, in the order of the axis it
+    // runs along, so a window never spans two series or jumps back in time.
+    let value_of = |row: &crate::render::PreparedRow| {
+        if along_x {
+            row.x_value().as_number()
+        } else {
+            row.y_value().as_number()
+        }
+    };
+    let independent = |row: &crate::render::PreparedRow| {
+        if along_x {
+            row.y_value().clone()
+        } else {
+            row.x_value().clone()
+        }
+    };
+    let mut bands: Vec<Vec<(usize, f64, f64)>> = Vec::new();
+    for mut group in series_groups(prepared) {
+        group.sort_by_key(|(_, row)| independent(row));
+        let values: Vec<(usize, Option<f64>)> =
+            group.iter().map(|(index, row)| (*index, value_of(row))).collect();
+        // Plot's window is anchored at its end and strict by default: a datum
+        // only gets a band once a full window of values precedes it.
+        let band: Vec<(usize, f64, f64)> = (window - 1..values.len())
+            .filter_map(|end| {
+                let slice: Vec<f64> = values[end + 1 - window..=end]
                     .iter()
-                    .map(|value| (value - mean).powi(2))
-                    .sum::<f64>()
-                    / (window - 1) as f64)
-                    .sqrt()
-            } else {
-                0.
-            };
-            Some((index, mean, deviation))
-        })
-        .collect();
-    if band.len() < 2 {
+                    .map(|(_, value)| *value)
+                    .collect::<Option<Vec<f64>>>()?;
+                let mean = slice.iter().sum::<f64>() / window as f64;
+                let deviation = if window > 1 {
+                    (slice
+                        .iter()
+                        .map(|value| (value - mean).powi(2))
+                        .sum::<f64>()
+                        / (window - 1) as f64)
+                        .sqrt()
+                } else {
+                    0.
+                };
+                Some((values[end].0, mean, deviation))
+            })
+            .collect();
+        if band.len() >= 2 {
+            bands.push(band);
+        }
+    }
+    if bands.is_empty() {
         return;
     }
 
@@ -138,8 +148,6 @@ pub fn draw_bollinger(prepared: &PreparedMark, ctx: &mut DrawContext<'_>, along_
         // Plot's Bollinger band takes its mark's fill for the area and its
         // stroke for the mean line.
         let colors = crate::render::basic::Colors::resolve(prepared, ctx);
-        let fill_color = colors.fill(0);
-        let line_color = colors.stroke(0);
         let place = |ctx: &DrawContext<'_>, index: usize, value: f64| -> Option<Point<Pixels>> {
             let row = &prepared.rows[index];
             if along_x {
@@ -155,30 +163,35 @@ pub fn draw_bollinger(prepared: &PreparedMark, ctx: &mut DrawContext<'_>, along_
             }
         };
 
-        let mut upper: Vec<Point<Pixels>> = band
-            .iter()
-            .filter_map(|(index, mean, deviation)| place(ctx, *index, mean + k * deviation))
-            .collect();
-        let mut lower: Vec<Point<Pixels>> = band
-            .iter()
-            .filter_map(|(index, mean, deviation)| place(ctx, *index, mean - k * deviation))
-            .collect();
-        if upper.len() < 2 || lower.len() < 2 {
-            return;
-        }
-        lower.reverse();
-        upper.extend(lower);
-        paint::paint_fill(
-            &upper,
-            paint::alpha(fill_color, style.fill_opacity * ctx.appear),
-            ctx.window,
-        );
+        for band in &bands {
+            let first = band[0].0;
+            let fill_color = colors.fill(first);
+            let line_color = colors.stroke(first);
+            let mut upper: Vec<Point<Pixels>> = band
+                .iter()
+                .filter_map(|(index, mean, deviation)| place(ctx, *index, mean + k * deviation))
+                .collect();
+            let mut lower: Vec<Point<Pixels>> = band
+                .iter()
+                .filter_map(|(index, mean, deviation)| place(ctx, *index, mean - k * deviation))
+                .collect();
+            if upper.len() < 2 || lower.len() < 2 {
+                continue;
+            }
+            lower.reverse();
+            upper.extend(lower);
+            paint::paint_fill(
+                &upper,
+                paint::alpha(fill_color, style.fill_opacity * ctx.appear),
+                ctx.window,
+            );
 
-        let mean: Vec<Point<Pixels>> = band
-            .iter()
-            .filter_map(|(index, mean, _)| place(ctx, *index, *mean))
-            .collect();
-        paint::paint_stroke(&mean, style.stroke_width, line_color, ctx.window);
+            let mean: Vec<Point<Pixels>> = band
+                .iter()
+                .filter_map(|(index, mean, _)| place(ctx, *index, *mean))
+                .collect();
+            paint::paint_stroke(&mean, style.stroke_width, line_color, ctx.window);
+        }
     });
 }
 

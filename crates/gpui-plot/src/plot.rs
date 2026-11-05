@@ -23,7 +23,7 @@ use crate::frame::{Frame, FrameOptions, Insets, ScaleKind};
 use crate::mark::{Mark, MarkKind};
 use crate::paint::{self, Label};
 use crate::render::{self, PreparedMark, basic::DrawContext};
-use crate::scale::{ColorRange, ColorScale, Transform};
+use crate::scale::{ColorRange, Transform};
 use crate::style::NumberChannel;
 use crate::table::{Dataset, Table};
 use crate::theme::PlotTheme;
@@ -35,6 +35,8 @@ const LEGEND_BAND: f32 = 20.;
 const LEGEND_SIDE: f32 = 72.;
 /// The gap between a legend's swatch and its label.
 const LEGEND_SWATCH_GAP: f32 = 14.;
+/// The gap between one legend entry's label and the next entry's swatch.
+const LEGEND_ENTRY_GAP: f32 = 14.;
 /// The margin between the figure's edge and a legend's first swatch.
 const LEGEND_MARGIN: f32 = 8.;
 /// The gap between a y-axis label's right edge and the axis line, matching
@@ -140,9 +142,13 @@ pub struct Plot {
     /// The resolved facet grid, kept from the last frame so the tooltip
     /// phases place a facet the same way the marks did.
     facet_cache: Option<crate::facet::Grid>,
-    /// The marks resolved against the data, kept from the last frame so the
-    /// tooltip and hover phases do not re-run the transform pipeline.
-    facets_cache: Option<Vec<Vec<render::PreparedMark>>>,
+    /// The marks resolved against the data — and dodged against the frame —
+    /// kept from `prepaint` so paint and the tooltip phases neither re-run the
+    /// transform pipeline nor copy the rows.
+    facets_cache: Option<Rc<Vec<Vec<render::PreparedMark>>>>,
+    /// The color scales resolved in `prepaint`, the one color authority the
+    /// marks, legend and tooltip all read.
+    colors_cache: Option<Rc<render::color::PlotColors>>,
     /// The hovered datum's index in the flattened row list, kept between
     /// frames so the hover presentation can fade out over the last datum.
     hover: Option<usize>,
@@ -179,6 +185,7 @@ impl Plot {
             fy: None,
             facet_cache: None,
             facets_cache: None,
+            colors_cache: None,
             hover: None,
             hover_progress: 0.,
             frame_cache: None,
@@ -1036,6 +1043,14 @@ impl Plot {
         self
     }
 
+    /// Configure the whole interactive layer at once — whether the pointer is
+    /// tracked, and whether the crosshair and the hovered-datum highlight
+    /// draw — Plot's `pointer` options.
+    pub fn interaction(mut self, interaction: Interaction) -> Self {
+        self.interaction = interaction;
+        self
+    }
+
     /// Draw a custom tooltip body for a datum, replacing the default rows.
     pub fn tooltip(
         mut self,
@@ -1128,6 +1143,7 @@ impl Plot {
         window: &mut Window,
         facets: &[Vec<PreparedMark>],
         grid: &Grid,
+        width: f32,
     ) -> (Insets, Insets) {
         let mut insets = Insets {
             top: 8.,
@@ -1196,17 +1212,12 @@ impl Plot {
             }
         }
 
-        let legend_entries = self.legend_entries(theme, facets);
+        let colors = self.plot_colors(theme, facets);
+        let legend_entries = self.legend_entries(&colors, facets);
         if self.legend != LegendPosition::None && !legend_entries.is_empty() {
-            // A heading above the entries takes one more row on a top or
-            // bottom legend, and one more row of height on a side one; a
-            // legend that wraps or lists several quantities takes more.
-            let band = LEGEND_BAND * (1. + self.legend_rows(theme, window, &legend_entries) as f32)
-                + if self.legend_title.is_some() {
-                    LEGEND_BAND
-                } else {
-                    0.
-                };
+            // The band is the height the legend's own layout takes at this
+            // width: a heading, wrapped rows and quantity rows all count.
+            let (_, band) = self.legend_layout(theme, window, &legend_entries, width);
             match self.legend {
                 LegendPosition::Top => insets.top += band,
                 LegendPosition::Bottom => insets.bottom += band,
@@ -1223,47 +1234,51 @@ impl Plot {
         (insets, facet_insets)
     }
 
-    /// How many rows a top or bottom legend's entries take once they wrap at
-    /// the figure's width. A side legend is a column, so it needs one row.
-    fn legend_rows(
+    /// Where each legend entry sits, relative to the legend's own top-left,
+    /// and the height the legend takes.
+    ///
+    /// This is the one layout both the frame's insets and the painter read,
+    /// so the band the frame reserves is exactly the band the legend fills.
+    /// A top or bottom legend wraps its entries at `width`, the figure's
+    /// width; a side legend stacks them in a column.
+    fn legend_layout(
         &self,
         theme: &PlotTheme,
         window: &mut Window,
         entries: &[LegendEntry],
-    ) -> usize {
-        if matches!(self.legend, LegendPosition::Left | LegendPosition::Right) {
-            return entries.len().saturating_sub(1);
+        width: f32,
+    ) -> (Vec<(f32, f32)>, f32) {
+        let vertical = matches!(self.legend, LegendPosition::Left | LegendPosition::Right);
+        let available = (width - LEGEND_MARGIN * 2.).max(1.);
+        let mut positions = Vec::with_capacity(entries.len());
+        let (mut x, mut y) = (0.0_f32, 0.0_f32);
+        if self.legend_title.is_some() {
+            y += LEGEND_BAND;
         }
-        // The figure's width, which the frame's insets are about to reduce by
-        // the width this legend reserves.
-        let width = self.legend_band_width() - LEGEND_MARGIN * 2.;
-        let mut rows: usize = 1;
-        let mut x = 0.;
-        let mut previous_quantity = false;
-        for entry in entries {
-            if entry.swatch.is_quantity() && !previous_quantity {
-                rows += 1;
-                x = 0.;
+        for (index, entry) in entries.iter().enumerate() {
+            if vertical {
+                positions.push((0., y));
+                y += LEGEND_BAND;
+                continue;
             }
-            previous_quantity = entry.swatch.is_quantity();
+            // A size or opacity legend is a separate list from the color one,
+            // so it starts on a fresh row rather than running on from it.
+            let starts_quantities = index > 0
+                && entry.swatch.is_quantity()
+                && !entries[index - 1].swatch.is_quantity();
             let label = paint::measure(&entry.label, theme.label_size, window)
                 .width
                 .as_f32();
-            let advance = LEGEND_SWATCH_GAP + label + 14.;
-            if x + advance > width && x > 0. {
-                rows += 1;
+            // A row that would run past the figure wraps to the next one.
+            if starts_quantities || (x > 0. && x + LEGEND_SWATCH_GAP + label > available) {
                 x = 0.;
+                y += LEGEND_BAND;
             }
-            x += advance;
+            positions.push((x, y));
+            x += LEGEND_SWATCH_GAP + label + LEGEND_ENTRY_GAP;
         }
-        rows.saturating_sub(1)
-    }
-
-    /// The width a top or bottom legend has to lay its entries out in. The
-    /// plot does not know the figure's width until it is laid out, so this
-    /// uses the same 640px the legend has always assumed.
-    fn legend_band_width(&self) -> f32 {
-        640.
+        let height = if vertical { y } else { y + LEGEND_BAND };
+        (positions, height)
     }
 
     /// The width a side legend needs: its widest label plus its swatch.
@@ -1279,7 +1294,12 @@ impl Plot {
                     .as_f32()
             })
             .fold(0.0_f32, f32::max);
-        (LEGEND_SWATCH_GAP + widest + LEGEND_MARGIN * 2.).max(LEGEND_SIDE)
+        // A heading sits flush left above the swatches, so it may be the
+        // widest line.
+        let heading = self.legend_title.as_ref().map_or(0., |title| {
+            paint::measure(title, theme.label_size, window).width.as_f32() - LEGEND_SWATCH_GAP
+        });
+        (LEGEND_SWATCH_GAP + widest.max(heading) + LEGEND_MARGIN * 2.).max(LEGEND_SIDE)
     }
 
     /// Where the top legend's row starts, below the title the frame reserves.
@@ -1330,49 +1350,26 @@ impl Plot {
             .collect()
     }
 
-    /// The plot's ordinal color scale: the distinct `z` values across every
-    /// mark, colored from the theme's palette.
-    fn ordinal_scale(&self, theme: &PlotTheme, facets: &[Vec<PreparedMark>]) -> ColorScale {
-        ColorScale::ordinal(
-            crate::scale::dedup(
-                facets
-                    .iter()
-                    .flatten()
-                    .filter(|mark| mark.mark.channels.fill.is_none())
-                    .flat_map(|mark| mark.rows.iter())
-                    .filter_map(|row| row.z.as_ref().map(|z| z.key())),
-            ),
-            theme.palette.clone(),
-        )
-    }
-
     /// The legend's entries: one per series or one per categorical value.
     ///
     /// Every facet's marks are read, and an entry appears once however many
     /// facets draw it: a faceted chart's legend describes the series, not each
     /// small multiple.
-    fn legend_entries(&self, theme: &PlotTheme, facets: &[Vec<PreparedMark>]) -> Vec<LegendEntry> {
+    fn legend_entries(
+        &self,
+        colors: &render::color::PlotColors,
+        facets: &[Vec<PreparedMark>],
+    ) -> Vec<LegendEntry> {
         let mut entries: Vec<LegendEntry> = Vec::new();
-        // The color scale spans every mark's `z` values, the way Plot's is one
-        // scale for the whole plot: a chart drawn as one line per series has a
-        // `z` value in each mark, and each mark's own domain would give every
-        // line the first palette color.
-        let ordinal = self.ordinal_scale(theme, facets);
         // Every facet holds the same marks in the same order, so a mark's
         // place in its facet's list is its place in the plot's.
         for (index, mark) in facets.iter().flatten().enumerate() {
             let index = index % self.marks.len().max(1);
             let mut series: Vec<(SharedString, Hsla)> = Vec::new();
-            let mark_ordinal = mark.mark.channels.fill.is_none().then(|| ordinal.clone());
             for row in mark.rows.iter() {
                 if let Some(z) = &row.z {
-                    let color = match (&mark.mark.channels.fill, &mark_ordinal) {
-                        (Some(channel), _) => channel.read(&row.row),
-                        (None, Some(scale)) => {
-                            scale.color(z).unwrap_or_else(|| theme.palette_color(index))
-                        }
-                        (None, None) => theme.palette_color(index),
-                    };
+                    // The swatch is the color the mark draws this series in.
+                    let color = colors.identity(mark, index, row);
                     if !series.iter().any(|(name, _)| *name == z.label()) {
                         series.push((z.label(), color));
                     }
@@ -1393,17 +1390,15 @@ impl Plot {
                     });
                 }
             } else if let Some(title) = &mark.mark.title {
-                // A titled mark's swatch is the color it draws in, which for a
-                // line is its stroke: a mark with only a stroke channel is
-                // otherwise listed in a palette color it never paints.
-                let color = mark
-                    .mark
-                    .channels
-                    .fill
-                    .as_ref()
-                    .or(mark.mark.channels.stroke.as_ref())
-                    .and_then(|channel| mark.rows.first().map(|row| channel.read(&row.row)))
-                    .unwrap_or_else(|| theme.palette_color(index));
+                // A titled mark's swatch is the color it draws in: its first
+                // row's, or its default when it has no rows.
+                let color = match mark.rows.first() {
+                    Some(row) => colors.identity(mark, index, row),
+                    None if mark.mark.channels.stroke.is_some() => {
+                        colors.default_stroke(mark, index)
+                    }
+                    None => colors.default_fill(mark, index),
+                };
                 if !entries.iter().any(|entry| entry.label == *title) {
                     entries.push(LegendEntry {
                         label: title.clone(),
@@ -1533,7 +1528,21 @@ fn hover_targets(facets: &[Vec<PreparedMark>]) -> Vec<(usize, usize, usize)> {
 /// Both ends of each interval are projected; a mark with no x interval uses its
 /// x value, and likewise y, falling back to no rect when a channel does not
 /// scale. The rectangle is in the facet frame's plot-local pixels.
-fn interval_rect(row: &crate::render::PreparedRow, frame: &Frame) -> Option<Bounds<Pixels>> {
+fn interval_rect(
+    mark: &PreparedMark,
+    row: &crate::render::PreparedRow,
+    frame: &Frame,
+) -> Option<Bounds<Pixels>> {
+    let cat = mark.mark.kind.category();
+    // Only a mark that paints a body has one to hover: a row with an interval
+    // (a bar's length, a rect's extent) or a band-filling mark (a cell). A dot
+    // or a line vertex is hit by its point instead, so a padded rectangle
+    // around it cannot steal the hover from a nearer datum.
+    let has_interval =
+        row.x1.is_some() || row.x2.is_some() || row.y1.is_some() || row.y2.is_some();
+    if !(has_interval || (cat.band_x && cat.band_y)) || cat.furniture {
+        return None;
+    }
     let x = |v: &crate::value::Value| frame.x.scale.position(v);
     let y = |v: &crate::value::Value| frame.y.scale.position(v);
     let x0 = row.x1.as_ref().or(Some(&row.x)).and_then(x);
@@ -1543,21 +1552,26 @@ fn interval_rect(row: &crate::render::PreparedRow, frame: &Frame) -> Option<Boun
     let (Some(x0), Some(x1), Some(y0), Some(y1)) = (x0, x1, y0, y1) else {
         return None;
     };
-    let (x0, x1) = (x0.min(x1), x0.max(x1));
-    let (y0, y1) = (y0.min(y1), y0.max(y1));
-    let mut rect = Bounds::new(point(px(x0), px(y0)), gpui::size(px(x1 - x0), px(y1 - y0)));
-    // A length mark on one axis has a zero interval on the other (a vertical
-    // bar spans one x, a horizontal bar one y); pad that degenerate axis so the
-    // body is still hoverable, and so stacked bars do not mis-hit.
-    if rect.size.width.as_f32() <= 1. {
-        rect.origin.x -= px(6.);
-        rect.size.width = px(12.);
-    }
-    if rect.size.height.as_f32() <= 1. {
-        rect.origin.y -= px(6.);
-        rect.size.height = px(12.);
-    }
-    Some(rect)
+    let (mut x0, mut x1) = (x0.min(x1), x0.max(x1));
+    let (mut y0, mut y1) = (y0.min(y1), y0.max(y1));
+    // A length mark spans a single value on its other axis (a vertical bar one
+    // x, a horizontal bar one y). On a band axis the body is the band's width,
+    // centred on that value; elsewhere it is padded a little so it is still
+    // hoverable.
+    let widen = |lo: &mut f32, hi: &mut f32, band: f32| {
+        if *hi - *lo <= 1. {
+            let half = if band > 1. { band / 2. } else { 6. };
+            let centre = (*lo + *hi) / 2.;
+            *lo = centre - half;
+            *hi = centre + half;
+        }
+    };
+    widen(&mut x0, &mut x1, frame.x.scale.band_width());
+    widen(&mut y0, &mut y1, frame.y.scale.band_width());
+    Some(Bounds::new(
+        point(px(x0), px(y0)),
+        gpui::size(px(x1 - x0), px(y1 - y0)),
+    ))
 }
 
 /// One legend entry.
@@ -1629,7 +1643,8 @@ impl Plot {
         grid: &Grid,
     ) -> Frame {
         let mut options = self.frame_options.clone();
-        let (insets, facet_insets) = self.insets(theme, window, facets, grid);
+        let (insets, facet_insets) =
+            self.insets(theme, window, facets, grid, bounds.size.width.as_f32());
         options.insets = insets;
         options.facet_insets = facet_insets;
         // A mark that draws a band on an axis — a bar's width, a cell's
@@ -1713,24 +1728,30 @@ impl PlotTrait for Plot {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<AnyElement> {
-        // Resolve the frame here so `paint` and `tooltip_state` share one
-        // layout, and measure the labels that decide the margins.
+        // Resolve everything the later phases read here, once per frame: the
+        // marks (the transform pipeline), the frame (the layout), the dodge
+        // (which needs the frame's pixels) and the color scales. `paint`,
+        // `tooltip_state` and `tooltip` then share one consistent view.
         let theme = PlotTheme::from_theme(cx.theme());
-        let grid = self.facet_grid();
-        // Resolve the marks once here and keep them: the hover, tooltip and
-        // paint phases re-read the same rows, so this is the only place the
-        // transform pipeline runs each frame.
-        let (facets, populated) = render::prepare_facets(
+        let mut grid = self.facet_grid();
+        let (mut facets, populated) = render::prepare_facets(
             &self.data,
             &self.marks,
             &grid,
             self.fx.as_deref(),
             self.fy.as_deref(),
         );
-        self.facets_cache = Some(facets.clone());
-        let mut grid = grid;
         grid.set_empty(&populated);
         let frame = self.resolve_frame(bounds, &theme, window, &facets, &grid);
+        // A dodge works in pixels, so it needs the frame resolved first. Every
+        // facet is the same size, so one facet's frame packs the same way.
+        let dodge_frame = cell_frame(&frame, &grid, 0);
+        for marks in facets.iter_mut() {
+            render::apply_dodge(marks, &dodge_frame);
+        }
+        let colors = self.plot_colors(&theme, &facets);
+        self.facets_cache = Some(Rc::new(facets));
+        self.colors_cache = Some(Rc::new(colors));
         self.frame_cache = Some(frame);
         self.facet_cache = Some(grid);
         vec![]
@@ -1738,60 +1759,42 @@ impl PlotTrait for Plot {
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let theme = PlotTheme::from_theme(cx.theme());
-
-        let grid = self
-            .facet_cache
-            .clone()
-            .unwrap_or_else(|| self.facet_grid());
-        let mut facets = self.facets_cache.clone().unwrap_or_else(|| {
-            render::prepare_facets(
-                &self.data,
-                &self.marks,
-                &grid,
-                self.fx.as_deref(),
-                self.fy.as_deref(),
-            )
-            .0
-        });
-        let frame = match self.frame_cache.clone() {
-            Some(frame) => frame,
-            None => self.resolve_frame(bounds, &theme, window, &facets, &grid),
+        let (Some(facets), Some(frame), Some(grid), Some(colors)) = (
+            self.facets_cache.clone(),
+            self.frame_cache.clone(),
+            self.facet_cache.clone(),
+            self.colors_cache.clone(),
+        ) else {
+            return;
         };
-        // A dodge works in pixels, so it needs the frame resolved first. Every
-        // facet is the same size, so one facet's frame packs the same way.
-        let facet_frame = match grid.is_faceted() {
-            true => frame.facet(crate::frame::facet_marks(grid.facet(frame.plot, 0), &frame)),
-            false => frame.clone(),
-        };
-        for marks in facets.iter_mut() {
-            render::apply_dodge(marks, &facet_frame);
-        }
 
         let appear = self.appear_progress;
 
         // The title sits above the plot, inside the figure's top margin.
         self.paint_title(bounds, &theme, window, cx);
-        // The legend sits in the margin its position reserves.
-        self.paint_legend(bounds, &theme, window, cx, &facets);
+        // The legend sits in the margin its position reserves, inside the
+        // figure's bounds (already shrunk to the plot's `height`).
+        self.paint_legend(frame.bounds, &theme, window, cx, &facets, &colors);
         // The grid goes under the marks.
         if self.grid {
             crate::frame::paint_grid(&frame, &theme, window, self.x_axis, self.y_axis, &grid);
         }
-        // The marks. Every mark shares one ordinal color scale, so a series
+        // The marks. Every mark shares one set of color scales, so a series
         // keeps its color across marks, and across facets.
-        let ordinal = self.ordinal_scale(&theme, &facets);
         let mut row_offset = 0;
         for (cell, marks) in facets.iter().enumerate() {
-            let facet_frame = frame.facet(crate::frame::facet_marks(
-                grid.facet(frame.plot, cell),
-                &frame,
-            ));
+            let facet_frame = cell_frame(&frame, &grid, cell);
             // Plot skips a facet that holds no data: it keeps the slot, and
             // the facet axis, but draws no marks inside it.
-            if grid.is_faceted() && grid.is_empty(cell) {
-                continue;
-            }
+            let skip = grid.is_faceted() && grid.is_empty(cell);
             for (index, mark) in marks.iter().enumerate() {
+                let offset = row_offset;
+                // The row offset counts every facet's rows, drawn or not, so it
+                // matches the flattened list the hover indexes.
+                row_offset += mark.rows.len();
+                if skip {
+                    continue;
+                }
                 let mut ctx = DrawContext {
                     frame: &facet_frame,
                     theme: &theme,
@@ -1799,12 +1802,11 @@ impl PlotTrait for Plot {
                     appear,
                     hover_progress: self.hover_progress,
                     hovered: self.hover,
-                    row_offset,
-                    ordinal: &ordinal,
+                    row_offset: offset,
+                    colors: &colors,
                     window,
                     cx,
                 };
-                row_offset += mark.rows.len();
                 // Which renderer family paints the mark, read from its single
                 // classification table rather than a hand-maintained list here.
                 match mark.mark.kind.category().family {
@@ -1825,12 +1827,8 @@ impl PlotTrait for Plot {
                 if grid.is_empty(cell) {
                     continue;
                 }
-                let facet_frame = frame.facet(crate::frame::facet_marks(
-                    grid.facet(frame.plot, cell),
-                    &frame,
-                ));
                 crate::frame::paint_axes(
-                    &facet_frame,
+                    &cell_frame(&frame, &grid, cell),
                     &theme,
                     window,
                     cx,
@@ -1894,26 +1892,9 @@ impl PlotTrait for Plot {
         if !self.interaction.enabled {
             return None;
         }
-        let frame = self.frame_cache.clone()?;
-        let grid = self
-            .facet_cache
-            .clone()
-            .unwrap_or_else(|| self.facet_grid());
-        let mut facets = self.facets_cache.clone().unwrap_or_else(|| {
-            render::prepare_facets(
-                &self.data,
-                &self.marks,
-                &grid,
-                self.fx.as_deref(),
-                self.fy.as_deref(),
-            )
-            .0
-        });
-        // The dodge packs each facet's rows in its own facet's pixels.
-        let facet_frame = frame.facet(crate::frame::facet_marks(grid.facet(frame.plot, 0), &frame));
-        for marks in facets.iter_mut() {
-            render::apply_dodge(marks, &facet_frame);
-        }
+        let frame = self.frame_cache.as_ref()?;
+        let grid = self.facet_cache.as_ref()?;
+        let facets = self.facets_cache.as_ref()?;
 
         // Ignore the axis gutters: hovering a label shows nothing.
         let absolute = position + bounds.origin;
@@ -1921,71 +1902,79 @@ impl PlotTrait for Plot {
             return None;
         }
         let local = absolute - frame.plot.origin;
+        let cell_frames: Vec<Frame> = (0..facets.len())
+            .map(|cell| cell_frame(frame, grid, cell))
+            .collect();
 
         // The datum under the pointer. A mark that draws an interval — a bar,
         // a rect, a cell — is hoverable across its whole body, so the pointer
         // selects it when it lies inside that rectangle (Plot's `nearest`)
-        // rather than only near its anchor point. A mark without an interval
-        // (a dot, a line vertex) is picked by distance to its projected point.
+        // rather than only near its anchor point; among overlapping bodies the
+        // last-painted, topmost one wins. A mark without an interval (a dot, a
+        // line vertex) is picked by distance to the point it was painted at.
+        let targets = hover_targets(facets);
         let mut contained: Option<(usize, Point<Pixels>)> = None;
         let mut best: Option<(usize, Point<Pixels>, f32)> = None;
-        for (flat, (cell, mark_index, row_index)) in hover_targets(&facets).into_iter().enumerate()
-        {
-            let facet_frame = frame.facet(crate::frame::facet_marks(
-                grid.facet(frame.plot, cell),
-                &frame,
-            ));
+        for (flat, &(cell, mark_index, row_index)) in targets.iter().enumerate() {
+            if grid.is_faceted() && grid.is_empty(cell) {
+                continue;
+            }
             let mark = &facets[cell][mark_index];
+            if !hoverable(mark) {
+                continue;
+            }
             let Some(row) = mark.rows.get(row_index) else {
                 continue;
             };
-            // The projected point, and the row's interval rectangle when it has
-            // one, both shifted into the whole figure's plot coordinates.
-            let Some(point) = facet_frame.point(row.x_value(), row.y_value()) else {
+            let facet_frame = &cell_frames[cell];
+            // Everything is lifted from the facet's plot-local pixels into the
+            // whole figure's plot coordinates, where `local` lives.
+            let lift = facet_frame.plot.origin - frame.plot.origin;
+            let Some(point) = render::basic::position_in(mark, facet_frame, row) else {
                 continue;
             };
-            let point = point + (facet_frame.plot.origin - frame.plot.origin);
-            // The interval rect is in the facet's plot-local pixels; shift it by
-            // the facet's offset so it is in the whole figure's plot coords,
-            // the same space `local` (the plot-local pointer) lives in.
-            let hit_rect = interval_rect(row, &facet_frame)
-                .map(|r| r + (facet_frame.plot.origin - frame.plot.origin));
-            let inside = hit_rect.is_some_and(|r| r.contains(&local));
+            let point = point + lift;
+            if interval_rect(mark, row, facet_frame).is_some_and(|r| (r + lift).contains(&local)) {
+                contained = Some((flat, point));
+            }
             let dx = point.x.as_f32() - local.x.as_f32();
             let dy = point.y.as_f32() - local.y.as_f32();
             let distance = dx * dx + dy * dy;
-            if inside && contained.is_none() {
-                contained = Some((flat, point));
-            }
             if best.as_ref().is_none_or(|(_, _, best)| distance < *best) {
                 best = Some((flat, point, distance));
             }
         }
-        // A pointer inside a bar's body picks that bar; otherwise the nearest
-        // point wins, the way Plot's `nearest` falls back to the anchor.
         let (flat, hit) = contained.or_else(|| best.map(|(flat, point, _)| (flat, point)))?;
-        let (cell, mark_index, row_index) = hover_targets(&facets)[flat];
-        let facet_frame = frame.facet(crate::frame::facet_marks(
-            grid.facet(frame.plot, cell),
-            &frame,
-        ));
+        let (cell, mark_index, row_index) = targets[flat];
+        let facet_frame = &cell_frames[cell];
+        let lift = facet_frame.plot.origin - frame.plot.origin;
         let mark = &facets[cell][mark_index];
         let row = mark.rows.get(row_index)?;
 
-        let dots: Vec<Point<Pixels>> = mark
-            .rows
-            .iter()
-            .filter_map(|other| {
-                if other.z.as_ref().map(|z| z.key()) == row.z.as_ref().map(|z| z.key()) {
-                    facet_frame
-                        .point(other.x_value(), other.y_value())
-                        .map(|point| point + (facet_frame.plot.origin - frame.plot.origin))
+        // One dot per series at the hovered datum: the rows of the same mark
+        // that share its position on the independent axis. A bar's body is
+        // already highlighted, so an interval mark marks only its own datum.
+        let dots: Vec<Point<Pixels>> = if interval_rect(mark, row, facet_frame).is_some() {
+            vec![hit]
+        } else {
+            let along_y = mark.mark.kind.is_y_only();
+            let key = |other: &render::PreparedRow| {
+                if along_y {
+                    other.y_value().key()
                 } else {
-                    None
+                    other.x_value().key()
                 }
-            })
-            .collect();
-        let dots = if dots.is_empty() { vec![hit] } else { dots };
+            };
+            let hovered = key(row);
+            let dots: Vec<Point<Pixels>> = mark
+                .rows
+                .iter()
+                .filter(|other| key(other) == hovered)
+                .filter_map(|other| render::basic::position_in(mark, facet_frame, other))
+                .map(|point| point + lift)
+                .collect();
+            if dots.is_empty() { vec![hit] } else { dots }
+        };
 
         // The tooltip overlay is placed at the element's own origin (its
         // top-left, including the title and legend margins), so the crosshair
@@ -2007,29 +1996,19 @@ impl PlotTrait for Plot {
         cx: &mut App,
     ) -> Option<AnyElement> {
         let theme = PlotTheme::from_theme(cx.theme());
-        let grid = self
-            .facet_cache
-            .clone()
-            .unwrap_or_else(|| self.facet_grid());
-        let facets = self.facets_cache.clone().unwrap_or_else(|| {
-            render::prepare_facets(
-                &self.data,
-                &self.marks,
-                &grid,
-                self.fx.as_deref(),
-                self.fy.as_deref(),
-            )
-            .0
-        });
+        let facets = self.facets_cache.as_ref()?;
+        let colors = self.colors_cache.as_ref()?;
+        let frame = self.frame_cache.as_ref()?;
+        let grid = self.facet_cache.as_ref()?;
 
-        // The hover carries the index the pointer resolved to, in the same
+        // The state carries the index the pointer resolved to, in the same
         // flattened row list `tooltip_state` searched.
-        let flat = self.hover?;
-        let (cell, mark_index, row_index) = *hover_targets(&facets).get(flat)?;
+        let (cell, mark_index, row_index) = *hover_targets(facets).get(state.index)?;
         let mark = facets.get(cell)?.get(mark_index)?;
         let row = mark.rows.get(row_index)?;
 
-        let color = self.color_for_row(mark_index, mark, row, &theme);
+        // The swatch and dots take the color the mark painted this row in.
+        let color = colors.identity(mark, mark_index, row);
 
         // The box hugs the cursor and carries the crosshair and hovered dots;
         // the body is either a custom formatter's freeform element or the
@@ -2042,10 +2021,11 @@ impl PlotTrait for Plot {
             let element = formatter(&row.row, window, cx);
             tooltip.extend([element]);
         } else {
-            let title = self
-                .marks
-                .get(mark_index)
-                .and_then(|mark| mark.channels.title.as_ref())
+            let title = mark
+                .mark
+                .channels
+                .title
+                .as_ref()
                 .map(|channel| channel.read(&row.row).label())
                 .unwrap_or_else(|| row.x_value().label());
 
@@ -2073,9 +2053,15 @@ impl PlotTrait for Plot {
         }
 
         if self.interaction.crosshair {
-            let height = bounds.size.height.as_f32();
-            tooltip =
-                tooltip.cross_line(CrossLine::new(state.cross_line).height(height).band(px(6.)));
+            // The crosshair spans the hovered facet's plot area only, not the
+            // title, legend or axis gutters around it.
+            let facet_frame = cell_frame(frame, grid, cell);
+            let top = facet_frame.plot.origin.y - bounds.origin.y;
+            tooltip = tooltip.cross_line(
+                CrossLine::new(state.cross_line)
+                    .span(top.as_f32(), facet_frame.plot.size.height.as_f32())
+                    .band(px(6.)),
+            );
         }
         if self.interaction.highlight {
             let dots: Vec<Dot> = state
@@ -2096,31 +2082,34 @@ impl PlotTrait for Plot {
     }
 }
 
+/// The frame one facet cell draws in: the figure's frame moved to the cell's
+/// marks area. An unfaceted figure has one cell, the whole plot.
+fn cell_frame(frame: &Frame, grid: &Grid, cell: usize) -> Frame {
+    if grid.is_faceted() {
+        frame.facet(crate::frame::facet_marks(grid.facet(frame.plot, cell), frame))
+    } else {
+        frame.clone()
+    }
+}
+
+/// Whether the pointer can hover a mark's rows.
+///
+/// A pie, arc or waffle lays its rows out in polar or grid space around the
+/// plot's center, not at their x/y positions, so a Cartesian hit-test would
+/// land on meaningless spots; they are not hoverable rather than wrong.
+fn hoverable(mark: &PreparedMark) -> bool {
+    !matches!(mark.mark.kind, MarkKind::Pie | MarkKind::Arc | MarkKind::Waffle)
+}
+
 impl Plot {
-    fn color_for_row(
+    /// The plot's color scales over the resolved marks.
+    fn plot_colors(
         &self,
-        mark_index: usize,
-        mark: &PreparedMark,
-        row: &crate::render::PreparedRow,
         theme: &PlotTheme,
-    ) -> Hsla {
-        if let Some(channel) = &mark.mark.channels.fill {
-            return channel.read(&row.row);
-        }
-        // A `color` option over a continuous field wins over the palette.
-        if let (Some(field), Some(range)) = (&self.color_field, &self.color_range) {
-            let values: Vec<Value> = mark.rows.iter().map(|row| row.row.value(field)).collect();
-            if let Some(extent) = crate::scale::extent(values) {
-                let scale = ColorScale::continuous(extent, range.clone());
-                if let Some(color) = row.row.get(field).and_then(|value| scale.color(value)) {
-                    return color;
-                }
-            }
-        }
-        if row.z.is_some() {
-            return theme.palette_color(mark_index);
-        }
-        theme.palette_color(mark_index)
+        facets: &[Vec<PreparedMark>],
+    ) -> render::color::PlotColors {
+        let color = self.color_field.as_ref().zip(self.color_range.as_ref());
+        render::color::PlotColors::new(theme, facets, color)
     }
 
     fn paint_title(
@@ -2175,30 +2164,31 @@ impl Plot {
         window: &mut Window,
         cx: &mut App,
         facets: &[Vec<PreparedMark>],
+        colors: &render::color::PlotColors,
     ) {
-        let entries = self.legend_entries(theme, facets);
+        let entries = self.legend_entries(colors, facets);
         if self.legend == LegendPosition::None || entries.is_empty() {
             return;
         }
         let font = gpui::font(theme.font_family.clone());
         let swatch = px(8.);
-        // The gap between one entry's label and the next entry's swatch.
-        let entry_gap = 14.;
-        // A side legend is a column, so its entries stack downwards.
         let vertical = matches!(self.legend, LegendPosition::Left | LegendPosition::Right);
         let side_width = if vertical {
             self.legend_width(theme, window, &entries)
         } else {
             0.
         };
+        let (positions, height) =
+            self.legend_layout(theme, window, &entries, bounds.size.width.as_f32());
 
         // A top legend sits under the title, inside the band the frame
-        // reserved for it; a bottom one above the axis gutter.
-        let (mut x, mut y) = match self.legend {
+        // reserved for it; a bottom one in the band above the figure's bottom
+        // margin. `bounds` is the figure's, already shrunk to its `height`.
+        let (left, top) = match self.legend {
             LegendPosition::Top => (LEGEND_MARGIN, self.legend_top(theme)),
             LegendPosition::Bottom => (
                 LEGEND_MARGIN,
-                bounds.size.height.as_f32() - LEGEND_BAND + LEGEND_MARGIN,
+                bounds.size.height.as_f32() - height + LEGEND_MARGIN,
             ),
             LegendPosition::Left => (LEGEND_MARGIN, self.legend_top(theme)),
             LegendPosition::Right => (
@@ -2209,8 +2199,7 @@ impl Plot {
         };
         let origin = bounds.origin;
 
-        // A legend heading sits on its own row above the entries, so a long
-        // row of entries does not push it off the figure's edge.
+        // A legend heading sits on its own row above the entries.
         if let Some(title) = &self.legend_title {
             let heading = Label::new(
                 title.clone(),
@@ -2221,27 +2210,16 @@ impl Plot {
                 window,
             );
             heading.paint_at(
-                point(origin.x + px(x), origin.y + px(y)),
+                point(origin.x + px(left), origin.y + px(top)),
                 TextAlign::Left,
                 None,
                 window,
                 cx,
             );
-            y += LEGEND_BAND;
-            x = LEGEND_MARGIN;
         }
 
-        for (index, entry) in entries.iter().enumerate() {
-            // A size or opacity legend is a separate list from the color one,
-            // so it starts on a fresh row rather than running on from it.
-            if !vertical
-                && index > 0
-                && entry.swatch.is_quantity()
-                && !entries[index - 1].swatch.is_quantity()
-            {
-                x = LEGEND_MARGIN;
-                y += LEGEND_BAND;
-            }
+        for (entry, (dx, dy)) in entries.iter().zip(positions) {
+            let (x, y) = (left + dx, top + dy);
             let centre = point(origin.x + px(x + 4.), origin.y + px(y + 6.));
             // A size or opacity swatch draws in the theme's label color: it
             // shows how big or how faint a mark is, not which series it is.
@@ -2291,7 +2269,6 @@ impl Plot {
                 font.clone(),
                 window,
             );
-            let width = label.width.as_f32();
             label.paint_at(
                 point(origin.x + px(x + LEGEND_SWATCH_GAP), origin.y + px(y)),
                 TextAlign::Left,
@@ -2299,16 +2276,6 @@ impl Plot {
                 window,
                 cx,
             );
-            if vertical {
-                y += LEGEND_BAND;
-            } else {
-                x += LEGEND_SWATCH_GAP + width + entry_gap;
-                // A row that would run past the figure wraps to the next one.
-                if x > bounds.size.width.as_f32() - LEGEND_MARGIN - width {
-                    x = LEGEND_MARGIN;
-                    y += LEGEND_BAND;
-                }
-            }
         }
     }
 }
@@ -2384,9 +2351,125 @@ mod tests {
         let plot = Plot::new(data).line(|mark| mark.x("x").y("y").z("z"));
         let prepared = render::prepare(plot.data(), plot.marks());
         let theme = PlotTheme::from_theme(&gpui_kit::component::Theme::default());
-        let entries = plot.legend_entries(&theme, &[prepared]);
+        let facets = [prepared];
+        let colors = plot.plot_colors(&theme, &facets);
+        let entries = plot.legend_entries(&colors, &facets);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].label, "one");
+    }
+
+    /// A frame laid out over a plot's own marks, without a window.
+    fn frame_for(plot: &Plot, facets: &[Vec<PreparedMark>]) -> Frame {
+        let mut options = plot.frame_options.clone();
+        if marks_use_band(facets, true) {
+            options.x_kind = Some(ScaleKind::Band);
+        }
+        Frame::resolve(
+            Bounds::new(point(px(0.), px(0.)), gpui::size(px(400.), px(200.))),
+            &options,
+            &plot.x_domain_values(facets),
+            &plot.y_domain_values(facets),
+        )
+    }
+
+    #[test]
+    fn one_dimensional_marks_have_a_hover_point() {
+        // A barcode's rows have no y; the hit-test must place them where the
+        // painter does (mid-height) instead of dropping them.
+        let data = [1., 2., 3.].map(|v| Table::empty().with("v", Value::Number(v)));
+        let plot = Plot::barcode(data, "v");
+        let facets = vec![render::prepare(plot.data(), plot.marks())];
+        let frame = frame_for(&plot, &facets);
+        let mark = &facets[0][0];
+        for row in &mark.rows {
+            assert!(render::basic::position_in(mark, &frame, row).is_some());
+        }
+    }
+
+    #[test]
+    fn a_band_bar_is_hoverable_across_its_width() {
+        let data = ["a", "b", "c"].map(|x| {
+            Table::empty()
+                .with("x", Value::text(x))
+                .with("y", Value::Number(4.))
+        });
+        let plot = Plot::new(data).bar_y(|mark| mark.x("x").y("y"));
+        let facets = vec![render::prepare(plot.data(), plot.marks())];
+        let frame = frame_for(&plot, &facets);
+        let mark = &facets[0][0];
+        let rect = interval_rect(mark, &mark.rows[0], &frame).expect("a bar has a body");
+        let band = frame.x.scale.band_width();
+        assert!(band > 12.);
+        assert!((rect.size.width.as_f32() - band).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_dot_has_no_hover_body() {
+        let data = [Table::empty()
+            .with("x", Value::Number(1.))
+            .with("y", Value::Number(1.))];
+        let plot = Plot::new(data).dot(|mark| mark.x("x").y("y"));
+        let facets = vec![render::prepare(plot.data(), plot.marks())];
+        let frame = frame_for(&plot, &facets);
+        let mark = &facets[0][0];
+        assert!(interval_rect(mark, &mark.rows[0], &frame).is_none());
+    }
+
+    #[test]
+    fn tooltip_and_legend_colors_match_the_painted_series() {
+        let data = ["a", "b", "c"].map(|z| {
+            Table::empty()
+                .with("x", Value::Number(1.))
+                .with("y", Value::Number(1.))
+                .with("z", Value::text(z))
+        });
+        let plot = Plot::new(data).dot(|mark| mark.x("x").y("y").z("z"));
+        let facets = vec![render::prepare(plot.data(), plot.marks())];
+        let theme = PlotTheme::from_theme(&gpui_kit::component::Theme::default());
+        let colors = plot.plot_colors(&theme, &facets);
+        let mark = &facets[0][0];
+        for (index, row) in mark.rows.iter().enumerate() {
+            assert_eq!(colors.identity(mark, 0, row), theme.palette_color(index));
+        }
+        let entries = plot.legend_entries(&colors, &facets);
+        assert_eq!(entries[2].swatch, LegendSwatch::Color(theme.palette_color(2)));
+    }
+
+    #[test]
+    fn a_titled_plain_mark_is_listed_in_its_paint_color() {
+        let data = [Table::empty()
+            .with("x", Value::Number(1.))
+            .with("y", Value::Number(1.))];
+        let plot = Plot::new(data).line(|mark| mark.x("x").y("y").title("Sales"));
+        let facets = vec![render::prepare(plot.data(), plot.marks())];
+        let theme = PlotTheme::from_theme(&gpui_kit::component::Theme::default());
+        let colors = plot.plot_colors(&theme, &facets);
+        let entries = plot.legend_entries(&colors, &facets);
+        assert_eq!(entries[0].swatch, LegendSwatch::Color(theme.mark_color));
+    }
+
+    #[test]
+    fn the_color_option_colors_the_marks() {
+        let data = [1., 5.].map(|v| {
+            Table::empty()
+                .with("x", Value::Number(v))
+                .with("y", Value::Number(v))
+                .with("v", Value::Number(v))
+        });
+        let ramp = ColorRange::Continuous(vec![gpui::black(), gpui::white()]);
+        let plot = Plot::new(data)
+            .dot(|mark| mark.x("x").y("y"))
+            .color("v", ramp);
+        let facets = vec![render::prepare(plot.data(), plot.marks())];
+        let theme = PlotTheme::from_theme(&gpui_kit::component::Theme::default());
+        let colors = plot.plot_colors(&theme, &facets);
+        let mark = &facets[0][0];
+        let (low, high) = (
+            colors.row_fill(mark, 0, &mark.rows[0]),
+            colors.row_fill(mark, 0, &mark.rows[1]),
+        );
+        assert_ne!(low, high, "the two ends of the domain differ in color");
+        assert_ne!(low, theme.mark_color);
     }
 
     #[test]

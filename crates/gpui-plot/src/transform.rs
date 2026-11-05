@@ -266,6 +266,9 @@ pub fn bin(data: &Dataset, field: &str, thresholds: Thresholds) -> (Vec<Bin>, [f
         .filter_map(|(index, row)| {
             row.get(field)
                 .and_then(Value::as_number)
+                // NaN and ±inf fall in no bin: NaN would floor into the
+                // first one, and an infinite extent has no finite width.
+                .filter(|v| v.is_finite())
                 .map(|v| (index, v))
         })
         .collect();
@@ -280,28 +283,34 @@ pub fn bin(data: &Dataset, field: &str, thresholds: Thresholds) -> (Vec<Bin>, [f
     } else {
         (lo, hi)
     };
-    let count = match thresholds {
-        Thresholds::Count(count) => count.max(1),
-        Thresholds::Auto => 10,
-        Thresholds::Interval(width) => {
-            (((hi - lo) / width.max(f64::MIN_POSITIVE)).ceil() as usize).max(1)
+    /// More bins than any histogram draws; a bound against a tiny interval.
+    const MAX_BINS: f64 = 10_000.;
+    // An interval that is not a positive, finite width — or one too fine to
+    // bin this extent — falls back to the automatic thresholds.
+    let interval = match thresholds {
+        Thresholds::Interval(width)
+            if width.is_finite() && width > 0. && (hi - lo) / width <= MAX_BINS =>
+        {
+            Some(width)
         }
+        _ => None,
     };
-    let width = match thresholds {
-        Thresholds::Interval(width) => width.max(f64::MIN_POSITIVE),
-        _ => nice_bin_width((hi - lo) / count as f64),
+    let width = match (interval, thresholds) {
+        (Some(width), _) => width,
+        (None, Thresholds::Count(count)) => nice_bin_width((hi - lo) / count.max(1) as f64),
+        (None, _) => nice_bin_width((hi - lo) / 10.),
     };
 
-    let mut bins: Vec<Bin> = Vec::new();
-    let mut edge = lo;
-    while edge < hi {
-        bins.push(Bin {
-            x0: edge,
-            x1: edge + width,
+    // Each edge is `lo + i * width` rather than a running sum, so rounding
+    // does not drift across the bins.
+    let count = ((hi - lo) / width).ceil().clamp(1., MAX_BINS) as usize;
+    let mut bins: Vec<Bin> = (0..count)
+        .map(|i| Bin {
+            x0: lo + i as f64 * width,
+            x1: lo + (i + 1) as f64 * width,
             rows: Vec::new(),
-        });
-        edge += width;
-    }
+        })
+        .collect();
     if bins.is_empty() {
         bins.push(Bin {
             x0: lo,
@@ -411,41 +420,65 @@ pub fn stack_wide(
         }
     }
 
-    let totals: Vec<f64> = (0..categories.len())
-        .map(|category| grid.iter().map(|row| row[category]).sum())
-        .collect();
+    stack_grid(&mut series, &categories, &grid, offset);
+    series
+}
 
-    // The running total of the series drawn before this one, per category. It
-    // lives outside the series loop: each series sits on everything stacked
-    // under it, which is what stacking means.
-    let mut lower = vec![0.; categories.len()];
-    for (series_index, stacked) in series.iter_mut().enumerate() {
-        for (category, category_value) in categories.iter().enumerate() {
-            let value = grid[series_index][category];
+/// Stack a `series × category` grid of values into `series`' points, the one
+/// stacking loop both [`stack_wide`] and [`stack_long`] share.
+///
+/// Like d3's `stackOffsetDiverging`, positive values stack up from zero and
+/// negative ones down from it, so a negative segment never overlaps a
+/// positive one. `Normalize` then maps each category's extent onto `[0, 1]`
+/// (d3's `expand`) and `Center` centres it on zero (Plot's `center`).
+fn stack_grid(
+    series: &mut [StackedSeries],
+    categories: &[Value],
+    grid: &[Vec<f64>],
+    offset: StackOffset,
+) {
+    let mut above = vec![0.; categories.len()];
+    let mut below = vec![0.; categories.len()];
+    let mut spans: Vec<Vec<(f64, f64)>> = Vec::with_capacity(series.len());
+    for values in grid {
+        let mut row = Vec::with_capacity(categories.len());
+        for (category, &value) in values.iter().enumerate() {
+            let value = if value.is_finite() { value } else { 0. };
+            let span = match offset {
+                StackOffset::None => (0., value),
+                _ if value < 0. => {
+                    let base = below[category];
+                    below[category] += value;
+                    (base, below[category])
+                }
+                _ => {
+                    let base = above[category];
+                    above[category] += value;
+                    (base, above[category])
+                }
+            };
+            row.push(span);
+        }
+        spans.push(row);
+    }
+    for (stacked, row) in series.iter_mut().zip(spans) {
+        for (category, (category_value, (y0, y1))) in categories.iter().zip(row).enumerate() {
+            let (lo, hi) = (below[category], above[category]);
             let (y0, y1) = match offset {
-                StackOffset::Zero => (lower[category], lower[category] + value),
                 StackOffset::Normalize => {
-                    let total = totals[category];
-                    let base = if total == 0. {
-                        0.
+                    let extent = hi - lo;
+                    if extent == 0. {
+                        (0., 0.)
                     } else {
-                        lower[category] / total
-                    };
-                    let top = if total == 0. {
-                        0.
-                    } else {
-                        (lower[category] + value) / total
-                    };
-                    (base, top)
+                        ((y0 - lo) / extent, (y1 - lo) / extent)
+                    }
                 }
                 StackOffset::Center => {
-                    let total = totals[category];
-                    let base = -total / 2. + lower[category];
-                    (base, base + value)
+                    let middle = (lo + hi) / 2.;
+                    (y0 - middle, y1 - middle)
                 }
-                StackOffset::None => (0., value),
+                StackOffset::Zero | StackOffset::None => (y0, y1),
             };
-            lower[category] += value;
             stacked.points.push(StackedPoint {
                 x: category_value.clone(),
                 y0,
@@ -453,8 +486,6 @@ pub fn stack_wide(
             });
         }
     }
-
-    series
 }
 
 /// Long-to-wide: Plot's `Plot.stackY` over long data, where one field names the
@@ -512,49 +543,7 @@ pub fn stack_long(
         })
         .collect();
 
-    let totals: Vec<f64> = (0..categories.len())
-        .map(|category| grid.iter().map(|row| row[category]).sum())
-        .collect();
-
-    // The running total of the series drawn before this one, per category. It
-    // lives outside the series loop: each series sits on everything stacked
-    // under it, which is what stacking means.
-    let mut lower = vec![0.; categories.len()];
-    for (series_index, stacked) in series.iter_mut().enumerate() {
-        for (category, category_value) in categories.iter().enumerate() {
-            let value = grid[series_index][category];
-            let (y0, y1) = match offset {
-                StackOffset::Zero => (lower[category], lower[category] + value),
-                StackOffset::Normalize => {
-                    let total = totals[category];
-                    let base = if total == 0. {
-                        0.
-                    } else {
-                        lower[category] / total
-                    };
-                    let top = if total == 0. {
-                        0.
-                    } else {
-                        (lower[category] + value) / total
-                    };
-                    (base, top)
-                }
-                StackOffset::Center => {
-                    let total = totals[category];
-                    let base = -total / 2. + lower[category];
-                    (base, base + value)
-                }
-                StackOffset::None => (0., value),
-            };
-            lower[category] += value;
-            stacked.points.push(StackedPoint {
-                x: category_value.clone(),
-                y0,
-                y1,
-            });
-        }
-    }
-
+    stack_grid(&mut series, &categories, &grid, offset);
     series
 }
 
@@ -822,6 +811,11 @@ pub fn dodge(
             neighbours.push((centre, other_offset));
         }
 
+        // A `Start` or `End` dodge packs away from its baseline only; an
+        // offset below zero would put the circle outside the frame.
+        if config.anchor != DodgeAnchor::Middle {
+            candidates.retain(|candidate| *candidate >= -1e-3);
+        }
         // Nearest first, so the packed shape stays compact.
         candidates.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
 
@@ -928,13 +922,15 @@ pub fn select(data: &Dataset, config: &Select) -> Dataset {
                             .unwrap_or(f64::INFINITY)
                             .total_cmp(&b.number(field).unwrap_or(f64::INFINITY))
                     }),
+                // `max_by` would keep the *last* of equal values; comparing
+                // reversed under `min_by` keeps the first, Plot's `greatest`.
                 Selector::Max(field) => members
                     .iter()
                     .filter(|row| row.number(field).is_some())
-                    .max_by(|a, b| {
-                        a.number(field)
+                    .min_by(|a, b| {
+                        b.number(field)
                             .unwrap_or(f64::NEG_INFINITY)
-                            .total_cmp(&b.number(field).unwrap_or(f64::NEG_INFINITY))
+                            .total_cmp(&a.number(field).unwrap_or(f64::NEG_INFINITY))
                     }),
             }?;
             Some((*chosen).clone())

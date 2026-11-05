@@ -19,7 +19,10 @@ use crate::value::format_number;
 pub fn linear_ticks(domain: [f64; 2], count: usize, transform: Transform) -> Vec<f64> {
     let count = count.max(2);
     let [lo, hi] = domain;
-    if !lo.is_finite() || !hi.is_finite() || lo == hi {
+    if !lo.is_finite() || !hi.is_finite() {
+        return vec![];
+    }
+    if lo == hi {
         return vec![lo];
     }
 
@@ -31,16 +34,32 @@ pub fn linear_ticks(domain: [f64; 2], count: usize, transform: Transform) -> Vec
 }
 
 /// Round values spaced by a nice step, the linear-scale tick layout.
+///
+/// Each tick is `i * step` for a whole `i`, rather than a running sum, so a
+/// step below one ulp of the domain cannot stall the loop and rounding error
+/// does not accumulate across the axis.
 fn nice_linear_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
-    let step = nice_step((hi - lo).abs() / (count - 1) as f64);
-    let start = (lo / step).ceil() * step;
-    let mut ticks = Vec::new();
-    let mut value = start;
-    while value <= hi + step * 1e-9 {
-        ticks.push(round_tick(value, step));
-        value += step;
+    /// More ticks than any axis can label; a bound against degenerate input.
+    const MAX_TICKS: f64 = 1_000.;
+    let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+    let span = hi - lo;
+    if !span.is_finite() {
+        return vec![lo, hi];
     }
-    ticks
+    let step = nice_step(span / (count - 1) as f64);
+    if !step.is_finite() || step <= 0. {
+        return vec![lo];
+    }
+    let first = (lo / step - 1e-9).ceil();
+    let last = (hi / step + 1e-9).floor();
+    if !(last - first).is_finite() || last - first > MAX_TICKS || last < first {
+        // The step is lost in the domain's magnitude (`1e16..1e16 + 4`), so
+        // no round value separates the ends: label the ends themselves.
+        return vec![lo, hi];
+    }
+    (0..=(last - first) as usize)
+        .map(|i| round_tick((first + i as f64) * step, step))
+        .collect()
 }
 
 /// Log ticks: the decades inside `lo..=hi`, subdivided by 2 and 5 when the
@@ -52,11 +71,16 @@ fn log_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
     }
     let first = lo.log10().floor() as i32;
     let last = hi.log10().ceil() as i32;
+    // The decade boundaries inside the domain, with a little slack because
+    // `log10(1000)` is `2.9999999999999996`.
+    let inner_first = (lo.log10() - 1e-9).ceil() as i32;
+    let inner_last = (hi.log10() + 1e-9).floor() as i32;
 
-    // A log axis whose data sits inside one decade has no decade boundaries to
-    // label, so it falls back to the linear nice ticks inside that decade:
-    // 1800..2600 labels 2000, 2200, 2400 rather than a lone 2000.
-    if last - first <= 1 {
+    // A log axis whose data holds fewer than two decade boundaries has too few
+    // to label, so it falls back to the linear nice ticks inside it:
+    // 1800..2600 labels 2000, 2200, 2400 rather than a lone 2000. A domain
+    // like 10..100 holds both of its decades, so it labels them.
+    if inner_last - inner_first < 1 {
         let mut ticks = nice_linear_ticks(lo, hi, count);
         ticks.retain(|tick| *tick >= lo * (1. - 1e-12) && *tick <= hi * (1. + 1e-12));
         return ticks;
@@ -127,8 +151,12 @@ pub fn time_ticks(domain: [f64; 2], count: usize) -> Vec<f64> {
         return vec![lo];
     }
 
+    /// The most ticks a time axis lays out; a denser request coarsens the
+    /// step rather than cutting the axis off partway through its domain.
+    const MAX_TICKS: f64 = 64.;
     let span_ms = hi - lo;
-    let rough = span_ms / (count - 1) as f64;
+    // d3's `tickInterval` target: the span over the count (not count - 1).
+    let rough = (span_ms / count as f64).max(span_ms / MAX_TICKS);
     let step = choose_time_step(rough);
 
     let start = floor_to_step(lo, step);
@@ -138,10 +166,12 @@ pub fn time_ticks(domain: [f64; 2], count: usize) -> Vec<f64> {
         if current >= lo {
             ticks.push(current);
         }
-        current = advance(current, step);
-        if ticks.len() > 64 {
+        let next = advance(current, step);
+        // A date chrono cannot represent stops the walk instead of looping.
+        if next <= current || ticks.len() > 4 * MAX_TICKS as usize {
             break;
         }
+        current = next;
     }
     ticks
 }
@@ -151,6 +181,8 @@ pub fn time_ticks(domain: [f64; 2], count: usize) -> Vec<f64> {
 #[derive(Clone, Copy, Debug)]
 enum TimeStep {
     Fixed(Duration),
+    /// Whole weeks, each starting on a Sunday at midnight.
+    Weeks(u32),
     Months(u32),
 }
 
@@ -185,8 +217,16 @@ fn choose_time_step(rough_ms: f64) -> TimeStep {
     if rough_ms <= DAY {
         return TimeStep::Fixed(Duration::days(1));
     }
+    if rough_ms <= 2. * DAY {
+        return TimeStep::Fixed(Duration::days(2));
+    }
+    // d3's interval ladder: weeks start on Sunday, and 2 weeks sits between a
+    // week and a month so a ~6-week axis does not collapse to two ticks.
     if rough_ms <= WEEK {
-        return TimeStep::Fixed(Duration::days(7));
+        return TimeStep::Weeks(1);
+    }
+    if rough_ms <= 2. * WEEK {
+        return TimeStep::Weeks(2);
     }
     if rough_ms <= MONTH {
         return TimeStep::Months(1);
@@ -197,7 +237,9 @@ fn choose_time_step(rough_ms: f64) -> TimeStep {
     if rough_ms <= 6. * MONTH {
         return TimeStep::Months(6);
     }
-    let years = (rough_ms / YEAR).ceil() as u32;
+    // Years step by 1, 2 or 5 times a power of ten, so the labels read
+    // 2000, 2005, 2010 rather than every seventh year.
+    let years = nice_step(rough_ms / YEAR).max(1.).round() as u32;
     TimeStep::Months(12 * years.max(1))
 }
 
@@ -234,12 +276,22 @@ fn floor_to_step(millis: f64, step: TimeStep) -> f64 {
                     .unwrap_or(datetime)
             }
         }
+        TimeStep::Weeks(_) => {
+            let back = datetime.weekday().num_days_from_sunday() as i64;
+            (datetime - Duration::days(back))
+                .with_hour(0)
+                .and_then(|d| d.with_minute(0))
+                .and_then(|d| d.with_second(0))
+                .and_then(|d| d.with_nanosecond(0))
+                .unwrap_or(datetime)
+        }
         TimeStep::Months(months) => {
             let total_months = datetime.year() * 12 + datetime.month0() as i32;
-            let floored_months = (total_months / months as i32) * months as i32;
+            // `div_euclid` floors, so a year before 0 still lands on a boundary.
+            let floored_months = total_months.div_euclid(months as i32) * months as i32;
             Utc.with_ymd_and_hms(
-                floored_months / 12,
-                (floored_months % 12) as u32 + 1,
+                floored_months.div_euclid(12),
+                floored_months.rem_euclid(12) as u32 + 1,
                 1,
                 0,
                 0,
@@ -255,12 +307,13 @@ fn floor_to_step(millis: f64, step: TimeStep) -> f64 {
 fn advance(millis: f64, step: TimeStep) -> f64 {
     match step {
         TimeStep::Fixed(duration) => millis + duration.num_milliseconds() as f64,
+        TimeStep::Weeks(weeks) => millis + Duration::weeks(weeks as i64).num_milliseconds() as f64,
         TimeStep::Months(months) => {
             let Some(datetime) = Utc.timestamp_millis_opt(millis as i64).single() else {
                 return millis;
             };
             let total = datetime.year() * 12 + datetime.month0() as i32 + months as i32;
-            Utc.with_ymd_and_hms(total / 12, (total % 12) as u32 + 1, 1, 0, 0, 0)
+            Utc.with_ymd_and_hms(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1, 0, 0, 0)
                 .single()
                 .map(|d| d.timestamp_millis() as f64)
                 .unwrap_or(millis)
@@ -300,7 +353,9 @@ pub fn format_linear_tick(value: f64, step: f64) -> SharedString {
     if step >= 1. {
         // A whole step prints whole numbers even when the domain itself is
         // fractional, so a tick of 50 in 0..100 reads "50".
-        if value == value.trunc() {
+        // Below 1e15 an `i64` holds the value exactly; above it the cast
+        // would saturate, so the general formatter takes over.
+        if value == value.trunc() && value.abs() < 1e15 {
             return SharedString::from(format!("{}", value as i64));
         }
         return SharedString::from(format_number(value));

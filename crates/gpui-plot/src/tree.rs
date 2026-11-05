@@ -54,34 +54,34 @@ pub fn tidy(paths: &[Vec<&str>]) -> Tree {
     let mut links: Vec<(usize, usize)> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
 
+    // Every prefix of a path is a node too, as in Plot's stratify: `"a/b/c"`
+    // implies `"a"` and `"a/b"`. Walking each path from its root creates a
+    // parent before its child, so the hierarchy does not depend on whether a
+    // parent's own row comes before or after its children's.
     for (row, path) in paths.iter().enumerate() {
-        let chain = link(path, '/');
-        // The parent of the whole path is the chain without its last label: the
-        // node of the path's prefix, or none for a root (single-label path).
-        let parent_view: Vec<&str> = path[..path.len().saturating_sub(1)].to_vec();
-        let parent_chain = link(&parent_view, '/');
-        let parent = if parent_view.is_empty() {
-            None
-        } else {
-            index.get(&parent_chain).copied()
-        };
-        if let Some(&node) = index.get(&chain) {
-            // The path already exists: nothing new to add.
-            let _ = node;
-            continue;
-        }
-        let node = nodes.len();
-        index.insert(chain, node);
-        nodes.push(Node {
-            label: path.last().copied().unwrap_or("").to_string(),
-            depth: path.len().saturating_sub(1),
-            row,
-            x: 0.,
-            y: 0.,
-        });
-        parents.push(parent);
-        if let Some(p) = parent {
-            links.push((node, p));
+        let mut parent: Option<usize> = None;
+        for depth in 0..path.len() {
+            let chain = link(&path[..=depth], '/');
+            let node = match index.get(&chain) {
+                Some(&node) => node,
+                None => {
+                    let node = nodes.len();
+                    index.insert(chain, node);
+                    nodes.push(Node {
+                        label: path[depth].to_string(),
+                        depth,
+                        row,
+                        x: 0.,
+                        y: 0.,
+                    });
+                    parents.push(parent);
+                    if let Some(p) = parent {
+                        links.push((node, p));
+                    }
+                    node
+                }
+            };
+            parent = Some(node);
         }
     }
 
@@ -202,21 +202,31 @@ mod tests {
             .map(|p| p.split('/').collect::<Vec<_>>())
             .collect::<Vec<_>>();
         let tree = tidy(&paths);
-        // Node order: r/a(0), r/b(1), r/c(2), then r/a/x(3), r/a/y(4).
-        // `r` is never a node, so r/a, r/b and r/c are all roots of their own
-        // subtrees. a's children x and y take slots 0 and 1, so a sits at 0.5;
-        // the leaf roots b and c take slots 2 and 3.
-        assert!((tree.nodes[0].x - 0.5).abs() < 1e-9);
-        assert_eq!(tree.nodes[1].x, 2.);
-        assert_eq!(tree.nodes[2].x, 3.);
-        // x and y are leaves one level below a (which is itself a root).
-        assert_eq!(tree.nodes[3].x, 0.);
-        assert_eq!(tree.nodes[4].x, 1.);
-        assert_eq!(tree.nodes[3].y, 1.);
-        assert_eq!(tree.nodes[4].y, 1.);
+        // `r` is implied by every path, so it is the one root (Plot's
+        // stratify). Node order: r(0), a(1), b(2), c(3), x(4), y(5).
+        let labels: Vec<&str> = tree.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(labels, ["r", "a", "b", "c", "x", "y"]);
+        // a's children x and y take slots 0 and 1, so a sits at 0.5; the
+        // leaves b and c take slots 2 and 3; r centres over its children.
+        assert!((tree.nodes[1].x - 0.5).abs() < 1e-9);
+        assert_eq!(tree.nodes[2].x, 2.);
+        assert_eq!(tree.nodes[3].x, 3.);
+        assert_eq!(tree.nodes[4].x, 0.);
+        assert_eq!(tree.nodes[5].x, 1.);
+        assert!((tree.nodes[0].x - (0.5 + 2. + 3.) / 3.).abs() < 1e-9);
         assert_eq!(tree.nodes[0].y, 0.);
-        // The layout spans three leaf slots and two levels.
+        assert_eq!(tree.nodes[1].y, 1.);
+        assert_eq!(tree.nodes[4].y, 2.);
         assert_eq!(tree.width, 4.);
-        assert_eq!(tree.height, 2.);
+        assert_eq!(tree.height, 3.);
+    }
+
+    #[test]
+    fn a_child_before_its_parent_still_links() {
+        let paths = [vec!["a", "b"], vec!["a"]];
+        let tree = tidy(&paths);
+        assert_eq!(tree.nodes.len(), 2);
+        assert_eq!(tree.links, vec![(1, 0)]);
+        assert_eq!(tree.nodes[1].depth, 1);
     }
 }

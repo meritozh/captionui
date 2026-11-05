@@ -70,13 +70,23 @@ fn draw_links(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let coords: Vec<Point2> = points.iter().map(|(_, point)| *point).collect();
     let triangulation = delaunay::Triangulation::new(&coords);
 
+    // `indices` maps each projected point to the distinct vertex it became;
+    // invert it so a vertex finds the first projected point that supplied it,
+    // and that point's row (a row that failed to project has no point, so the
+    // projected index is not the row index).
+    let mut vertex_row = vec![usize::MAX; triangulation.points.len()];
+    for (projected, &vertex) in triangulation.indices.iter().enumerate() {
+        if vertex_row[vertex] == usize::MAX {
+            vertex_row[vertex] = points[projected].0;
+        }
+    }
+
     ctx.clipped(|ctx| {
         for (a, b) in triangulation.edges() {
-            // The link's style comes from the row it starts at. The
-            // triangulation's vertices are the distinct points, so its index
-            // maps back through `indices` to the row that supplied the first
-            // of them.
-            let row = triangulation.indices[a];
+            // The link's style comes from the row it starts at.
+            let Some(&row) = vertex_row.get(a).filter(|row| **row != usize::MAX) else {
+                continue;
+            };
             let from = absolute(ctx, triangulation.points[a]);
             let to = absolute(ctx, triangulation.points[b]);
             let color = paint::alpha(

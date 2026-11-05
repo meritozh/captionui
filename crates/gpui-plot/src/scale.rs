@@ -48,8 +48,13 @@ impl Transform {
         match self {
             Transform::Linear => Some(value),
             Transform::Log => (value > 0.).then(|| value.ln()),
-            Transform::Pow => (value >= 0.).then(|| value.powf(exponent)),
-            Transform::Sqrt => (value >= 0.).then(|| value.sqrt()),
+            // Pow and sqrt keep the sign, as d3's do, so a domain that
+            // reaches below zero still scales.
+            Transform::Pow => {
+                let v = value.signum() * value.abs().powf(exponent);
+                v.is_finite().then_some(v)
+            }
+            Transform::Sqrt => Some(value.signum() * value.abs().sqrt()),
             Transform::Symlog => {
                 let sign = value.signum();
                 Some(sign * (value.abs() / constant).ln_1p())
@@ -62,8 +67,8 @@ impl Transform {
         match self {
             Transform::Linear => value,
             Transform::Log => value.exp(),
-            Transform::Pow => value.powf(1. / exponent),
-            Transform::Sqrt => value * value,
+            Transform::Pow => value.signum() * value.abs().powf(1. / exponent),
+            Transform::Sqrt => value.signum() * value * value,
             Transform::Symlog => value.signum() * ((value.abs()).exp_m1() * constant),
         }
     }
@@ -108,8 +113,14 @@ impl ContinuousScale {
     }
 
     /// Set the exponent of a [`Transform::Pow`] scale.
+    ///
+    /// An exponent of zero (every value maps to one point) or a non-finite
+    /// one has no inverse, so it is ignored and the scale keeps its previous
+    /// exponent.
     pub fn with_exponent(mut self, exponent: f64) -> Self {
-        self.exponent = exponent;
+        if exponent.is_finite() && exponent != 0. {
+            self.exponent = exponent;
+        }
         self
     }
 
@@ -190,6 +201,12 @@ impl ContinuousScale {
             return self.domain[0];
         }
         let ratio = ((position - self.range[0]) / (self.range[1] - self.range[0])) as f64;
+        // A clamped scale inverts to its domain too, mirroring `position`.
+        let ratio = if self.clamp {
+            ratio.clamp(0., 1.)
+        } else {
+            ratio
+        };
         self.transform
             .inverse(a + ratio * (b - a), self.exponent, self.constant)
     }
@@ -313,7 +330,11 @@ impl BandScale {
 
     /// The band's left edge (or top edge for a vertical band scale).
     pub fn start(&self, key: &ValueKey) -> Option<f32> {
-        self.inner.tick(key)
+        // A band capped by `max_band_width` is narrower than the slot it
+        // sits in, so it is centred in that slot, as Plot centres it.
+        let natural = self.inner.step() * (1. - self.padding_inner);
+        let offset = ((natural - self.band_width()) / 2.).max(0.);
+        self.inner.tick(key).map(|start| start + offset)
     }
 
     /// The band's center.
@@ -709,7 +730,9 @@ pub fn extent(values: impl IntoIterator<Item = Value>) -> Option<[f64; 2]> {
     let mut min: Option<f64> = None;
     let mut max: Option<f64> = None;
     for value in values {
-        let Some(number) = value.as_number() else {
+        // NaN and ±inf have no place on an axis; one of them would turn the
+        // whole domain into NaN or collapse every position onto one edge.
+        let Some(number) = value.as_number().filter(|number| number.is_finite()) else {
             continue;
         };
         min = Some(min.map_or(number, |min| min.min(number)));

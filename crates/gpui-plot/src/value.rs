@@ -201,7 +201,8 @@ impl F64Bits {
     fn of(value: f64) -> Self {
         // Total order over floats: -0 sorts below +0, NaN sorts last.
         Self(if value.is_nan() {
-            u64::MAX
+            // A positive NaN, which `total_cmp` sorts above +inf.
+            f64::NAN.to_bits()
         } else if value == 0. {
             0
         } else {
@@ -253,7 +254,9 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Null, Value::Null) => true,
-            (Value::Number(a), Value::Number(b)) => a == b,
+            // Through the key's bits, so `NaN == NaN` (as `Eq` promises)
+            // and `-0 == +0`, matching `cmp` and `key`.
+            (Value::Number(a), Value::Number(b)) => F64Bits::of(*a) == F64Bits::of(*b),
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -283,7 +286,9 @@ impl Ord for Value {
         match rank(self).cmp(&rank(other)) {
             Ordering::Equal => match (self, other) {
                 (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-                (Value::Number(a), Value::Number(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+                // A total order consistent with `Eq`, even when a caller
+                // builds a `Number(NaN)` directly: NaN sorts last.
+                (Value::Number(a), Value::Number(b)) => F64Bits::of(*a).cmp(&F64Bits::of(*b)),
                 (Value::Date(a), Value::Date(b)) => a.cmp(b),
                 (Value::Text(a), Value::Text(b)) => a.cmp(b),
                 _ => Ordering::Equal,
@@ -404,10 +409,19 @@ pub fn format_number(value: f64) -> String {
         3
     };
     let formatted = format!("{value:.decimals$}");
-    formatted
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
+    // Only a fractional part has trailing zeros to drop: trimming a whole
+    // number would turn `1000` into `1`.
+    let trimmed = if formatted.contains('.') {
+        formatted.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        formatted.as_str()
+    };
+    // A tiny negative value rounds to `-0`; show it as `0`.
+    if trimmed == "-0" {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 impl fmt::Display for Value {

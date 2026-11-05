@@ -16,7 +16,7 @@ use crate::frame::Frame;
 use crate::mark::{CrossAxis, Curve, MarkKind};
 use crate::paint::{self, Label};
 use crate::render::{PreparedMark, PreparedRow};
-use crate::scale::{ColorScale, PositionScale};
+use crate::scale::PositionScale;
 use crate::style::Symbol;
 use crate::theme::PlotTheme;
 use crate::value::Value;
@@ -34,9 +34,9 @@ pub struct DrawContext<'a> {
     /// The offset a mark's rows have in the flattened row list, so a row can
     /// tell whether it is the hovered one.
     pub row_offset: usize,
-    /// The plot's ordinal color scale, shared by every mark so a series keeps
-    /// one color wherever it appears.
-    pub ordinal: &'a ColorScale,
+    /// The plot's color scales, shared by every mark so a series keeps one
+    /// color wherever it appears, and read by the legend and tooltip too.
+    pub colors: &'a crate::render::color::PlotColors,
     pub window: &'a mut Window,
     pub cx: &'a mut App,
 }
@@ -54,7 +54,7 @@ impl DrawContext<'_> {
         let theme = self.theme;
         let mark_index = self.mark_index;
         let appear = self.appear;
-        let ordinal = self.ordinal;
+        let colors = self.colors;
         let cx = &mut *self.cx;
         let window = &mut *self.window;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -66,7 +66,7 @@ impl DrawContext<'_> {
                 hover_progress: self.hover_progress,
                 hovered: self.hovered,
                 row_offset: self.row_offset,
-                ordinal,
+                colors,
                 window,
                 cx,
             };
@@ -81,39 +81,19 @@ impl DrawContext<'_> {
     /// `currentColor`. A line and a dot over the same data are then the same
     /// color rather than two arbitrary palette entries.
     pub fn default_fill(&self, prepared: &PreparedMark) -> Hsla {
-        if prepared.mark.channels.fill.is_some() {
-            return prepared.mark.style.fill;
-        }
-        if has_series(prepared) {
-            self.theme.palette_color(self.mark_index)
-        } else {
-            self.theme.mark_color
-        }
+        self.colors.default_fill(prepared, self.mark_index)
     }
 
     /// The default stroke of this mark, matching its fill.
     pub fn default_stroke(&self, prepared: &PreparedMark) -> Hsla {
-        if prepared.mark.channels.stroke.is_some() {
-            return prepared.mark.style.stroke;
-        }
-        if has_series(prepared) {
-            self.theme.palette_color(self.mark_index)
-        } else {
-            self.theme.mark_color
-        }
+        self.colors.default_stroke(prepared, self.mark_index)
     }
 
     /// The color of one row's series, for a mark that paints per group rather
     /// than per row: a line's stroke follows its `z` value through the plot's
     /// shared ordinal scale, the same one the legend reads.
     pub fn series_color(&self, prepared: &PreparedMark, row: &PreparedRow) -> Hsla {
-        if let Some(channel) = prepared.mark.channels.stroke.as_ref() {
-            return channel.read(&row.row);
-        }
-        match row.z.as_ref().and_then(|z| self.ordinal_scale().color(z)) {
-            Some(color) => color,
-            None => self.default_stroke(prepared),
-        }
+        self.colors.series_color(prepared, self.mark_index, row)
     }
 }
 
@@ -128,11 +108,6 @@ impl DrawContext<'_> {
         }
     }
 
-    /// The plot's ordinal color scale.
-    pub fn ordinal_scale(&self) -> ColorScale {
-        self.ordinal.clone()
-    }
-
     /// The opacity a row paints its fill at: the mark's `opacity`, then its
     /// `fillOpacity`, then the row's own `opacity` channel.
     pub fn row_fill_opacity(&self, prepared: &PreparedMark, row: &PreparedRow) -> f32 {
@@ -145,9 +120,7 @@ impl DrawContext<'_> {
     }
 }
 
-fn has_series(prepared: &PreparedMark) -> bool {
-    prepared.rows.iter().any(|row| row.z.is_some())
-}
+use crate::render::color::has_series;
 
 /// Resolve fill and stroke for each row, honouring the mark's color channels
 /// and a `z`-driven ordinal color scale.
@@ -175,30 +148,21 @@ impl Colors {
                 .collect()
         });
 
-        // A `z` channel with no explicit fill paints each series in a palette
-        // color, which is Plot's default ordinal color scale. The scale is one
-        // for the whole plot, not one per mark: a chart drawn as a line per
-        // series would otherwise paint every line in the first palette color.
-        let z_scale = (!has_series(prepared) || prepared.mark.channels.fill.is_some())
-            .then_some(())
-            .is_none()
-            .then(|| ctx.ordinal_scale());
-
-        let fill = match (fill, &z_scale) {
-            (Some(colors), _) => Some(colors),
-            (None, Some(scale)) => Some(
+        // Without a fill channel a row is colored by the plot's scales — the
+        // continuous `color` option, then the shared ordinal `z` scale — the
+        // same resolution the legend and tooltip read.
+        let scaled = fill.is_none()
+            && (has_series(prepared) || ctx.colors.continuous.is_some());
+        let fill = match fill {
+            Some(colors) => Some(colors),
+            None if scaled => Some(
                 prepared
                     .rows
                     .iter()
-                    .map(|row| {
-                        row.z
-                            .as_ref()
-                            .and_then(|z| scale.color(z))
-                            .unwrap_or_else(|| ctx.default_fill(prepared))
-                    })
+                    .map(|row| ctx.colors.row_fill(prepared, ctx.mark_index, row))
                     .collect(),
             ),
-            (None, None) => None,
+            None => None,
         };
 
         let fallback_fill = ctx.default_fill(prepared);
@@ -1025,9 +989,12 @@ fn draw_tree(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
 
     ctx.clipped(|ctx| {
         // Map the tidy layout onto the plot, leaving a margin for the labels.
+        // The layout is in plot-local pixels, like every other mark's
+        // positions: the links are lifted with `ctx.absolute` and
+        // `paint_symbol` lifts the nodes, so both land on the same points.
         let margin = px(20.);
         let inner = Bounds::new(
-            point(plot.origin.x + margin, plot.origin.y + margin),
+            point(margin, margin),
             gpui::size(
                 px((plot.size.width.as_f32() - margin.as_f32() * 2.).max(1.)),
                 px((plot.size.height.as_f32() - margin.as_f32() * 2.).max(1.)),
@@ -1047,8 +1014,8 @@ fn draw_tree(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         // curve from parent to child.
         let link_style = prepared.mark.style.stroke_width.max(1.);
         for (index, &(child, parent)) in tree.links.iter().enumerate() {
-            let from = node_at(tree.nodes[parent].x, tree.nodes[parent].y);
-            let to = node_at(tree.nodes[child].x, tree.nodes[child].y);
+            let from = ctx.absolute(node_at(tree.nodes[parent].x, tree.nodes[parent].y));
+            let to = ctx.absolute(node_at(tree.nodes[child].x, tree.nodes[child].y));
             let mut builder = PathBuilder::stroke(px(link_style));
             builder.move_to(from);
             builder.curve_to(
@@ -1210,7 +1177,26 @@ pub fn position(
     ctx: &DrawContext<'_>,
     row: &PreparedRow,
 ) -> Option<Point<Pixels>> {
-    let frame = ctx.frame;
+    position_in(prepared, ctx.frame, row)
+}
+
+/// [`position`] against a frame alone, for the hover hit-test, which has no
+/// draw context but must place a row exactly where the painter did.
+pub fn position_in(
+    prepared: &PreparedMark,
+    frame: &Frame,
+    row: &PreparedRow,
+) -> Option<Point<Pixels>> {
+    // A geo mark places its rows through its projection, not the scales.
+    if prepared.mark.kind == MarkKind::Geo {
+        let projection = prepared.mark.projection.clone().unwrap_or_default();
+        let (lon, lat) = (row.x_value().as_number()?, row.y_value().as_number()?);
+        let [fx, fy] = projection.project(lon, lat);
+        return Some(point(
+            px(frame.plot.size.width.as_f32() * fx as f32),
+            px(frame.plot.size.height.as_f32() * fy as f32),
+        ));
+    }
     let placed = if prepared.mark.kind.is_x_only()
         && prepared.mark.kind.cross_axis() == CrossAxis::Anchor
     {

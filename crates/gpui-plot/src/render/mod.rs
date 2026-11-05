@@ -6,6 +6,7 @@
 //! unions their values to build the scales. Drawing then only reads pixels.
 
 pub(crate) mod basic;
+pub(crate) mod color;
 pub(crate) mod delaunay;
 pub(crate) mod radial;
 pub(crate) mod stat;
@@ -536,8 +537,17 @@ fn apply_sort(rows: &mut [PreparedRow], mark: &Mark) {
     } else {
         // Sorting without a field sorts by the mark's own value: a bar chart's
         // length, which is Plot's default for a sorted bar chart.
-        rows.sort_by(|a, _b| {
-            let ordering = a.y_value().cmp(a.x_value());
+        // The value is on x when the categories are on y (a `barX`), else y.
+        let value_on_x = mark.kind.category().band_y;
+        let value = |row: &PreparedRow| {
+            if value_on_x {
+                row.x_value().clone()
+            } else {
+                row.y_value().clone()
+            }
+        };
+        rows.sort_by(|a, b| {
+            let ordering = value(a).cmp(&value(b));
             if sort.descending {
                 ordering.reverse()
             } else {

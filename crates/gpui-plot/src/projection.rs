@@ -63,7 +63,11 @@ impl Projection {
     }
 
     /// A spherical Mercator view, fit to a longitude/latitude rectangle.
+    ///
+    /// A view whose `east` is west of its `west` crosses the antimeridian
+    /// (`170..-170` is the 20° around 180°), so `east` is read a turn later.
     pub fn mercator(west: f64, east: f64, north: f64, south: f64) -> Self {
+        let east = if east < west { east + 360. } else { east };
         Projection::Mercator(Mercator {
             west,
             east,
@@ -88,11 +92,17 @@ impl Projection {
                 // mercator latitude (inverse Gudermannian), mapped to fit the
                 // view's own meridians.
                 let lng = |deg: f64| deg.to_radians();
+                // Mercator's y is infinite at the poles; clamp to the Web
+                // Mercator limit so a view reaching ±90° still has a span.
+                const LIMIT: f64 = 85.051_128_779_806_59;
                 let merc = |lat_deg: f64| {
-                    (std::f64::consts::FRAC_PI_4 + lat_deg.to_radians() / 2.)
+                    (std::f64::consts::FRAC_PI_4 + lat_deg.clamp(-LIMIT, LIMIT).to_radians() / 2.)
                         .tan()
                         .ln()
                 };
+                // Read the longitude within half a turn of the view's center,
+                // so a view across the antimeridian sees -175° as 185°.
+                let lon = p.center + (lon - p.center + 180.).rem_euclid(360.) - 180.;
                 let north_y = merc(lat.max(p.south));
                 let (north, south) = (merc(p.north), merc(p.south));
                 let span = (north - south).max(f64::MIN_POSITIVE);
