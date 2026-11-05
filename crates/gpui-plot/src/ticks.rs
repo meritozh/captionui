@@ -232,7 +232,7 @@ pub fn time_ticks(domain: [f64; 2], count: usize) -> Vec<f64> {
     /// step rather than cutting the axis off partway through its domain.
     const MAX_TICKS: f64 = 64.;
     let span_ms = hi - lo;
-    // d3's `tickInterval` target: the span over the count (not count - 1).
+    // d3's `tickInterval` target: the span over the count.
     let rough = (span_ms / count as f64).max(span_ms / MAX_TICKS);
     let step = choose_time_step(rough);
 
@@ -263,7 +263,9 @@ enum TimeStep {
     Months(u32),
 }
 
-fn choose_time_step(rough_ms: f64) -> TimeStep {
+/// d3's `utcTickInterval`: the interval of its ladder nearest (by ratio) to
+/// the span over the count, or a nice number of years past the ladder.
+fn choose_time_step(target: f64) -> TimeStep {
     const SECOND: f64 = 1000.;
     const MINUTE: f64 = 60. * SECOND;
     const HOUR: f64 = 60. * MINUTE;
@@ -271,53 +273,37 @@ fn choose_time_step(rough_ms: f64) -> TimeStep {
     const WEEK: f64 = 7. * DAY;
     const MONTH: f64 = 30. * DAY;
     const YEAR: f64 = 365. * DAY;
-
-    let candidates: [f64; 12] = [
-        SECOND,
-        5. * SECOND,
-        15. * SECOND,
-        30. * SECOND,
-        MINUTE,
-        5. * MINUTE,
-        15. * MINUTE,
-        30. * MINUTE,
-        HOUR,
-        3. * HOUR,
-        6. * HOUR,
-        12. * HOUR,
+    let fixed = |ms: f64| TimeStep::Fixed(Duration::milliseconds(ms as i64));
+    let ladder: [(f64, TimeStep); 18] = [
+        (SECOND, fixed(SECOND)),
+        (5. * SECOND, fixed(5. * SECOND)),
+        (15. * SECOND, fixed(15. * SECOND)),
+        (30. * SECOND, fixed(30. * SECOND)),
+        (MINUTE, fixed(MINUTE)),
+        (5. * MINUTE, fixed(5. * MINUTE)),
+        (15. * MINUTE, fixed(15. * MINUTE)),
+        (30. * MINUTE, fixed(30. * MINUTE)),
+        (HOUR, fixed(HOUR)),
+        (3. * HOUR, fixed(3. * HOUR)),
+        (6. * HOUR, fixed(6. * HOUR)),
+        (12. * HOUR, fixed(12. * HOUR)),
+        (DAY, fixed(DAY)),
+        (2. * DAY, fixed(2. * DAY)),
+        (WEEK, TimeStep::Weeks(1)),
+        (MONTH, TimeStep::Months(1)),
+        (3. * MONTH, TimeStep::Months(3)),
+        (YEAR, TimeStep::Months(12)),
     ];
-    for candidate in candidates {
-        if rough_ms <= candidate {
-            return TimeStep::Fixed(Duration::milliseconds(candidate as i64));
-        }
+    let i = ladder.iter().position(|(step, _)| *step > target).unwrap_or(ladder.len());
+    if i == ladder.len() {
+        let years = nice_step(target / YEAR).max(1.).round() as u32;
+        return TimeStep::Months(12 * years.max(1));
     }
-    if rough_ms <= DAY {
-        return TimeStep::Fixed(Duration::days(1));
+    if i == 0 {
+        return fixed(nice_step(target).max(1.));
     }
-    if rough_ms <= 2. * DAY {
-        return TimeStep::Fixed(Duration::days(2));
-    }
-    // d3's interval ladder: weeks start on Sunday, and 2 weeks sits between a
-    // week and a month so a ~6-week axis does not collapse to two ticks.
-    if rough_ms <= WEEK {
-        return TimeStep::Weeks(1);
-    }
-    if rough_ms <= 2. * WEEK {
-        return TimeStep::Weeks(2);
-    }
-    if rough_ms <= MONTH {
-        return TimeStep::Months(1);
-    }
-    if rough_ms <= 3. * MONTH {
-        return TimeStep::Months(3);
-    }
-    if rough_ms <= 6. * MONTH {
-        return TimeStep::Months(6);
-    }
-    // Years step by 1, 2 or 5 times a power of ten, so the labels read
-    // 2000, 2005, 2010 rather than every seventh year.
-    let years = nice_step(rough_ms / YEAR).max(1.).round() as u32;
-    TimeStep::Months(12 * years.max(1))
+    let (lo, hi) = (&ladder[i - 1], &ladder[i]);
+    if target / lo.0 < hi.0 / target { lo.1 } else { hi.1 }
 }
 
 fn floor_to_step(millis: f64, step: TimeStep) -> f64 {
@@ -403,6 +389,58 @@ fn advance(millis: f64, step: TimeStep) -> f64 {
             .unwrap_or(millis)
         }
     }
+}
+
+/// Plot's time tick labels for a list of ticks: the finest calendar field
+/// every tick sits on (year, month, day, hour …) labels each tick, and the
+/// next field up is added on a second line where it changes — `Jan\n2021`,
+/// then `Apr`, `Jul` … — Plot's `formatConditional`. `top` puts the second
+/// line above, as Plot does for a top axis.
+pub fn plot_time_labels(ticks: &[f64], top: bool) -> Vec<String> {
+    let dates: Vec<DateTime<Utc>> = ticks
+        .iter()
+        .filter_map(|m| Utc.timestamp_millis_opt(*m as i64).single())
+        .collect();
+    if dates.len() != ticks.len() {
+        return ticks.iter().map(|m| format_time_tick(*m, [ticks[0], *ticks.last().unwrap_or(m)]).to_string()).collect();
+    }
+    let max_step = ticks.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0., f64::max);
+    const DAY: f64 = 86_400_000.;
+    const MONTH: f64 = 30. * DAY;
+    let on = |f: &dyn Fn(&DateTime<Utc>) -> bool| dates.iter().all(f);
+    let midnight = |d: &DateTime<Utc>| d.hour() == 0 && d.minute() == 0 && d.second() == 0 && d.timestamp_subsec_millis() == 0;
+    // (first line, second line) formats, d3-time-format specifiers.
+    let (f1, f2): (&str, Option<&str>) = if on(&|d| midnight(d) && d.day() == 1 && d.month() == 1) {
+        ("%Y", None)
+    } else if on(&|d| midnight(d) && d.day() == 1) {
+        ("%b", Some("%Y"))
+    } else if max_step <= 6. * MONTH && on(&midnight) {
+        ("%-d", Some("%b"))
+    } else if max_step <= 3. * DAY && on(&|d| d.minute() == 0 && d.second() == 0) {
+        ("%-I %p", Some("%b %-d"))
+    } else if max_step <= 6. * 3_600_000. && on(&|d| d.second() == 0) {
+        ("%-I:%M", Some("%p"))
+    } else {
+        (":%S", Some("%-I:%M"))
+    };
+    let mut previous: Option<String> = None;
+    dates
+        .iter()
+        .map(|d| {
+            let first = crate::format::format_time(f1, *d);
+            let Some(f2) = f2 else {
+                return first;
+            };
+            let second = crate::format::format_time(f2, *d);
+            let changed = previous.as_ref() != Some(&second);
+            previous = Some(second.clone());
+            match (changed, top) {
+                (false, _) => first,
+                (true, false) => format!("{first}\n{second}"),
+                (true, true) => format!("{second}\n{first}"),
+            }
+        })
+        .collect()
 }
 
 /// The label for a time-axis tick, chosen from the domain's span the way Plot

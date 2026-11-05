@@ -423,8 +423,11 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
         Some(Ticks::Count(count)) => count,
         _ if tick_count > 0 => tick_count,
         _ => {
+            // Plot's `tickSpacing`: one tick per 80 pixels across x, per 35
+            // down y; d3 reads the fractional count, which rounding stands in
+            // for.
             let length = (range[1] - range[0]).abs();
-            ((length / if is_x { 80. } else { 35. }).round() as usize).max(2)
+            ((length / if is_x { 80. } else { 35. }).round() as usize).max(1)
         }
     };
     let label = |value: &crate::value::Value, default: gpui::SharedString| -> gpui::SharedString {
@@ -474,12 +477,17 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
             };
             let ticks = if temporal {
                 let millis = explicit.unwrap_or_else(|| scale.time_ticks(tick_count));
+                // Plot's multi-line time labels, `Jan\n2021`.
+                let top = is_x && plot.axis == Some(Some(crate::options::AxisAnchor::Top));
+                let plot_labels = crate::ticks::plot_time_labels(&millis, top);
+                let _ = format_time_tick;
                 millis
                     .into_iter()
-                    .filter_map(|millis| {
+                    .zip(plot_labels)
+                    .filter_map(|(millis, text)| {
                         let value = crate::value::Value::date_from_millis(millis as i64);
                         scale.position(millis).map(|position| AxisTick {
-                            label: label(&value, format_time_tick(millis, domain)),
+                            label: label(&value, text.into()),
                             value,
                             position,
                         })
@@ -883,14 +891,19 @@ pub(crate) fn paint_axes(
                 if tick.label.is_empty() {
                     continue;
                 }
-                let label = text(&tick.label, window);
+                // A label may run to several lines, Plot's `Jan\n2021`.
+                let lines: Vec<&str> = tick.label.split('\n').collect();
+                let line_height = size.as_f32() * 1.1;
                 let offset = style.tick_size.max(0.) + style.tick_padding;
-                let ty = if top {
-                    edge - px(offset) - label.height
-                } else {
-                    edge + px(offset)
-                };
-                label.paint_at(point(tx, ty), TextAlign::Center, None, window, cx);
+                for (i, line) in lines.iter().enumerate() {
+                    let label = text(&gpui::SharedString::from(line.to_string()), window);
+                    let ty = if top {
+                        edge - px(offset) - label.height - px(line_height * (lines.len() - 1 - i) as f32)
+                    } else {
+                        edge + px(offset + line_height * i as f32)
+                    };
+                    label.paint_at(point(tx, ty), TextAlign::Center, None, window, cx);
+                }
             }
         }
     }

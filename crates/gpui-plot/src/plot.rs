@@ -3140,11 +3140,23 @@ impl Plot {
             return None;
         }
         let label = self.derived_axis_label(x)?;
+        // Plot's `formatAxisLabel`: an inferred "date", "time" or "year" on
+        // a temporal axis says nothing the ticks don't.
+        if ["date", "time", "year"].iter().any(|n| label.eq_ignore_ascii_case(n)) && self.axis_is_temporal(x) {
+            return None;
+        }
         // Plot's `percent` marks a derived label as a percentage.
         if scale.percent == Some(true) {
             return Some(format!("{label} (%)").into());
         }
         Some(label)
+    }
+
+    /// Whether an axis's scale is temporal, from the cached frame.
+    fn axis_is_temporal(&self, x: bool) -> bool {
+        self.frame_cache
+            .as_ref()
+            .is_some_and(|f| if x { f.x.temporal } else { f.y.temporal })
     }
 
     /// The label an axis derives from its channels, before scale options.
@@ -3293,7 +3305,9 @@ impl Plot {
         if let Some(anchor) = self.y_axis_anchor()
             && let Some(label) = self.axis_label(false)
         {
-            let arrow = self.scales.y.label_arrow.unwrap_or(true) && continuous(&frame.y.scale);
+            let arrow = self.scales.y.label_arrow.unwrap_or(true)
+                && (continuous(&frame.y.scale) || self.scales.y.interval.is_some())
+                && !label.contains(['↑', '↓', '→', '←']);
             let up = !self
                 .scales
                 .y
@@ -3332,7 +3346,9 @@ impl Plot {
         if let Some(anchor) = self.x_axis_anchor()
             && let Some(label) = self.axis_label(true)
         {
-            let arrow = self.scales.x.label_arrow.unwrap_or(true) && continuous(&frame.x.scale);
+            let arrow = self.scales.x.label_arrow.unwrap_or(true)
+                && (continuous(&frame.x.scale) || self.scales.x.interval.is_some())
+                && !label.contains(['↑', '↓', '→', '←']);
             let forward = !self
                 .scales
                 .x
