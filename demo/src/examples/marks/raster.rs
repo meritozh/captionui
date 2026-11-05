@@ -48,7 +48,10 @@ fn sampled(
     ys: [f64; 2],
     fill: impl Fn(f64, f64) -> f64,
 ) -> Dataset {
-    let (dx, dy) = ((xs[1] - xs[0]) / width as f64, (ys[1] - ys[0]) / height as f64);
+    let (dx, dy) = (
+        (xs[1] - xs[0]) / width as f64,
+        (ys[1] - ys[0]) / height as f64,
+    );
     let values = (0..width * height).map(|i| {
         let x = xs[0] + ((i % width) as f64 + 0.5) * dx;
         let y = ys[0] + ((i / width) as f64 + 0.5) * dy;
@@ -87,17 +90,20 @@ fn grid_text() -> TextMark {
 /// The docs' `vapor`: NASA's water vapor for November 2022, 360 × 180, with
 /// 99999 as missing.
 fn vapor() -> Vec<f64> {
-    gpui_plot::io::rows(&data::text("MYDAL2_M_SKY_WV_2022-11-01_rgb_360x180.csv"), b',')
-        .into_iter()
-        .flatten()
-        .map(|x| {
-            if x == "99999.0" {
-                f64::NAN
-            } else {
-                x.trim().parse().unwrap_or(f64::NAN)
-            }
-        })
-        .collect()
+    gpui_plot::io::rows(
+        &data::text("MYDAL2_M_SKY_WV_2022-11-01_rgb_360x180.csv"),
+        b',',
+    )
+    .into_iter()
+    .flatten()
+    .map(|x| {
+        if x == "99999.0" {
+            f64::NAN
+        } else {
+            x.trim().parse().unwrap_or(f64::NAN)
+        }
+    })
+    .collect()
 }
 
 fn ca55_raster() -> RasterMark {
@@ -196,7 +202,11 @@ fn e10() -> Plot {
                 .y("culmen_depth_mm")
                 .fill("species"),
         )
-        .mark(dot(data::penguins()).x("culmen_length_mm").y("culmen_depth_mm"))
+        .mark(
+            dot(data::penguins())
+                .x("culmen_length_mm")
+                .y("culmen_depth_mm"),
+        )
 }
 
 /// `Plot.raster({fill: mandelbrot, x1: -2, x2: 1, y1: -1.164, y2: 1.164}).plot({aspectRatio: 1})`

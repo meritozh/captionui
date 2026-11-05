@@ -66,9 +66,19 @@ fn countyboxes() -> Dataset {
         let mut refs = Vec::new();
         indices(&geometry["arcs"], &mut refs);
         let points = refs.iter().filter_map(|&i| arcs.get(i)).flatten();
-        let mut bounds = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        let mut bounds = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
         for [x, y] in points {
-            bounds = [bounds[0].min(*x), bounds[1].min(*y), bounds[2].max(*x), bounds[3].max(*y)];
+            bounds = [
+                bounds[0].min(*x),
+                bounds[1].min(*y),
+                bounds[2].max(*x),
+                bounds[3].max(*y),
+            ];
         }
         bounds[0].is_finite().then(|| {
             Table::empty()

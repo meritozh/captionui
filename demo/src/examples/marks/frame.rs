@@ -15,9 +15,7 @@ pub fn examples() -> Vec<Example> {
 
 /// `Plot.frame().plot({x: {domain: [0, 1], grid: true}})`
 fn e01() -> Plot {
-    frame()
-        .plot()
-        .x(|x| x.domain([0., 1.]).grid(true))
+    frame().plot().x(|x| x.domain([0., 1.]).grid(true))
 }
 
 fn e02() -> Plot {

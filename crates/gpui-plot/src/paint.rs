@@ -37,7 +37,9 @@ pub fn stroke_path(points: &[Point<Pixels>], width: f32, color: Hsla) -> Option<
 
 /// Whether every point is finite, which the tessellator requires.
 pub fn finite(points: &[Point<Pixels>]) -> bool {
-    points.iter().all(|p| p.x.as_f32().is_finite() && p.y.as_f32().is_finite())
+    points
+        .iter()
+        .all(|p| p.x.as_f32().is_finite() && p.y.as_f32().is_finite())
 }
 
 /// Paint a filled path.

@@ -38,7 +38,10 @@ fn e01() -> Plot {
 fn note(text: &str, (y, m, d): (i32, u32, u32), close: f64) -> Dataset {
     Dataset::new([Table::empty()
         .with("text", Value::text(text.to_string()))
-        .with("Date", Value::date(chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()))
+        .with(
+            "Date",
+            Value::date(chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()),
+        )
         .with("Close", Value::Number(close))])
 }
 
@@ -76,29 +79,27 @@ fn e02() -> Plot {
 /// dot's hover tooltip title; there is no pointer transform or filter.
 fn e03() -> Plot {
     let has_info = |d: &Table| d.text("info").is_some_and(|s| !s.is_empty());
-    Plot::plot()
-        .grid(true)
-        .mark(
-            dot(data::olympians())
-                .x("weight")
-                .y("height")
-                .fy("sex")
-                .sort("info", false)
-                .stroke(move |d: &Table| {
-                    if has_info(d) {
-                        gpui_plot::css::parse("black").unwrap()
-                    } else {
-                        gpui_plot::css::parse("#aaa").unwrap()
-                    }
-                })
-                .tip_title(|d: &Table| {
-                    Value::text(format!(
-                        "{}\n\n{}",
-                        d.value("name").label(),
-                        d.value("info").label()
-                    ))
-                }),
-        )
+    Plot::plot().grid(true).mark(
+        dot(data::olympians())
+            .x("weight")
+            .y("height")
+            .fy("sex")
+            .sort("info", false)
+            .stroke(move |d: &Table| {
+                if has_info(d) {
+                    gpui_plot::css::parse("black").unwrap()
+                } else {
+                    gpui_plot::css::parse("#aaa").unwrap()
+                }
+            })
+            .tip_title(|d: &Table| {
+                Value::text(format!(
+                    "{}\n\n{}",
+                    d.value("name").label(),
+                    d.value("info").label()
+                ))
+            }),
+    )
 }
 
 /// The extra `channels: {name, sport}` become the tooltip title.
@@ -135,7 +136,11 @@ fn e06() -> Plot {
         .rows()
         .iter()
         .map(|d| {
-            let sign = if d.value("sex").label() == "male" { 1. } else { -1. };
+            let sign = if d.value("sex").label() == "male" {
+                1.
+            } else {
+                -1.
+            };
             d.clone().with("sign", Value::Number(sign))
         })
         .collect();
@@ -181,9 +186,7 @@ fn e08() -> Plot {
         ("bottom-left", FrameAnchor::BottomLeft),
         ("middle", FrameAnchor::Middle),
     ];
-    let mut plot = Plot::plot()
-        .height(160.)
-        .mark(frame().stroke_opacity(0.2));
+    let mut plot = Plot::plot().height(160.).mark(frame().stroke_opacity(0.2));
     for (name, anchor) in anchors {
         plot = plot
             .mark(dot(Dataset::length(1)).frame_anchor(anchor).fill("blue"))

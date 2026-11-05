@@ -819,7 +819,7 @@ fn draw_rects(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             );
             // Plot's rect fills nothing when given only a stroke.
             if !(prepared.mark.channels.stroke.is_some() && prepared.mark.channels.fill.is_none()) {
-            let color = colors.fill(index);
+                let color = colors.fill(index);
                 paint::paint_rect(
                     rect,
                     prepared.mark.style.corner_radius,
@@ -851,7 +851,10 @@ fn draw_cells(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             // `cell` given only x), one without an x its width.
             let no_y = prepared.mark.kind == MarkKind::CellX || row.y_value().is_null();
             let no_x = prepared.mark.kind == MarkKind::CellY || row.x_value().is_null();
-            let (plot_w, plot_h) = (ctx.frame.plot.size.width.as_f32(), ctx.frame.plot.size.height.as_f32());
+            let (plot_w, plot_h) = (
+                ctx.frame.plot.size.width.as_f32(),
+                ctx.frame.plot.size.height.as_f32(),
+            );
             let (x0, width) = if no_x {
                 (plot_w / 2., plot_w)
             } else {
@@ -1296,15 +1299,30 @@ fn draw_links(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             // Plot's link runs from (x1, y1) to (x2, y2); a lone `x` (or
             // `x1`) is both ends, Plot's `maybeSameValue`.
             let x_start = row.x1.clone().unwrap_or_else(|| row.x.clone());
-            let x_end = row.x2.clone().unwrap_or_else(|| if row.x.is_null() { x_start.clone() } else { row.x.clone() });
+            let x_end = row.x2.clone().unwrap_or_else(|| {
+                if row.x.is_null() {
+                    x_start.clone()
+                } else {
+                    row.x.clone()
+                }
+            });
             let y_start = row.y1.clone().unwrap_or_else(|| row.y.clone());
-            let y_end = row.y2.clone().unwrap_or_else(|| if row.y.is_null() { y_start.clone() } else { row.y.clone() });
+            let y_end = row.y2.clone().unwrap_or_else(|| {
+                if row.y.is_null() {
+                    y_start.clone()
+                } else {
+                    row.y.clone()
+                }
+            });
             let place = |x: &Value, y: &Value| -> Option<Point<Pixels>> {
                 if let Some(projection) = &ctx.frame.projection {
                     let [px_, py_] = projection.project(x.as_number()?, y.as_number()?)?;
                     return Some(point(px(px_ as f32), px(py_ as f32)));
                 }
-                Some(point(px(ctx.frame.x.scale.position(x)?), px(ctx.frame.y.scale.position(y)?)))
+                Some(point(
+                    px(ctx.frame.x.scale.position(x)?),
+                    px(ctx.frame.y.scale.position(y)?),
+                ))
             };
             let (Some(from), Some(to)) = (place(&x_start, &y_start), place(&x_end, &y_end)) else {
                 continue;
@@ -1321,9 +1339,18 @@ fn draw_links(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                         paint::paint_dashed(from, to, &style.dash, width, color, ctx.window);
                     }
                 }
-                curve => paint::paint_path(curve_path(&points, curve, width, 1.), color, ctx.window),
+                curve => {
+                    paint::paint_path(curve_path(&points, curve, width, 1.), color, ctx.window)
+                }
             }
-            paint_markers(&points, &style.markers, color, width, ctx.theme.background, ctx.window);
+            paint_markers(
+                &points,
+                &style.markers,
+                color,
+                width,
+                ctx.theme.background,
+                ctx.window,
+            );
         }
     });
 }
@@ -2423,8 +2450,12 @@ fn draw_differences(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     // blue where it is below.
     let opacity = prepared.mark.style.fill_opacity * ctx.appear;
     let style = &prepared.mark.style;
-    let positive = style.positive_fill.unwrap_or(crate::scale::hsla_from_hex(0x3ca951));
-    let negative = style.negative_fill.unwrap_or(crate::scale::hsla_from_hex(0x4269d0));
+    let positive = style
+        .positive_fill
+        .unwrap_or(crate::scale::hsla_from_hex(0x3ca951));
+    let negative = style
+        .negative_fill
+        .unwrap_or(crate::scale::hsla_from_hex(0x4269d0));
     let positive = paint::alpha(positive, opacity);
     let negative = paint::alpha(negative, opacity);
     let line = ctx.default_stroke(prepared);

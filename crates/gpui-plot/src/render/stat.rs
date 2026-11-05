@@ -68,7 +68,11 @@ pub fn draw_linear_regression(prepared: &PreparedMark, ctx: &mut DrawContext<'_>
                         .unwrap_or_else(|| ctx.default_fill(prepared)),
                     None => line_color,
                 };
-                let opacity = if prepared.mark.style.fill_opacity == 1. { 0.1 } else { opacity };
+                let opacity = if prepared.mark.style.fill_opacity == 1. {
+                    0.1
+                } else {
+                    opacity
+                };
                 paint::paint_fill(
                     &polygon,
                     paint::alpha(fill, opacity * ctx.appear),

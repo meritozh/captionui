@@ -122,10 +122,9 @@ impl Topology {
     fn geometries(&self, object: &str) -> Vec<serde_json::Value> {
         let object = &self.objects[object];
         match object["type"].as_str() {
-            Some("GeometryCollection") => object["geometries"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default(),
+            Some("GeometryCollection") => {
+                object["geometries"].as_array().cloned().unwrap_or_default()
+            }
             _ => vec![object.clone()],
         }
     }
@@ -326,13 +325,9 @@ fn e03() -> Plot {
         .inset(2.)
         .mark(frame().fill("var(--vp-c-bg-alt)").stroke("currentColor"))
         .mark(
-            rule_x((-18..=18).map(|i| f64::from(i) * 10.).collect::<Vec<_>>())
-                .stroke_opacity(0.3),
+            rule_x((-18..=18).map(|i| f64::from(i) * 10.).collect::<Vec<_>>()).stroke_opacity(0.3),
         )
-        .mark(
-            rule_y((-8..=8).map(|i| f64::from(i) * 10.).collect::<Vec<_>>())
-                .stroke_opacity(0.3),
-        )
+        .mark(rule_y((-8..=8).map(|i| f64::from(i) * 10.).collect::<Vec<_>>()).stroke_opacity(0.3))
 }
 
 /// `d3.geoCircle().center(center).radius(radius)`: the ring of points
@@ -362,11 +357,7 @@ fn e04() -> Plot {
         .chain((10..=170).step_by(10).map(f64::from))
         .collect();
     let plot = world_scales(Plot::plot())
-        .color(|c| {
-            c.legend(true)
-                .label("Distance from Tonga (km)")
-                .zero(true)
-        })
+        .color(|c| c.legend(true).label("Distance from Tonga (km)").zero(true))
         .mark(land());
     radii
         .into_iter()
@@ -445,6 +436,6 @@ fn e06() -> Plot {
                 .fill("blue")
                 .tip_title("date"),
         )
-        // Plot.axisFy({frameAnchor: "top", dy: 30, tickFormat: (d) => `${year}’s`})
-        // has no port: there is no fy axis mark.
+    // Plot.axisFy({frameAnchor: "top", dy: 30, tickFormat: (d) => `${year}’s`})
+    // has no port: there is no fy axis mark.
 }

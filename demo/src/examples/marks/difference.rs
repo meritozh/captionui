@@ -19,7 +19,11 @@ fn temperature() -> Dataset {
     data::sf_sj_temperatures()
         .rows()
         .iter()
-        .filter(|row| row.value("date").as_date().is_some_and(|date| date.year() == 2020))
+        .filter(|row| {
+            row.value("date")
+                .as_date()
+                .is_some_and(|date| date.year() == 2020)
+        })
         .cloned()
         .collect()
 }

@@ -272,11 +272,15 @@ fn e13() -> Plot {
 }
 
 fn e14() -> Plot {
-    Plot::plot().y(|y| y.grid(true)).mark(
-        line_y(data::aapl()).x("Date").y(Channel::number(|d| {
-            if month(d) < 3 { f64::NAN } else { d.num("Close") }
-        })),
-    )
+    Plot::plot()
+        .y(|y| y.grid(true))
+        .mark(line_y(data::aapl()).x("Date").y(Channel::number(|d| {
+            if month(d) < 3 {
+                f64::NAN
+            } else {
+                d.num("Close")
+            }
+        })))
 }
 
 fn e15() -> Plot {
@@ -288,14 +292,13 @@ fn e15() -> Plot {
         .collect();
     Plot::plot()
         .y(|y| y.grid(true))
-        .mark(
-            line_y(after_march)
-                .x("Date")
-                .y("Close")
-                .stroke_opacity(0.3),
-        )
+        .mark(line_y(after_march).x("Date").y("Close").stroke_opacity(0.3))
         .mark(line_y(data::aapl()).x("Date").y(Channel::number(|d| {
-            if month(d) < 3 { f64::NAN } else { d.num("Close") }
+            if month(d) < 3 {
+                f64::NAN
+            } else {
+                d.num("Close")
+            }
         })))
 }
 

@@ -164,11 +164,8 @@ fn e05() -> Plot {
 }
 
 fn e06() -> Plot {
-    Plot::plot()
-        .height(200.)
-        .mark(frame())
-        .mark(
-            text(Dataset::values_of([r#"This Is Just To Say
+    Plot::plot().height(200.).mark(frame()).mark(
+        text(Dataset::values_of([r#"This Is Just To Say
 William Carlos Williams, 1934
 
 I have eaten
@@ -185,9 +182,9 @@ Forgive me
 they were delicious
 so sweet
 and so cold"#]))
-            .text(Channel::identity())
-            .frame_anchor(FrameAnchor::Middle),
-        )
+        .text(Channel::identity())
+        .frame_anchor(FrameAnchor::Middle),
+    )
 }
 
 const MOBY_DICK: [&str; 3] = [

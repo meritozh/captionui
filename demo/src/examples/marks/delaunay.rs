@@ -119,9 +119,5 @@ fn e07() -> Plot {
                 .fill("currentColor")
                 .r(1.),
         )
-        .mark(
-            voronoi_mesh(data::walmarts())
-                .x("longitude")
-                .y("latitude"),
-        )
+        .mark(voronoi_mesh(data::walmarts()).x("longitude").y("latitude"))
 }

@@ -28,15 +28,17 @@ pub fn examples() -> Vec<Example> {
 
 /// The docs' `gods`.
 fn gods() -> Dataset {
-    Dataset::values_of([
-        "Chaos/Gaia/Mountains",
-        "Chaos/Gaia/Pontus",
-        "Chaos/Gaia/Uranus",
-        "Chaos/Eros",
-        "Chaos/Erebus",
-        "Chaos/Tartarus",
-    ]
-    .map(Value::text))
+    Dataset::values_of(
+        [
+            "Chaos/Gaia/Mountains",
+            "Chaos/Gaia/Pontus",
+            "Chaos/Gaia/Uranus",
+            "Chaos/Eros",
+            "Chaos/Erebus",
+            "Chaos/Tartarus",
+        ]
+        .map(Value::text),
+    )
 }
 
 /// Plot's `path: "name", delimiter: "."`.
@@ -79,14 +81,10 @@ fn e03() -> Plot {
 /// The custom `treeLayout: indent` and `curve: "step-before"` have no
 /// counterpart; this draws the tidy tree at the docs' size.
 fn e04() -> Plot {
-    Plot::plot()
-        .no_axes()
-        .inset(10.)
-        .height(3600.)
-        .mark(
-            tree(data::flare())
-                .path(flare_path)
-                .stroke_width(1.)
-                .curve(Curve::StepBefore),
-        )
+    Plot::plot().no_axes().inset(10.).height(3600.).mark(
+        tree(data::flare())
+            .path(flare_path)
+            .stroke_width(1.)
+            .curve(Curve::StepBefore),
+    )
 }

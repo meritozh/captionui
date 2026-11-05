@@ -794,7 +794,10 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
     // A cross channel the mark names wins: `Plot.lineY(data, {x, y})`.
     if mark.kind.is_x_only() && mark.kind.cross_axis() == CrossAxis::Index && channels.y.is_none() {
         y = Value::Number(index as f64);
-    } else if mark.kind.is_y_only() && mark.kind.cross_axis() == CrossAxis::Index && channels.x.is_none() {
+    } else if mark.kind.is_y_only()
+        && mark.kind.cross_axis() == CrossAxis::Index
+        && channels.x.is_none()
+    {
         x = Value::Number(index as f64);
     }
 
@@ -1154,7 +1157,6 @@ pub fn bin_axes(mark: &Mark) -> (bool, bool) {
     }
 }
 
-
 /// The bin edges a mark lays over `rows` on each of its bin axes.
 ///
 /// A faceted plot pins the edges from the whole data first (see
@@ -1171,16 +1173,27 @@ fn bin_edges(
     let edges = |channel: Option<&crate::table::Channel>, pinned: Option<transform::BinEdges>| {
         pinned.or_else(|| {
             let channel = channel?;
-            let values: Vec<f64> = rows.iter().filter_map(|row| channel.read(row).as_number()).collect();
+            let values: Vec<f64> = rows
+                .iter()
+                .filter_map(|row| channel.read(row).as_number())
+                .collect();
             transform::BinEdges::of(&values, bin.thresholds)
         })
     };
-    (edges(x_channel, bin.edges[0]), edges(y_channel, bin.edges[1]))
+    (
+        edges(x_channel, bin.edges[0]),
+        edges(y_channel, bin.edges[1]),
+    )
 }
 
 /// The channels a binned mark bins on x and y: [`bin_fields`]' choice, but
 /// any channel form, so `x: (d) => Math.log(d.volume)` bins too.
-fn bin_channels(mark: &Mark) -> (Option<&crate::table::Channel>, Option<&crate::table::Channel>) {
+fn bin_channels(
+    mark: &Mark,
+) -> (
+    Option<&crate::table::Channel>,
+    Option<&crate::table::Channel>,
+) {
     let (x, y) = (mark.channels.x.as_ref(), mark.channels.y.as_ref());
     match bin_axes(mark) {
         (true, true) => (x, y),
@@ -1263,15 +1276,19 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
     let mut series: std::collections::BTreeMap<Option<crate::value::ValueKey>, BinCells> =
         std::collections::BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
-        let slot = |channel: Option<&crate::table::Channel>, edges: Option<transform::BinEdges>| {
-            match (channel, edges) {
+        let slot =
+            |channel: Option<&crate::table::Channel>, edges: Option<transform::BinEdges>| match (
+                channel, edges,
+            ) {
                 (Some(channel), Some(edges)) => {
-                    let value = channel.read(&row.row).as_number().filter(|v| v.is_finite())?;
+                    let value = channel
+                        .read(&row.row)
+                        .as_number()
+                        .filter(|v| v.is_finite())?;
                     Some(edges.slot(value))
                 }
                 _ => Some(0),
-            }
-        };
+            };
         let (Some(xi), Some(yi)) = (slot(x_channel, x_edges), slot(y_channel, y_edges)) else {
             continue;
         };
@@ -1286,7 +1303,8 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
     let mut binned: Vec<PreparedRow> = Vec::new();
     // The running top (and bottom, for negative values) of each
     // one-dimensional bin's stack.
-    let mut stack_tops: std::collections::HashMap<usize, (f64, f64)> = std::collections::HashMap::new();
+    let mut stack_tops: std::collections::HashMap<usize, (f64, f64)> =
+        std::collections::HashMap::new();
     for cells in series.values() {
         for (&(xi, yi), members) in cells {
             let mut row = rows[members[0]].clone();

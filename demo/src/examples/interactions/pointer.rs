@@ -42,14 +42,12 @@ fn e02() -> Plot {
 }
 
 fn e03() -> Plot {
-    Plot::plot()
-        .mark(rule_y([0.]))
-        .mark(
-            line(data::bls_industry_unemployment())
-                .x("date")
-                .y("unemployed")
-                .stroke("industry"),
-        )
+    Plot::plot().mark(rule_y([0.])).mark(
+        line(data::bls_industry_unemployment())
+            .x("date")
+            .y("unemployed")
+            .stroke("industry"),
+    )
 }
 
 /// The bin reads only a field, not the docs' `x: (d) => Math.log10(d.Volume)`

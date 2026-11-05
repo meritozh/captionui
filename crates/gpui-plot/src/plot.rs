@@ -1508,11 +1508,13 @@ impl Plot {
             }
         }
         // An explicit facet domain wins, in its order.
-        let explicit = |options: &crate::options::ScaleOptions, values: Vec<Value>| match &options.domain {
-            Some(domain) => domain.clone(),
-            None => values,
-        };
-        let mut grid = Grid::from_values(explicit(&self.scales.fx, fx), explicit(&self.scales.fy, fy));
+        let explicit =
+            |options: &crate::options::ScaleOptions, values: Vec<Value>| match &options.domain {
+                Some(domain) => domain.clone(),
+                None => values,
+            };
+        let mut grid =
+            Grid::from_values(explicit(&self.scales.fx, fx), explicit(&self.scales.fy, fy));
         if let (Some(domain), Some(keys)) = (&self.scales.fx.domain, grid.fx.as_mut()) {
             *keys = crate::scale::dedup(domain.iter().map(Value::key));
         }

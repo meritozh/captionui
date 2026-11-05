@@ -40,11 +40,7 @@ fn e01() -> Plot {
     Plot::plot()
         .inset(20.)
         .x(|x| x.label("First inauguration date"))
-        .y(|y| {
-            y.grid(true)
-                .label("Net favorability (%)")
-                .tick_format("+f")
-        })
+        .y(|y| y.grid(true).label("Net favorability (%)").tick_format("+f"))
         .mark(rule_y([0.]))
         .mark(portrait(
             image(data::us_president_favorability())

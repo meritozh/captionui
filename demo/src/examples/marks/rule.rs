@@ -88,10 +88,7 @@ fn e06() -> Plot {
                 .x("season")
                 .y("imdb_rating")
                 .group_x()
-                .group_output(
-                    "y1",
-                    GroupReducer::Min,
-                )
+                .group_output("y1", GroupReducer::Min)
                 .group_output("y2", GroupReducer::Max),
         )
         .mark(

@@ -216,11 +216,7 @@ fn e09() -> Plot {
         .aspect_ratio(1.)
         .x(|x| x.label("x"))
         .y(|y| y.label("y"))
-        .color(|c| {
-            c.type_name("diverging")
-                .legend(true)
-                .label("sin(x) cos(y)")
-        })
+        .color(|c| c.type_name("diverging").legend(true).label("sin(x) cos(y)"))
         .mark(
             contour(samples)
                 .x("x")

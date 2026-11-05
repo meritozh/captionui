@@ -95,7 +95,12 @@ fn e03() -> Plot {
             spike(counties.clone())
                 .x("cx")
                 .y("cy")
-                .length(length_scale(&counties, |d| d.num("population"), 200., false))
+                .length(length_scale(
+                    &counties,
+                    |d| d.num("population"),
+                    200.,
+                    false,
+                ))
                 .stroke("green"),
         )
 }
@@ -105,22 +110,18 @@ fn e03() -> Plot {
 fn e04() -> Plot {
     let noise = |x: f64, y: f64| perlin::octave2(x, y, 2);
     let points = Dataset::tuples(poisson([0., 0., 2., 2.], 4000.));
-    Plot::plot()
-        .inset(6.)
-        .aspect_ratio(1.)
-        .no_axes()
-        .mark(
-            vector(points.clone())
-                .x("0")
-                .y("1")
-                .length(length_scale(
-                    &points,
-                    move |d| (noise(d.num("0") + 2., d.num("1")) + 0.5) * 24.,
-                    12.,
-                    false,
-                ))
-                .rotate(move |d: &Table| (noise(d.num("0"), d.num("1")) * 360.) as f32),
-        )
+    Plot::plot().inset(6.).aspect_ratio(1.).no_axes().mark(
+        vector(points.clone())
+            .x("0")
+            .y("1")
+            .length(length_scale(
+                &points,
+                move |d| (noise(d.num("0") + 2., d.num("1")) + 0.5) * 24.,
+                12.,
+                false,
+            ))
+            .rotate(move |d: &Table| (noise(d.num("0"), d.num("1")) * 360.) as f32),
+    )
 }
 
 /// The docs' `poisson([x0, y0, x1, y1], n)`: Bridson's Poisson-disk sampling,
@@ -140,12 +141,13 @@ fn poisson([x0, y0, x1, y1]: [f64; 4], n: f64) -> Vec<[f64; 2]> {
     let mut queue: Vec<[f64; 2]> = Vec::new();
     let mut out = Vec::new();
 
-    let mut sample = |x: f64, y: f64, grid: &mut Vec<Option<[f64; 2]>>, queue: &mut Vec<[f64; 2]>| {
-        let s = [x, y];
-        grid[grid_width * ((y / cell_size) as usize) + (x / cell_size) as usize] = Some(s);
-        queue.push(s);
-        out.push([x + x0, y + y0]);
-    };
+    let mut sample =
+        |x: f64, y: f64, grid: &mut Vec<Option<[f64; 2]>>, queue: &mut Vec<[f64; 2]>| {
+            let s = [x, y];
+            grid[grid_width * ((y / cell_size) as usize) + (x / cell_size) as usize] = Some(s);
+            queue.push(s);
+            out.push([x + x0, y + y0]);
+        };
     let far = |x: f64, y: f64, grid: &Vec<Option<[f64; 2]>>| {
         let i = (x / cell_size) as usize;
         let j = (y / cell_size) as usize;
@@ -167,7 +169,12 @@ fn poisson([x0, y0, x1, y1]: [f64; 4], n: f64) -> Vec<[f64; 2]> {
     };
 
     let (a, b) = (random(), random());
-    sample(width / 2. + a * radius, height / 2. + b * radius, &mut grid, &mut queue);
+    sample(
+        width / 2. + a * radius,
+        height / 2. + b * radius,
+        &mut grid,
+        &mut queue,
+    );
     'pick: while !queue.is_empty() {
         let i = (random() * queue.len() as f64) as usize;
         let parent = queue[i];
@@ -208,13 +215,13 @@ mod perlin {
         168, 68, 175, 74, 165, 71, 134, 139, 48, 27, 166, 77, 146, 158, 231, 83, 111, 229, 122, 60,
         211, 133, 230, 220, 105, 92, 41, 55, 46, 245, 40, 244, 102, 143, 54, 65, 25, 63, 161, 1,
         216, 80, 73, 209, 76, 132, 187, 208, 89, 18, 169, 200, 196, 135, 130, 116, 188, 159, 86,
-        164, 100, 109, 198, 173, 186, 3, 64, 52, 217, 226, 250, 124, 123, 5, 202, 38, 147, 118, 126,
-        255, 82, 85, 212, 207, 206, 59, 227, 47, 16, 58, 17, 182, 189, 28, 42, 223, 183, 170, 213,
-        119, 248, 152, 2, 44, 154, 163, 70, 221, 153, 101, 155, 167, 43, 172, 9, 129, 22, 39, 253,
-        19, 98, 108, 110, 79, 113, 224, 232, 178, 185, 112, 104, 218, 246, 97, 228, 251, 34, 242,
-        193, 238, 210, 144, 12, 191, 179, 162, 241, 81, 51, 145, 235, 249, 14, 239, 107, 49, 192,
-        214, 31, 181, 199, 106, 157, 184, 84, 204, 176, 115, 121, 50, 45, 127, 4, 150, 254, 138,
-        236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66, 215, 61, 156, 180,
+        164, 100, 109, 198, 173, 186, 3, 64, 52, 217, 226, 250, 124, 123, 5, 202, 38, 147, 118,
+        126, 255, 82, 85, 212, 207, 206, 59, 227, 47, 16, 58, 17, 182, 189, 28, 42, 223, 183, 170,
+        213, 119, 248, 152, 2, 44, 154, 163, 70, 221, 153, 101, 155, 167, 43, 172, 9, 129, 22, 39,
+        253, 19, 98, 108, 110, 79, 113, 224, 232, 178, 185, 112, 104, 218, 246, 97, 228, 251, 34,
+        242, 193, 238, 210, 144, 12, 191, 179, 162, 241, 81, 51, 145, 235, 249, 14, 239, 107, 49,
+        192, 214, 31, 181, 199, 106, 157, 184, 84, 204, 176, 115, 121, 50, 45, 127, 4, 150, 254,
+        138, 236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66, 215, 61, 156, 180,
     ];
 
     fn p(i: usize) -> usize {
@@ -246,7 +253,11 @@ mod perlin {
         lerp(
             v,
             lerp(u, grad2(p(a), x, y), grad2(p(b), x - 1., y)),
-            lerp(u, grad2(p(a + 1), x, y - 1.), grad2(p(b + 1), x - 1., y - 1.)),
+            lerp(
+                u,
+                grad2(p(a + 1), x, y - 1.),
+                grad2(p(b + 1), x - 1., y - 1.),
+            ),
         )
     }
 
@@ -535,7 +546,12 @@ pub(crate) mod us {
                 .into_iter()
                 .skip(1)
                 .filter(|r| r.len() >= 3)
-                .map(|r| (format!("{}{}", r[0], r[1]), r[2].parse().unwrap_or(f64::NAN)))
+                .map(|r| {
+                    (
+                        format!("{}{}", r[0], r[1]),
+                        r[2].parse().unwrap_or(f64::NAN),
+                    )
+                })
                 .collect();
         let election_rows =
             gpui_plot::io::rows(&data::text("us-presidential-election-2020.csv"), b',');

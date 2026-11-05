@@ -966,7 +966,9 @@ pub(crate) fn paint_facet_labels(
     fx_options: Option<&crate::options::ScaleOptions>,
     fy_options: Option<&crate::options::ScaleOptions>,
 ) {
-    let format = |options: Option<&crate::options::ScaleOptions>, keys: &[crate::value::ValueKey]| -> Vec<gpui::SharedString> {
+    let format = |options: Option<&crate::options::ScaleOptions>,
+                  keys: &[crate::value::ValueKey]|
+     -> Vec<gpui::SharedString> {
         keys.iter()
             .map(|key| {
                 let value = key.to_value();
