@@ -211,6 +211,10 @@ pub struct Frame {
     pub layout: [f32; 2],
     pub x: Axis,
     pub y: Axis,
+    /// Plot's `projection`, fit to one facet's marks area: when set, marks
+    /// place `x`/`y` as longitude/latitude through it, and `geo` marks draw
+    /// their geometry with it.
+    pub projection: Option<crate::geo::Fitted>,
 }
 
 impl Frame {
@@ -288,6 +292,7 @@ impl Frame {
             layout: [facet_width, facet_height],
             x,
             y,
+            projection: None,
         }
     }
 

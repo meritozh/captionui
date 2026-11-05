@@ -140,6 +140,8 @@ pub struct Plot {
     no_axes: bool,
     /// Plot's `label: null`, which hides every axis label.
     no_labels: bool,
+    /// Plot's `projection`.
+    projection: Option<crate::geo::GeoProjection>,
     /// Plot's `aspectRatio`: the plot's height follows from its width so a
     /// unit of x is this many units of y.
     aspect_ratio: Option<f32>,
@@ -216,6 +218,7 @@ impl Plot {
             margins: [None; 4],
             no_axes: false,
             no_labels: false,
+            projection: None,
             aspect_ratio: None,
             caption: None,
             x_label: None,
@@ -368,6 +371,13 @@ impl Plot {
         self
     }
 
+    /// Plot's `projection`: a named projection (`"albers-usa"`,
+    /// `"equal-earth"` …) or a configured [`crate::geo::GeoProjection`].
+    pub fn projection(mut self, projection: impl Into<crate::geo::GeoProjection>) -> Self {
+        self.projection = Some(projection.into());
+        self
+    }
+
     /// Plot's `aspectRatio`.
     pub fn aspect_ratio(mut self, ratio: f32) -> Self {
         self.aspect_ratio = Some(ratio);
@@ -409,8 +419,30 @@ impl Plot {
         };
         // Plot's autoHeight counts a y scale whether or not its axis draws.
         let has_y = !y_values.is_empty() || grid.fy.is_some();
+        let projected = self.projection.as_ref().map(|p| {
+            // Plot's `projectionAspectRatio`: a domain's bounds at 100 × 100,
+            // else the projection's own; clamped as Plot clamps it.
+            let ratio = match &p.domain {
+                Some(domain) => {
+                    let fitted = crate::geo::GeoProjection {
+                        domain: None,
+                        ..p.clone()
+                    }
+                    .fit(100., 100.);
+                    fitted
+                        .bounds(domain)
+                        .map(|[[x0, y0], [x1, y1]]| ((y1 - y0) / (x1 - x0)).clamp(0.2, 5.))
+                        .filter(|r| r.is_finite())
+                        .unwrap_or(0.618)
+                }
+                None => p.aspect_ratio().unwrap_or(0.618),
+            };
+            let far = ((1.1 * nfy - 0.1) / (1.1 * nfx - 0.1)) as f64 * ratio;
+            ((width - ml - mr) as f64 * far.clamp(0.1, 10.) + (mt + mb) as f64).round() as f32
+        });
         let chart = match (self.height, self.aspect_ratio) {
             (Some(height), _) => height,
+            _ if projected.is_some() => projected.unwrap_or(400.),
             (None, Some(ratio)) => {
                 let length = |values: &[Value], options: &crate::options::ScaleOptions| -> f32 {
                     if ordinal(values, options) {
@@ -1692,6 +1724,12 @@ impl Plot {
     /// Where the x axis sits, or `None` when the plot draws none: Plot's
     /// `x.axis`, the plot's `axis: null`, and whether any mark reads x.
     pub(crate) fn x_axis_anchor(&self) -> Option<crate::options::AxisAnchor> {
+        if self.projection.is_some()
+            && self.scales.x.axis.is_none()
+            && self.axis_mark(true).is_none()
+        {
+            return None;
+        }
         if let Some(mark) = self.axis_mark(true) {
             return Some(
                 mark.axis
@@ -1714,6 +1752,12 @@ impl Plot {
 
     /// Where the y axis sits, or `None` when the plot draws none.
     pub(crate) fn y_axis_anchor(&self) -> Option<crate::options::AxisAnchor> {
+        if self.projection.is_some()
+            && self.scales.y.axis.is_none()
+            && self.axis_mark(false).is_none()
+        {
+            return None;
+        }
         if let Some(mark) = self.axis_mark(false) {
             return Some(
                 mark.axis
@@ -2287,12 +2331,17 @@ impl Plot {
                 (band_height - facet_insets.top - facet_insets.bottom).max(1.),
             ]
         });
-        Frame::resolve(
+        let mut frame = Frame::resolve(
             bounds,
             &options,
             &self.x_domain_values(facets),
             &self.y_domain_values(facets),
-        )
+        );
+        frame.projection = self
+            .projection
+            .as_ref()
+            .map(|p| p.fit(frame.layout[0] as f64, frame.layout[1] as f64));
+        frame
     }
 }
 

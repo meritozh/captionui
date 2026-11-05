@@ -32,6 +32,9 @@ pub enum Value {
     Text(SharedString),
     /// A boolean, which Plot scales as a two-value ordinal domain.
     Bool(bool),
+    /// A GeoJSON geometry, which a `geo` mark draws and a `centroid`
+    /// transform reduces to a point.
+    Geo(std::rc::Rc<crate::geo::Geometry>),
 }
 
 impl Value {
@@ -80,6 +83,7 @@ impl Value {
             Value::Number(n) => Some(*n),
             Value::Date(d) => Some(d.timestamp_millis() as f64),
             Value::Bool(b) => Some(if *b { 1. } else { 0. }),
+            Value::Geo(_) => None,
             Value::Text(_) => None,
         }
     }
@@ -88,6 +92,14 @@ impl Value {
     pub fn as_date(&self) -> Option<DateTime<Utc>> {
         match self {
             Value::Date(d) => Some(*d),
+            _ => None,
+        }
+    }
+
+    /// The geometry this value holds, for a `geo` mark.
+    pub fn as_geo(&self) -> Option<&crate::geo::Geometry> {
+        match self {
+            Value::Geo(g) => Some(g),
             _ => None,
         }
     }
@@ -113,6 +125,7 @@ impl Value {
             Value::Date(_) => PlotKind::Date,
             Value::Text(_) => PlotKind::Text,
             Value::Bool(_) => PlotKind::Bool,
+            Value::Geo(_) => PlotKind::Null,
         }
     }
 
@@ -125,6 +138,7 @@ impl Value {
             Value::Date(d) => SharedString::from(d.format("%Y-%m-%d").to_string()),
             Value::Text(t) => t.clone(),
             Value::Bool(b) => SharedString::from(if *b { "true" } else { "false" }),
+            Value::Geo(_) => SharedString::from("[geometry]"),
         }
     }
 
@@ -137,6 +151,7 @@ impl Value {
             Value::Date(d) => KeyRepr::Date(d.timestamp_millis()),
             Value::Text(t) => KeyRepr::Text(t.clone()),
             Value::Bool(b) => KeyRepr::Bool(*b),
+            Value::Geo(g) => KeyRepr::Geo(std::rc::Rc::as_ptr(g) as usize),
         })
     }
 }
@@ -191,6 +206,7 @@ enum KeyRepr {
     Number(F64Bits),
     Date(i64),
     Text(SharedString),
+    Geo(usize),
 }
 
 /// A number ordered numerically rather than by its bits.
@@ -246,6 +262,7 @@ impl ValueKey {
             KeyRepr::Date(millis) => Value::date_from_millis(*millis),
             KeyRepr::Text(t) => Value::Text(t.clone()),
             KeyRepr::Bool(b) => Value::Bool(*b),
+            KeyRepr::Geo(_) => Value::Null,
         }
     }
 }
@@ -260,6 +277,7 @@ impl PartialEq for Value {
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Geo(a), Value::Geo(b)) => std::rc::Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -281,6 +299,7 @@ impl Ord for Value {
             Value::Number(_) => 2,
             Value::Date(_) => 3,
             Value::Text(_) => 4,
+            Value::Geo(_) => 5,
         };
 
         match rank(self).cmp(&rank(other)) {

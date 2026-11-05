@@ -222,3 +222,88 @@ pub fn normal_samples(n: usize, field: &str, seed: u64) -> Dataset {
     let mut normal = random_normal(seed);
     Dataset::new((0..n).map(|_| Table::empty().with(field.to_string(), Value::Number(normal()))))
 }
+
+thread_local! {
+    static TOPOLOGIES: RefCell<HashMap<&'static str, std::rc::Rc<gpui_plot::Topology>>> = RefCell::new(HashMap::new());
+}
+
+/// A TopoJSON file in `demo/data/`, decoded once per thread.
+pub fn topology(file: &'static str) -> std::rc::Rc<gpui_plot::Topology> {
+    if let Some(t) = TOPOLOGIES.with(|cache| cache.borrow().get(file).cloned()) {
+        return t;
+    }
+    let t = std::rc::Rc::new(gpui_plot::Topology::parse(&json(file)).expect("a TopoJSON topology"));
+    TOPOLOGIES.with(|cache| cache.borrow_mut().insert(file, t.clone()));
+    t
+}
+
+/// The docs' `us`: us-counties-10m.json.
+pub fn us() -> std::rc::Rc<gpui_plot::Topology> {
+    topology("us-counties-10m.json")
+}
+
+/// The docs' `world`: countries-110m.json.
+pub fn world() -> std::rc::Rc<gpui_plot::Topology> {
+    topology("countries-110m.json")
+}
+
+/// `topojson.mesh(us, us.objects.states, (a, b) => a !== b)`: the borders
+/// between states.
+pub fn statemesh() -> gpui_plot::Geometry {
+    us().mesh("states", Some(&|a, b| a != b))
+}
+
+/// `topojson.mesh(us, us.objects.nation)`, the nation's outline.
+pub fn nation() -> gpui_plot::Geometry {
+    us().mesh("nation", None)
+}
+
+/// `topojson.feature(us, us.objects.counties).features`, each with the
+/// docs' `population` joined from us-county-population.csv by FIPS code.
+pub fn counties() -> Dataset {
+    cached("counties", || {
+        let population: HashMap<String, f64> = us_county_population()
+            .rows()
+            .iter()
+            .filter_map(|row| {
+                // The docs key by state + county as text: "01" + "001".
+                let code = |field: &str| match row.value(field) {
+                    Value::Number(n) => format!(
+                        "{:0width$}",
+                        n as i64,
+                        width = if field == "state" { 2 } else { 3 }
+                    ),
+                    other => other.label().to_string(),
+                };
+                Some((
+                    format!("{}{}", code("state"), code("county")),
+                    row.number("population")?,
+                ))
+            })
+            .collect();
+        Dataset::new(us().feature("counties").rows().iter().map(|row| {
+            let id = row.value("id").label().to_string();
+            match population.get(&id) {
+                Some(p) => row.clone().with("population", Value::Number(*p)),
+                None => row.clone(),
+            }
+        }))
+    })
+}
+
+/// `topojson.feature(us, us.objects.states).features`.
+pub fn states() -> Dataset {
+    cached("states", || us().feature("states"))
+}
+
+/// `topojson.feature(world, world.objects.land)`.
+pub fn land() -> gpui_plot::Geometry {
+    world()
+        .feature_geometry("land")
+        .unwrap_or(gpui_plot::Geometry::Collection(Vec::new()))
+}
+
+/// `topojson.feature(world, world.objects.countries).features`.
+pub fn countries() -> Dataset {
+    cached("countries", || world().feature("countries"))
+}

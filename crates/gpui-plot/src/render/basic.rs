@@ -253,9 +253,19 @@ pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
 fn draw_dots(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
     let radius = prepared.mark.style.radius;
+    // Plot draws dots with an `r` channel largest first, so small ones sit
+    // on top and stay visible.
+    let mut order: Vec<usize> = (0..prepared.rows.len()).collect();
+    if prepared.rows.iter().any(|row| row.r_value.is_some()) {
+        order.sort_by(|a, b| {
+            let r = |i: &usize| prepared.rows[*i].r.unwrap_or(0.);
+            r(b).total_cmp(&r(a))
+        });
+    }
 
     ctx.clipped(|ctx| {
-        for (index, row) in prepared.rows.iter().enumerate() {
+        for index in order {
+            let row = &prepared.rows[index];
             let Some(position) = position(prepared, ctx, row) else {
                 continue;
             };
@@ -1416,7 +1426,123 @@ fn draw_image(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
 /// Draw a geo mark: project each row's lon/lat into the plot and connect them
 /// as a path — Plot's `geo` over a sequence of points, where the plot's own
 /// scales don't need to know about geography.
+/// Plot's `geo`: each row's geometry drawn through the plot's projection,
+/// stroked in `currentColor` and unfilled unless given a fill.
+fn draw_geometries(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let frame = ctx.frame;
+    let fitted = frame.projection.clone().unwrap_or_else(|| {
+        // Without a projection, Plot reads coordinates through the x and y
+        // scales; an equirectangular fit to the data stands in for them.
+        let mut all = Vec::new();
+        for row in &prepared.rows {
+            if let Some(g) = row.row.get("geometry").and_then(Value::as_geo) {
+                all.push(g.clone());
+            }
+        }
+        crate::geo::GeoProjection::named("equirectangular")
+            .expect("named")
+            .domain(crate::geo::Geometry::Collection(all))
+            .fit(
+                frame.plot.size.width.as_f32() as f64,
+                frame.plot.size.height.as_f32() as f64,
+            )
+    });
+    let colors = Colors::resolve(prepared, ctx);
+    let style = &prepared.mark.style;
+    let channel = prepared.mark.channels.path.clone();
+    ctx.clipped(|ctx| {
+        for (index, row) in prepared.rows.iter().enumerate() {
+            let value = match &channel {
+                Some(channel) => channel.read(&row.row),
+                None => row.row.value("geometry"),
+            };
+            let Some(geometry) = value.as_geo() else {
+                continue;
+            };
+            let fill = prepared
+                .mark
+                .channels
+                .fill
+                .as_ref()
+                .map(|_| paint::alpha(colors.fill(index), ctx.row_fill_opacity(prepared, row)));
+            let stroke = match (&prepared.mark.channels.stroke, &prepared.mark.channels.fill) {
+                (Some(_), _) | (None, None) => Some(paint::alpha(
+                    if prepared.mark.channels.stroke.is_some() {
+                        colors.stroke(index)
+                    } else {
+                        ctx.colors.default_stroke(prepared, ctx.mark_index)
+                    },
+                    ctx.row_stroke_opacity(prepared, row),
+                )),
+                _ => None,
+            };
+            let to_points = |path: &[[f64; 2]], ctx: &DrawContext<'_>| -> Vec<Point<Pixels>> {
+                path.iter()
+                    .map(|[x, y]| ctx.absolute(point(px(*x as f32), px(*y as f32))))
+                    .collect()
+            };
+            // Point geometries draw as circles of the dot's radius.
+            let mut points = Vec::new();
+            collect_points(geometry, &mut points);
+            let r = row.r.unwrap_or(style.radius.max(3.));
+            for p in points {
+                if let Some([x, y]) = fitted.project(p[0], p[1]) {
+                    let centre = ctx.absolute(point(px(x as f32), px(y as f32)));
+                    let circle = paint::circle_points(centre, r, 20);
+                    match fill {
+                        Some(fill) => paint::paint_fill(&circle, fill, ctx.window),
+                        None => {
+                            let mut ring = circle.clone();
+                            ring.push(circle[0]);
+                            if let Some(stroke) = stroke {
+                                paint::paint_stroke(&ring, style.stroke_width, stroke, ctx.window);
+                            }
+                        }
+                    }
+                }
+            }
+            let paths = fitted.paths(geometry);
+            if let Some(fill) = fill {
+                // A polygon's rings fill together, so holes stay open.
+                let rings: Vec<Vec<Point<Pixels>>> = paths
+                    .iter()
+                    .filter(|(_, closed)| *closed)
+                    .map(|(path, _)| to_points(path, ctx))
+                    .collect();
+                paint::paint_fill_rings(&rings, fill, ctx.window);
+            }
+            if let Some(stroke) = stroke {
+                for (path, closed) in &paths {
+                    let mut line = to_points(path, ctx);
+                    if *closed && let Some(first) = line.first().copied() {
+                        line.push(first);
+                    }
+                    paint::paint_stroke(&line, style.stroke_width, stroke, ctx.window);
+                }
+            }
+        }
+    });
+}
+
+fn collect_points(geometry: &crate::geo::Geometry, out: &mut Vec<[f64; 2]>) {
+    use crate::geo::Geometry;
+    match geometry {
+        Geometry::Point(p) => out.push(*p),
+        Geometry::MultiPoint(ps) => out.extend(ps),
+        Geometry::Collection(gs) => gs.iter().for_each(|g| collect_points(g, out)),
+        _ => {}
+    }
+}
+
 fn draw_geo(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    if prepared.rows.iter().any(|row| {
+        row.row
+            .get("geometry")
+            .is_some_and(|v| v.as_geo().is_some())
+    }) || prepared.mark.channels.path.is_some()
+    {
+        return draw_geometries(prepared, ctx);
+    }
     let projection = prepared.mark.projection.clone().unwrap_or_default();
     let plot = ctx.frame.plot;
 
@@ -1514,6 +1640,12 @@ pub fn position_in(
     frame: &Frame,
     row: &PreparedRow,
 ) -> Option<Point<Pixels>> {
+    // Under Plot's `projection`, x and y are longitude and latitude.
+    if let Some(projection) = &frame.projection {
+        let (lon, lat) = (row.x_value().as_number()?, row.y_value().as_number()?);
+        let [x, y] = projection.project(lon, lat)?;
+        return Some(point(px(x as f32), px(y as f32)));
+    }
     // A geo mark places its rows through its projection, not the scales.
     if prepared.mark.kind == MarkKind::Geo {
         let projection = prepared.mark.projection.clone().unwrap_or_default();

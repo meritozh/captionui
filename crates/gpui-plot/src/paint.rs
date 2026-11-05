@@ -318,3 +318,20 @@ pub fn paint_dashed_path(
         paint_dashed(pair[0], pair[1], dash, width, color, window);
     }
 }
+
+/// Fill several rings as one shape with the even-odd rule, so a polygon's
+/// holes stay open.
+pub fn paint_fill_rings(rings: &[Vec<Point<Pixels>>], color: Hsla, window: &mut Window) {
+    let mut builder = PathBuilder::fill();
+    let mut any = false;
+    for ring in rings.iter().filter(|r| r.len() >= 3) {
+        builder.add_polygon(ring, true);
+        any = true;
+    }
+    if !any {
+        return;
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(with_alpha(path, color), color);
+    }
+}

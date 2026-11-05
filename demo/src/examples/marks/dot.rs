@@ -22,6 +22,7 @@ pub fn examples() -> Vec<Example> {
         example("marks", "dot", 10, e10),
         example("marks", "dot", 11, e11),
         example("marks", "dot", 12, e12),
+        example("marks", "dot", 13, e13),
     ]
 }
 
@@ -237,4 +238,19 @@ fn e12() -> Plot {
                 .stack_y2(),
         )
         .mark(rule_y([0.]))
+}
+
+fn e13() -> Plot {
+    Plot::plot()
+        .projection("albers-usa")
+        // The dot page's `statemesh` is `topojson.mesh(us, us.objects.states)`.
+        .mark(geo(data::us().mesh("states", None)).stroke_opacity(0.4))
+        .mark(
+            dot(data::counties())
+                .geo_centroid()
+                .r(NumberChannel::scaled(|d| d.num("population")))
+                .fill("currentColor")
+                .stroke("white")
+                .stroke_width(1.),
+        )
 }

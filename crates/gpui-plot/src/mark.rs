@@ -1895,6 +1895,41 @@ impl Mark {
         self
     }
 
+    /// A `geo` mark's geometry channel, Plot's `geometry` option; the
+    /// records' `"geometry"` field by default.
+    pub fn geometry(mut self, channel: impl IntoChannel) -> Self {
+        self.channels.path = Some(channel.into_channel());
+        self
+    }
+
+    /// Plot's `geoCentroid` transform: `x` and `y` are the longitude and
+    /// latitude of each record's geometry's spherical centroid.
+    pub fn geo_centroid(mut self) -> Self {
+        let centroid = |axis: usize| {
+            move |row: &crate::table::Table| {
+                row.get("geometry")
+                    .and_then(crate::value::Value::as_geo)
+                    .and_then(crate::geo::centroid)
+                    .map(|c| crate::value::Value::Number(c[axis]))
+                    .unwrap_or(crate::value::Value::Null)
+            }
+        };
+        self.channels.x = Some(crate::table::Channel::Accessor(std::rc::Rc::new(centroid(
+            0,
+        ))));
+        self.channels.y = Some(crate::table::Channel::Accessor(std::rc::Rc::new(centroid(
+            1,
+        ))));
+        self
+    }
+
+    /// Plot's `centroid` transform. Plot takes the projected centroid; this
+    /// takes the spherical one, which lands within a pixel or two of it for
+    /// shapes the size of a county or a country.
+    pub fn centroid(self) -> Self {
+        self.geo_centroid()
+    }
+
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
         let outputs = self.bin.take().map(|bin| bin.outputs).unwrap_or_default();
@@ -2450,6 +2485,24 @@ macro_rules! mark_builder {
             /// Clip the mark to the plot area, Plot's `clip: true`.
             pub fn clip(mut self, clip: bool) -> Self {
                 self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::geometry`].
+            pub fn geometry(mut self, channel: impl IntoChannel) -> Self {
+                self.0 = self.0.geometry(channel);
+                self
+            }
+
+            /// See [`Mark::geo_centroid`].
+            pub fn geo_centroid(mut self) -> Self {
+                self.0 = self.0.geo_centroid();
+                self
+            }
+
+            /// See [`Mark::centroid`].
+            pub fn centroid(mut self) -> Self {
+                self.0 = self.0.centroid();
                 self
             }
 

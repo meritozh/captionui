@@ -41,6 +41,7 @@ pub mod density;
 pub mod facet;
 pub mod format;
 pub mod frame;
+pub mod geo;
 pub mod io;
 pub mod mark;
 pub mod marks;
@@ -95,4 +96,5 @@ pub fn image_from_rgba(
     let render = gpui::RenderImage::new(smallvec::smallvec![frame]);
     std::sync::Arc::new(render)
 }
+pub use geo::{GeoProjection, Geometry, Topology};
 pub use render::stack::{NormalizeBasis, Offset, StackAnchor, StackOrder};

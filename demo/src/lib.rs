@@ -10,7 +10,6 @@ pub mod prelude {
     pub use crate::data;
     pub use crate::examples::{Example, example};
     pub use chrono::Datelike;
-    pub use gpui_plot::ColorChannel;
     pub use gpui_plot::format::{format_number, format_time};
     pub use gpui_plot::mark::*;
     pub use gpui_plot::marks::*;
@@ -19,4 +18,5 @@ pub mod prelude {
         Offset, Plot, Reducer, ScaleType, Selector, StackOffset, StackOrder, Table, Thresholds,
         Value,
     };
+    pub use gpui_plot::{ColorChannel, Geometry, NumberChannel};
 }
