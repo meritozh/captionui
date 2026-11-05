@@ -1941,6 +1941,14 @@ impl PlotTrait for Plot {
             .collect();
         let dots = if dots.is_empty() { vec![hit] } else { dots };
 
+        // The tooltip overlay is placed at the element's own origin (its
+        // top-left, including the title and legend margins), so the crosshair
+        // and hovered dots must be in the element's coordinates, not the
+        // plot's. `frame.absolute` lifts a plot-local point up by the plot's
+        // offset within the figure.
+        let hit = frame.absolute(hit);
+        let dots = dots.into_iter().map(|p| frame.absolute(p)).collect();
+
         Some(TooltipState::new(flat, hit, dots))
     }
 
