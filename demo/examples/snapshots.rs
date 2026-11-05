@@ -57,7 +57,19 @@ fn main() {
     std::fs::create_dir_all(&out_dir).expect("failed to create the snapshots directory");
 
     let mut cx = context();
-    let examples = gallery::examples();
+    // `SNAPSHOT_FILTER=olympians` renders only the examples whose title
+    // contains the filter (case-insensitive), for a quick look at a few.
+    let filter = std::env::var("SNAPSHOT_FILTER")
+        .ok()
+        .map(|f| f.to_lowercase());
+    let examples: Vec<_> = gallery::examples()
+        .into_iter()
+        .filter(|example| {
+            filter
+                .as_ref()
+                .is_none_or(|filter| example.title.to_lowercase().contains(filter))
+        })
+        .collect();
 
     let (handle, entity) = cx
         .update(|cx| {
@@ -138,7 +150,9 @@ fn main() {
         }
     }
 
-    if failures.is_empty() {
+    if failures.is_empty() && filter.is_some() {
+        println!("\n{} filtered examples painted", examples.len());
+    } else if failures.is_empty() {
         println!("\nall {} examples painted", examples.len());
         let sheet = out_dir.join("contact-sheet.png");
         contact_sheet(&out_dir, &examples, &sheet);

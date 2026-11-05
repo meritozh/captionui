@@ -9,6 +9,8 @@ use gpui::{Hsla, SharedString};
 
 use crate::render::{PreparedMark, PreparedRow};
 use crate::scale::{ColorRange, ColorScale};
+use crate::style::ColorChannel;
+use crate::table::Table;
 use crate::theme::PlotTheme;
 
 /// The plot-wide color scales and the theme's defaults.
@@ -31,17 +33,28 @@ impl PlotColors {
         facets: &[Vec<PreparedMark>],
         color: Option<(&SharedString, &ColorRange)>,
     ) -> Self {
-        let ordinal = ColorScale::ordinal(
-            crate::scale::dedup(
-                facets
-                    .iter()
-                    .flatten()
-                    .filter(|mark| mark.mark.channels.fill.is_none())
-                    .flat_map(|mark| mark.rows.iter())
-                    .filter_map(|row| row.z.as_ref().map(|z| z.key())),
-            ),
-            theme.palette.clone(),
-        );
+        // The ordinal domain: every series a mark colors by. A field-named
+        // fill or stroke (`fill: "sex"`) colors by that field; otherwise an
+        // unfilled mark colors by its `z`.
+        // Plot sorts an ordinal domain ascending, so a series' color does not
+        // depend on which row happens to come first.
+        let mut domain = crate::scale::dedup(facets.iter().flatten().flat_map(|mark| {
+            let channels = &mark.mark.channels;
+            let field = channels
+                .fill
+                .as_ref()
+                .and_then(|c| c.field())
+                .or_else(|| channels.stroke.as_ref().and_then(|c| c.field()))
+                .cloned();
+            let by_z = field.is_none() && channels.fill.is_none();
+            mark.rows.iter().filter_map(move |row| match &field {
+                Some(field) => row.row.get(field).map(|value| value.key()),
+                None if by_z => row.z.as_ref().map(|z| z.key()),
+                None => None,
+            })
+        }));
+        domain.sort();
+        let ordinal = ColorScale::ordinal(domain, theme.palette.clone());
         let continuous = color.and_then(|(field, range)| {
             let values = facets
                 .iter()
@@ -57,6 +70,18 @@ impl PlotColors {
             continuous,
             mark_color: theme.mark_color,
             palette: theme.palette.clone(),
+        }
+    }
+
+    /// The color a mark's color channel gives a row: a constant, an
+    /// accessor's result, or a field's value through the ordinal scale.
+    pub fn channel(&self, channel: &ColorChannel, row: &Table) -> Hsla {
+        match channel {
+            ColorChannel::Field(field) => row
+                .get(field)
+                .and_then(|value| self.ordinal.color(value))
+                .unwrap_or(self.mark_color),
+            _ => channel.read(row),
         }
     }
 
@@ -99,7 +124,7 @@ impl PlotColors {
     /// fill channel, then the plot's continuous color, then its `z` series.
     pub fn scaled_fill(&self, prepared: &PreparedMark, row: &PreparedRow) -> Option<Hsla> {
         if let Some(channel) = &prepared.mark.channels.fill {
-            return Some(channel.read(&row.row));
+            return Some(self.channel(channel, &row.row));
         }
         if let Some((field, scale)) = &self.continuous
             && let Some(color) = row.row.get(field).and_then(|value| scale.color(value))
@@ -125,7 +150,7 @@ impl PlotColors {
         row: &PreparedRow,
     ) -> Hsla {
         if let Some(channel) = &prepared.mark.channels.stroke {
-            return channel.read(&row.row);
+            return self.channel(channel, &row.row);
         }
         row.z
             .as_ref()

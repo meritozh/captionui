@@ -6,8 +6,8 @@ use gpui_plot::ticks::{format_linear_tick, linear_ticks, time_ticks};
 use gpui_plot::transform::{self, Thresholds};
 use gpui_plot::value::format_number;
 use gpui_plot::{
-    ContinuousScale, Dataset, Dodge, DodgeAnchor, Projection, Select, Selector, StackOffset,
-    Table, Transform, Value,
+    ContinuousScale, Dataset, Dodge, DodgeAnchor, Projection, Select, Selector, StackOffset, Table,
+    Transform, Value,
 };
 
 #[test]
@@ -59,7 +59,11 @@ fn six_week_time_axis_has_more_than_two_ticks() {
     assert!(ticks.len() >= 3, "{ticks:?}");
     // Weekly ticks fall on Sundays: 2020-01-05 is one.
     let sunday = 1_578_182_400_000.;
-    assert!(ticks.iter().all(|t| ((t - sunday) / DAY).rem_euclid(7.) == 0.));
+    assert!(
+        ticks
+            .iter()
+            .all(|t| ((t - sunday) / DAY).rem_euclid(7.) == 0.)
+    );
 }
 
 #[test]

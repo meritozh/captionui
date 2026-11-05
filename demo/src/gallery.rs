@@ -397,6 +397,41 @@ pub fn examples() -> Vec<Example> {
             height: 440.,
             build: barcode_plot,
         },
+        Example {
+            title: "Olympians scatterplot",
+            section: "What is Plot? / dot",
+            description: "Weight against height for every athlete, stroked by sex, with a color legend.",
+            height: 440.,
+            build: olympians_scatter,
+        },
+        Example {
+            title: "Olympians binned heatmap",
+            section: "What is Plot? / rect + bin",
+            description: "The same athletes binned in two dimensions, each rect's opacity the count, filled by sex.",
+            height: 440.,
+            build: olympians_heatmap,
+        },
+        Example {
+            title: "Olympians density",
+            section: "What is Plot? / density",
+            description: "Two-dimensional density contours of weight and height, stroked by sex.",
+            height: 440.,
+            build: olympians_density,
+        },
+        Example {
+            title: "Olympians histogram",
+            section: "What is Plot? / rectY + binX",
+            description: "Weight binned into a histogram, filled by sex and stacked implicitly.",
+            height: 440.,
+            build: olympians_histogram,
+        },
+        Example {
+            title: "Olympians faceted histogram",
+            section: "What is Plot? / facets",
+            description: "The histogram split into one facet per sex along fy, with a grid and a rule at zero.",
+            height: 440.,
+            build: olympians_faceted_histogram,
+        },
     ]
 }
 
@@ -1404,4 +1439,67 @@ fn barcode_plot() -> Plot {
         .title("A strip of values, no binning")
         .subtitle("Each dot is one datum's value along x — the barcode Plot::auto draws for a bare quantitative field")
         .grid(false)
+}
+
+// The "What is Plot?" page's examples, on its `olympians` dataset. Each is the
+// page's code, channel for channel.
+
+/// `Plot.dot(olympians, {x: "weight", y: "height", stroke: "sex"}).plot({color: {legend: true}})`
+fn olympians_scatter() -> Plot {
+    Plot::new(data::olympians())
+        .dot(|mark| mark.x("weight").y("height").stroke("sex"))
+        .legend(LegendPosition::Top)
+}
+
+/// `Plot.rect(olympians, Plot.bin({fillOpacity: "count"}, {x: "weight", y: "height", fill: "sex", inset: 0})).plot()`
+fn olympians_heatmap() -> Plot {
+    Plot::new(data::olympians())
+        .rect(|mark| {
+            mark.x("weight")
+                .y("height")
+                .fill("sex")
+                .bin_output("fillOpacity", GroupReducer::Count)
+                .inset(0.)
+        })
+        .legend(LegendPosition::None)
+}
+
+/// `Plot.density(olympians, {x: "weight", y: "height", stroke: "sex"}).plot()`
+fn olympians_density() -> Plot {
+    Plot::new(data::olympians())
+        .density(|mark| mark.x("weight").y("height").stroke("sex"))
+        .legend(LegendPosition::None)
+}
+
+/// `Plot.rectY(olympians, Plot.binX({y: "count"}, {x: "weight", fill: "sex"})).plot()`
+fn olympians_histogram() -> Plot {
+    Plot::new(data::olympians())
+        .rect_y(|mark| {
+            mark.x("weight")
+                .fill("sex")
+                .bin_output("y", GroupReducer::Count)
+        })
+        .legend(LegendPosition::None)
+}
+
+/// ```js
+/// Plot.plot({
+///   grid: true,
+///   marks: [
+///     Plot.rectY(olympians, Plot.binX({y: "count"}, {x: "weight", fill: "sex", fy: "sex"})),
+///     Plot.ruleY([0])
+///   ]
+/// })
+/// ```
+fn olympians_faceted_histogram() -> Plot {
+    Plot::new(data::olympians())
+        .rect_y(|mark| {
+            mark.x("weight")
+                .fill("sex")
+                .bin_output("y", GroupReducer::Count)
+        })
+        .rule_y(|mark| mark.y(Value::Number(0.)))
+        .fy("sex")
+        .grid(true)
+        .legend(LegendPosition::None)
 }

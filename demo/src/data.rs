@@ -474,3 +474,37 @@ pub fn geojson_archipelago() -> &'static str {
         ]
     }"#
 }
+
+/// Athletes of the 2016 Summer Olympics, the shape of Plot's `olympians`
+/// dataset: one row per athlete with `sex`, `weight` (kg) and `height` (m).
+///
+/// The real table has 11,538 athletes. This one is drawn deterministically
+/// from the same marginals — men taller and heavier, weight following height
+/// through a body-mass index — so the "What is Plot?" examples show the same
+/// shapes without shipping the CSV.
+pub fn olympians() -> Vec<Table> {
+    let mut rng = Rng::new(2016);
+    (0..11_538)
+        .map(|_| {
+            let female = rng.next_f64() < 0.45;
+            let (height_mean, height_sd, bmi_mean, bmi_sd) = if female {
+                (1.70, 0.085, 21.3, 2.2)
+            } else {
+                (1.81, 0.095, 23.4, 2.9)
+            };
+            let height = (height_mean + rng.gaussian() * height_sd).clamp(1.21, 2.21);
+            // A long right tail: weightlifters, throwers and judoka.
+            let tail = if rng.next_f64() < 0.04 {
+                rng.next_in(4., 14.)
+            } else {
+                0.
+            };
+            let bmi = (bmi_mean + rng.gaussian() * bmi_sd + tail).max(15.);
+            let weight = (bmi * height * height).clamp(31., 170.);
+            Table::empty()
+                .with("sex", Value::text(if female { "female" } else { "male" }))
+                .with("weight", Value::Number(weight.round()))
+                .with("height", Value::Number((height * 100.).round() / 100.))
+        })
+        .collect()
+}

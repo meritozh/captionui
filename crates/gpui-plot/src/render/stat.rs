@@ -112,8 +112,10 @@ pub fn draw_bollinger(prepared: &PreparedMark, ctx: &mut DrawContext<'_>, along_
     let mut bands: Vec<Vec<(usize, f64, f64)>> = Vec::new();
     for mut group in series_groups(prepared) {
         group.sort_by_key(|(_, row)| independent(row));
-        let values: Vec<(usize, Option<f64>)> =
-            group.iter().map(|(index, row)| (*index, value_of(row))).collect();
+        let values: Vec<(usize, Option<f64>)> = group
+            .iter()
+            .map(|(index, row)| (*index, value_of(row)))
+            .collect();
         // Plot's window is anchored at its end and strict by default: a datum
         // only gets a band once a full window of values precedes it.
         let band: Vec<(usize, f64, f64)> = (window - 1..values.len())

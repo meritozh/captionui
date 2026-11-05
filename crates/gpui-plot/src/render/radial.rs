@@ -30,6 +30,7 @@ pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         MarkKind::DensityY => draw_density(prepared, ctx, false),
         MarkKind::Hexbin => draw_hexbin(prepared, ctx),
         MarkKind::Contour => draw_contour(prepared, ctx),
+        MarkKind::Density => draw_density_2d(prepared, ctx),
         _ => {}
     }
 }
@@ -632,6 +633,70 @@ fn draw_hexbin(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                 paint::alpha(color, ctx.row_fill_opacity(prepared, &prepared.rows[0])),
                 ctx.window,
             );
+        }
+    });
+}
+
+/// Plot's `density` defaults: a 20-pixel Gaussian bandwidth over 4-pixel
+/// cells (d3's `contourDensity`), and 20 thresholds.
+const DENSITY_BANDWIDTH: f32 = 20.;
+const DENSITY_CELL: f32 = 4.;
+const DENSITY_THRESHOLDS: usize = 20;
+
+/// Draw Plot's `density`: each series' kernel density estimated over the
+/// plot's pixels, stroked as contour lines at thresholds spread evenly up to
+/// the densest series' peak, so the series compare on one scale.
+fn draw_density_2d(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let plot = ctx.frame.plot;
+    let (width, height) = (plot.size.width.as_f32(), plot.size.height.as_f32());
+    let groups = series_groups(prepared);
+    let grids: Vec<(usize, crate::density::DensityGrid)> = groups
+        .iter()
+        .filter_map(|group| {
+            let points: Vec<(f32, f32)> = group
+                .iter()
+                .filter_map(|(_, row)| {
+                    let point = ctx.frame.point(row.x_value(), row.y_value())?;
+                    Some((point.x.as_f32(), point.y.as_f32()))
+                })
+                .collect();
+            let first = group.first()?.0;
+            (!points.is_empty()).then(|| {
+                (
+                    first,
+                    crate::density::DensityGrid::estimate(
+                        &points,
+                        width,
+                        height,
+                        DENSITY_BANDWIDTH,
+                        DENSITY_CELL,
+                    ),
+                )
+            })
+        })
+        .collect();
+    let max = grids.iter().map(|(_, grid)| grid.max()).fold(0., f64::max);
+    if max <= 0. {
+        return;
+    }
+    let stroke_width = prepared.mark.style.stroke_width.min(1.);
+    ctx.clipped(|ctx| {
+        for (first, grid) in &grids {
+            let row = &prepared.rows[*first];
+            let color = paint::alpha(
+                ctx.colors.series_color(prepared, ctx.mark_index, row),
+                ctx.row_stroke_opacity(prepared, row) * ctx.appear,
+            );
+            for step in 1..DENSITY_THRESHOLDS {
+                let threshold = max * step as f64 / DENSITY_THRESHOLDS as f64;
+                for line in grid.contours(threshold) {
+                    let points: Vec<Point<gpui::Pixels>> = line
+                        .iter()
+                        .map(|(x, y)| ctx.absolute(point(px(*x), px(*y))))
+                        .collect();
+                    paint::paint_stroke(&points, stroke_width, color, ctx.window);
+                }
+            }
         }
     });
 }

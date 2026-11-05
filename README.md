@@ -12,7 +12,7 @@ The repository has two crates:
 | Path | What it is |
 | --- | --- |
 | `crates/gpui-plot` | The library. |
-| `demo` | A gallery window of 44 charts, plus an offscreen snapshot renderer. |
+| `demo` | A gallery window of 58 charts, plus an offscreen snapshot renderer. |
 
 ## Quick start
 
@@ -76,6 +76,7 @@ supports (`x`, `y`, `x1`, `x2`, `y1`, `y2`, `z`, `fill`, `stroke`, `r`, `text`,
 | densityX / densityY | `.density_x(…)` / `.density_y(…)` | KDE with filled baseline |
 | hexbin | `.hexbin(…)` | 2-D binning, count ramp |
 | contour | `.contour(…)` | density rings over a raster |
+| density | `.density(…)` | 2-D kernel density contours (marching squares), one set per series |
 | pie / arc | `.pie(…)` / `.arc(…)` | shares or explicit angles |
 | waffle | `.waffle(…)` | one cell per percent |
 
@@ -108,12 +109,18 @@ labelling it once.
 **Color.** Categorical palettes (`ColorRange::observable10()` — Plot's default,
 used automatically when a theme's chart colors are one hue ramp), continuous
 ramps, and diverging ramps (`ColorRange::blue_red()`). `Plot::color(field, range)`
-colors marks by a quantitative field; a `fill` channel can read a row or compute
-a color per datum.
+colors marks by a quantitative field; a `fill` or `stroke` channel can be a
+field name (`.stroke("sex")`, colored through the sorted ordinal scale and
+implying `z`), read a row, or compute a color per datum. A dot given a stroke
+and no fill is hollow, as in Plot.
 
 **Transforms.** `group`, `groupX`/`groupY`/`groupZ` (a group's outputs are
 reducers over its members: count, distinct, sum, mean, min, max, median,
-deviation, first, last, and `find`), `bin` (with count and custom reducers),
+deviation, first, last, and `find`), `bin` (`binX`/`binY`/2-D `bin` picked from
+the mark, binned per `z` series over shared nice edges with Plot's Scott-rule
+`auto` thresholds; outputs via `bin_output("y" | "x" | "fillOpacity", reducer)`,
+a one-dimensional count stacks across series; binned rects get Plot's 0.5px
+inset),
 `stack` (zero, center, normalize; long and wide data), `window` (mean, sum,
 median, min, max, cumulative mean, difference, change, percent change; middle,
 start and end anchors), `dodge` (`dodge_x`/`dodge_y` beeswarms, with anchor,
@@ -122,8 +129,10 @@ on `Mark` or as functions in `gpui_plot::transform`.
 
 **Frame.** Titles and subtitles, a legend in five positions (top, bottom, left,
 right, none) that lays out as a row or a column and reserves its measured width,
-grid lines with optional dashes, x and y axes with per-axis tick counts, and
-margins that shrink to fit the labels actually drawn.
+grid lines with optional dashes, x and y axes with per-axis tick counts, axis
+labels derived from the channel fields (`↑ height`, `weight →`, `↑ Frequency`
+for a bin count; override with `x_label`/`y_label`, hide with an empty label),
+and margins that shrink to fit the labels actually drawn.
 
 **Faceting.** `fx` splits the figure into columns and `fy` into rows, Plot's
 small multiples: every facet draws the rows whose facet values match it, all
@@ -161,7 +170,7 @@ faithfully mirrors a fresh resolve.
 cargo run -p gpui-plot-demo --example snapshots
 ```
 
-renders all 44 gallery charts through GPUI's headless renderer, writes each to
+renders all 58 gallery charts through GPUI's headless renderer, writes each to
 `demo/snapshots/*.png`, and asserts each painted more than 12 distinct colors.
 This is the check that caught the defects unit tests could not: charts that
 painted nothing, legends over the title, clipped axis labels, stacked bars that

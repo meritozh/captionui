@@ -93,7 +93,10 @@ impl Grid {
     /// one when neither channel has any.
     pub fn from_values(fx: Vec<Value>, fy: Vec<Value>) -> Self {
         let domain = |values: Vec<Value>| {
-            let keys = crate::scale::dedup(values.into_iter().map(|value| value.key()));
+            // Plot sorts an ordinal domain in natural ascending order, so
+            // `fy: "sex"` stacks female above male whatever the data order.
+            let mut keys = crate::scale::dedup(values.into_iter().map(|value| value.key()));
+            keys.sort();
             (!keys.is_empty()).then_some(keys)
         };
         Self::new(domain(fx), domain(fy))

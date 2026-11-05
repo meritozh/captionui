@@ -129,6 +129,11 @@ pub struct Plot {
     grid: bool,
     x_axis: bool,
     y_axis: bool,
+    /// The x axis label, Plot's `x.label`: `None` derives it from the marks'
+    /// x field; an empty label hides it.
+    x_label: Option<SharedString>,
+    /// The y axis label, Plot's `y.label`.
+    y_label: Option<SharedString>,
     interaction: Interaction,
     id: ElementId,
     height: Option<f32>,
@@ -161,6 +166,9 @@ pub struct Plot {
     appear_progress: f32,
 }
 
+/// The band an axis label takes beyond its own text height, in pixels.
+const AXIS_LABEL_BAND: f32 = 6.;
+
 impl Plot {
     /// A plot of `data` with no marks yet.
     #[track_caller]
@@ -175,6 +183,8 @@ impl Plot {
             grid: true,
             x_axis: true,
             y_axis: true,
+            x_label: None,
+            y_label: None,
             interaction: Interaction::default(),
             id: ElementId::CodeLocation(*std::panic::Location::caller()),
             height: None,
@@ -752,6 +762,18 @@ impl Plot {
         self
     }
 
+    /// Add a density mark, Plot's `density`: contours of the two-dimensional
+    /// kernel density of x and y, one set per `z` series (or per `stroke`
+    /// field), over thresholds shared by every series.
+    pub fn density(
+        mut self,
+        configure: impl FnOnce(crate::mark::DensityMark) -> crate::mark::DensityMark,
+    ) -> Self {
+        self.marks
+            .push(configure(crate::mark::DensityMark::new()).into());
+        self
+    }
+
     /// Add a pie mark.
     pub fn pie(
         mut self,
@@ -923,6 +945,20 @@ impl Plot {
     }
 
     /// Set the plot's height in pixels, Plot's `height`.
+    /// Set the x axis label, Plot's `x: {label}`. By default the label is
+    /// the marks' x field, with an arrow pointing the way values grow; an
+    /// empty label hides it, Plot's `label: null`.
+    pub fn x_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.x_label = Some(label.into());
+        self
+    }
+
+    /// Set the y axis label, Plot's `y: {label}`.
+    pub fn y_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.y_label = Some(label.into());
+        self
+    }
+
     pub fn height(mut self, height: f32) -> Self {
         self.height = Some(height);
         self
@@ -1187,6 +1223,15 @@ impl Plot {
             insets.left += facet_insets.left;
         }
 
+        // Plot's axis labels: the y label above the frame's top-left corner,
+        // the x label below the x axis's tick labels.
+        if self.y_axis && self.axis_label(false).is_some() {
+            insets.top += theme.label_size.as_f32() + AXIS_LABEL_BAND;
+        }
+        if self.x_axis && self.axis_label(true).is_some() {
+            insets.bottom += theme.label_size.as_f32() + AXIS_LABEL_BAND;
+        }
+
         // A facet axis labels its facets outside the plot: the `fx` values
         // above each column, the `fy` values to the right of each row.
         if grid.fx.is_some() {
@@ -1263,9 +1308,8 @@ impl Plot {
             }
             // A size or opacity legend is a separate list from the color one,
             // so it starts on a fresh row rather than running on from it.
-            let starts_quantities = index > 0
-                && entry.swatch.is_quantity()
-                && !entries[index - 1].swatch.is_quantity();
+            let starts_quantities =
+                index > 0 && entry.swatch.is_quantity() && !entries[index - 1].swatch.is_quantity();
             let label = paint::measure(&entry.label, theme.label_size, window)
                 .width
                 .as_f32();
@@ -1297,7 +1341,10 @@ impl Plot {
         // A heading sits flush left above the swatches, so it may be the
         // widest line.
         let heading = self.legend_title.as_ref().map_or(0., |title| {
-            paint::measure(title, theme.label_size, window).width.as_f32() - LEGEND_SWATCH_GAP
+            paint::measure(title, theme.label_size, window)
+                .width
+                .as_f32()
+                - LEGEND_SWATCH_GAP
         });
         (LEGEND_SWATCH_GAP + widest.max(heading) + LEGEND_MARGIN * 2.).max(LEGEND_SIDE)
     }
@@ -1375,6 +1422,16 @@ impl Plot {
                     }
                 }
             }
+            // The legend reads in the color scale's (sorted) domain order, as
+            // Plot's does, not in the order the rows happen to come.
+            let domain = colors.ordinal.domain();
+            let rank = |label: &SharedString| {
+                domain
+                    .iter()
+                    .position(|key| key.to_value().label() == *label)
+                    .unwrap_or(usize::MAX)
+            };
+            series.sort_by_key(|(label, _)| rank(label));
             let shape = legend_shape(mark.mark.kind);
             // One legend entry per series, however many marks draw it: a line
             // with a labelled dot at its peak is one series, not three.
@@ -1538,8 +1595,7 @@ fn interval_rect(
     // (a bar's length, a rect's extent) or a band-filling mark (a cell). A dot
     // or a line vertex is hit by its point instead, so a padded rectangle
     // around it cannot steal the hover from a nearer datum.
-    let has_interval =
-        row.x1.is_some() || row.x2.is_some() || row.y1.is_some() || row.y2.is_some();
+    let has_interval = row.x1.is_some() || row.x2.is_some() || row.y1.is_some() || row.y2.is_some();
     if !(has_interval || (cat.band_x && cat.band_y)) || cat.furniture {
         return None;
     }
@@ -1850,6 +1906,7 @@ impl PlotTrait for Plot {
                 &crate::frame::AxisEdges::default(),
             );
         }
+        self.paint_axis_labels(&frame, &theme, window, cx);
     }
 
     fn id(&self) -> Option<ElementId> {
@@ -2086,7 +2143,10 @@ impl PlotTrait for Plot {
 /// marks area. An unfaceted figure has one cell, the whole plot.
 fn cell_frame(frame: &Frame, grid: &Grid, cell: usize) -> Frame {
     if grid.is_faceted() {
-        frame.facet(crate::frame::facet_marks(grid.facet(frame.plot, cell), frame))
+        frame.facet(crate::frame::facet_marks(
+            grid.facet(frame.plot, cell),
+            frame,
+        ))
     } else {
         frame.clone()
     }
@@ -2098,7 +2158,10 @@ fn cell_frame(frame: &Frame, grid: &Grid, cell: usize) -> Frame {
 /// plot's center, not at their x/y positions, so a Cartesian hit-test would
 /// land on meaningless spots; they are not hoverable rather than wrong.
 fn hoverable(mark: &PreparedMark) -> bool {
-    !matches!(mark.mark.kind, MarkKind::Pie | MarkKind::Arc | MarkKind::Waffle)
+    !matches!(
+        mark.mark.kind,
+        MarkKind::Pie | MarkKind::Arc | MarkKind::Waffle
+    )
 }
 
 impl Plot {
@@ -2110,6 +2173,151 @@ impl Plot {
     ) -> render::color::PlotColors {
         let color = self.color_field.as_ref().zip(self.color_range.as_ref());
         render::color::PlotColors::new(theme, facets, color)
+    }
+
+    /// The label an axis shows, Plot's default scale label: the first data
+    /// mark's field on that axis, or `Frequency` for the count a bin grows
+    /// along it. An explicit label overrides it, and an empty one hides it.
+    fn axis_label(&self, x: bool) -> Option<SharedString> {
+        let explicit = if x { &self.x_label } else { &self.y_label };
+        if let Some(label) = explicit {
+            return (!label.is_empty()).then(|| label.clone());
+        }
+        let field = |channel: Option<&crate::table::Channel>| match channel {
+            Some(crate::table::Channel::Field(name)) => Some(name.clone()),
+            _ => None,
+        };
+        for mark in &self.marks {
+            if mark.kind.is_furniture() {
+                continue;
+            }
+            let channels = &mark.channels;
+            if let Some(bin) = &mark.bin {
+                let (bin_x, bin_y) = render::bin_axes(mark);
+                // The axis a one-dimensional bin grows its output along.
+                let length = if x { bin_y && !bin_x } else { bin_x && !bin_y };
+                if length {
+                    let name = if x { "x" } else { "y" };
+                    return match bin.outputs.iter().find(|output| output.name == name) {
+                        Some(output)
+                            if !matches!(output.reducer, crate::transform::GroupReducer::Count) =>
+                        {
+                            output.input.clone()
+                        }
+                        _ => Some("Frequency".into()),
+                    };
+                }
+                // The axis it bins reads the binned field, wherever it was
+                // named.
+                if (x && bin_x && !bin_y) || (!x && bin_y && !bin_x) {
+                    return field(channels.x.as_ref()).or_else(|| field(channels.y.as_ref()));
+                }
+            }
+            // A wide stack's value channel names one of its series, not the
+            // axis.
+            if !x
+                && mark
+                    .stack
+                    .as_ref()
+                    .is_some_and(|stack| !stack.fields.is_empty())
+            {
+                return None;
+            }
+            let channel = if x {
+                channels
+                    .x
+                    .as_ref()
+                    .or(channels.x1.as_ref())
+                    .or(channels.x2.as_ref())
+            } else {
+                channels
+                    .y
+                    .as_ref()
+                    .or(channels.y1.as_ref())
+                    .or(channels.y2.as_ref())
+            };
+            if let Some(name) = field(channel) {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// Paint the axis labels: Plot puts the y label above the frame's
+    /// top-left as `↑ label`, and the x label below the axis, right-aligned
+    /// as `label →`. A categorical axis has no direction, so no arrow.
+    fn paint_axis_labels(
+        &self,
+        frame: &Frame,
+        theme: &PlotTheme,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let font = gpui::font(theme.font_family.clone());
+        let continuous = |scale: &crate::scale::PositionScale| {
+            matches!(scale, crate::scale::PositionScale::Continuous(_))
+        };
+        if self.y_axis
+            && let Some(label) = self.axis_label(false)
+        {
+            let text = if continuous(&frame.y.scale) {
+                let arrow = if self.frame_options.y_reverse {
+                    "↓"
+                } else {
+                    "↑"
+                };
+                format!("{arrow} {label}")
+            } else {
+                label.to_string()
+            };
+            let text = Label::new(
+                text.into(),
+                theme.label_size,
+                theme.label,
+                FontWeight::NORMAL,
+                font.clone(),
+                window,
+            );
+            let top = frame.plot.origin.y - px(theme.label_size.as_f32() + AXIS_LABEL_BAND);
+            text.paint_at(
+                point(frame.bounds.origin.x + px(12.), top),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+        if self.x_axis
+            && let Some(label) = self.axis_label(true)
+        {
+            let text = if continuous(&frame.x.scale) {
+                let arrow = if self.frame_options.x_reverse {
+                    "←"
+                } else {
+                    "→"
+                };
+                format!("{label} {arrow}")
+            } else {
+                label.to_string()
+            };
+            let text = Label::new(
+                text.into(),
+                theme.label_size,
+                theme.label,
+                FontWeight::NORMAL,
+                font,
+                window,
+            );
+            let bottom = frame.bounds.origin.y + frame.bounds.size.height
+                - px(theme.label_size.as_f32() + 6.);
+            text.paint_at(
+                point(frame.plot.origin.x + frame.plot.size.width, bottom),
+                TextAlign::Right,
+                None,
+                window,
+                cx,
+            );
+        }
     }
 
     fn paint_title(
@@ -2432,7 +2640,10 @@ mod tests {
             assert_eq!(colors.identity(mark, 0, row), theme.palette_color(index));
         }
         let entries = plot.legend_entries(&colors, &facets);
-        assert_eq!(entries[2].swatch, LegendSwatch::Color(theme.palette_color(2)));
+        assert_eq!(
+            entries[2].swatch,
+            LegendSwatch::Color(theme.palette_color(2))
+        );
     }
 
     #[test]

@@ -129,9 +129,10 @@ pub fn prepare_facets(
         return (vec![prepare(data, marks)], Vec::new());
     }
     let (groups, populated) = grid.partition(data, fx, fy);
+    let marks = pin_bin_edges(data, marks);
     let prepared = groups
         .into_iter()
-        .map(|rows| prepare(&Dataset::new(rows), marks))
+        .map(|rows| prepare(&Dataset::new(rows), &marks))
         .collect();
     (prepared, populated)
 }
@@ -260,14 +261,17 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         rows = collapse_groups(rows, mark, config);
     }
 
-    // A reducer collapses the rows sharing a category, Plot's `groupX`.
-    if let Some(reducer) = mark.reduce {
+    // A reducer collapses the rows sharing a category, Plot's `groupX`. A
+    // binned mark reduces each bin instead, so its reducer goes to the bin.
+    if let Some(reducer) = mark.reduce
+        && mark.bin.is_none()
+    {
         rows = reduce_rows(rows, mark, reducer);
     }
 
     // Binning replaces the rows with one row per bin.
     if mark.bin.is_some() {
-        rows = bin_rows(data, mark, &rows);
+        rows = bin_rows(mark, &rows);
     }
 
     // Stacking rewrites the y interval of every row.
@@ -786,79 +790,233 @@ fn reduce_rows(rows: Vec<PreparedRow>, mark: &Mark, reducer: Reducer) -> Vec<Pre
         .collect()
 }
 
-/// Replace rows with one row per bin of the mark's positional field.
+/// Which axes a binned mark bins, `(x, y)`: Plot's `binX`, `binY` or `bin`.
 ///
-/// Plot's `Plot.binX({y: "count"}, {x: "value"})`: the bins become the x
-/// interval and the count becomes the y value.
-fn bin_rows(data: &Dataset, mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
+/// A mark with a fixed bin axis (`rectY` and `barY` bin x, `rectX` and
+/// `barX` bin y) bins that one; a `rect` bins every axis it names a field on,
+/// so `rect(x: "weight", y: "height")` is Plot's two-dimensional `bin`.
+pub fn bin_axes(mark: &Mark) -> (bool, bool) {
+    if mark.bin.is_none() {
+        return (false, false);
+    }
+    match mark.kind.category().bins_on_x {
+        Some(true) => (true, false),
+        Some(false) => (false, true),
+        None => {
+            let named = |channel: &Option<crate::table::Channel>| {
+                matches!(channel, Some(crate::table::Channel::Field(_)))
+            };
+            match (named(&mark.channels.x), named(&mark.channels.y)) {
+                (_, false) => (true, false),
+                (false, true) => (false, true),
+                (true, true) => (true, true),
+            }
+        }
+    }
+}
+
+/// The fields a binned mark reads on its x and y bin axes.
+///
+/// A one-dimensional bin reads the channel on its own axis and falls back to
+/// the other, so `rectX(x: "v")` with a bin along y still finds its field.
+fn bin_fields(mark: &Mark) -> (Option<SharedString>, Option<SharedString>) {
+    let field = |channel: &Option<crate::table::Channel>| match channel {
+        Some(crate::table::Channel::Field(name)) => Some(name.clone()),
+        _ => None,
+    };
+    let (x, y) = (field(&mark.channels.x), field(&mark.channels.y));
+    match bin_axes(mark) {
+        (true, true) => (x, y),
+        (true, false) => (x.or(y), None),
+        (false, true) => (None, y.or(x)),
+        (false, false) => (None, None),
+    }
+}
+
+/// The bin edges a mark lays over `rows` on each of its bin axes.
+///
+/// A faceted plot pins the edges from the whole data first (see
+/// [`pin_bin_edges`]), the way Plot computes its thresholds once and then
+/// bins each facet, so the facets' bins line up.
+fn bin_edges(
+    mark: &Mark,
+    rows: &[Table],
+) -> (Option<transform::BinEdges>, Option<transform::BinEdges>) {
+    let Some(bin) = &mark.bin else {
+        return (None, None);
+    };
+    let (x_field, y_field) = bin_fields(mark);
+    let edges = |field: Option<SharedString>, pinned: Option<transform::BinEdges>| {
+        pinned.or_else(|| {
+            let field = field?;
+            let values: Vec<f64> = rows.iter().filter_map(|row| row.number(&field)).collect();
+            transform::BinEdges::of(&values, bin.thresholds)
+        })
+    };
+    (edges(x_field, bin.edges[0]), edges(y_field, bin.edges[1]))
+}
+
+/// Fix every binned mark's edges over the whole data, before it is split
+/// into facets.
+fn pin_bin_edges(data: &Dataset, marks: &[Mark]) -> Vec<Mark> {
+    marks
+        .iter()
+        .map(|mark| {
+            let mut mark = mark.clone();
+            if mark.bin.is_some() {
+                let (x, y) = bin_edges(&mark, data.rows());
+                if let Some(bin) = mark.bin.as_mut() {
+                    bin.edges = [x, y];
+                }
+            }
+            mark
+        })
+        .collect()
+}
+
+/// One series' bins: the row indices in each `(x, y)` bin cell.
+type BinCells = std::collections::BTreeMap<(usize, usize), Vec<usize>>;
+
+/// Replace rows with one row per bin, Plot's `binX`, `binY` and `bin`.
+///
+/// Rows are binned within their `z` series, so `fill: "sex"` gives each sex
+/// its own bins over shared edges. Each bin is reduced into the mark's bin
+/// outputs — by default, a one-dimensional bin counts into its length
+/// channel. A one-dimensional count is stacked across the series in each bin,
+/// Plot's implicit `stackY` for `rectY`; an `opacity` or `fillOpacity` output
+/// goes through Plot's default opacity scale, `[0, max] → [0, 1]`.
+fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
     let Some(bin) = &mark.bin else {
         return rows.to_vec();
     };
-    let field = mark
-        .channels
-        .x
-        .as_ref()
-        .or(mark.channels.y.as_ref())
-        .and_then(|channel| match channel {
-            crate::table::Channel::Field(name) => Some(name.clone()),
-            _ => None,
-        });
-    let Some(field) = field else {
-        return rows.to_vec();
-    };
-    // A vertical mark bins along x and counts on y; a horizontal one the
-    // other way round. Plot picks this from the mark, not from which channel
-    // happens to be set — `rectX` names its field on x yet bins along y. The
-    // mark's classification pins the axis for the marks that have a fixed one,
-    // and a mark without one bins along whatever channel it names.
-    let bin_x = mark
-        .kind
-        .category()
-        .bins_on_x
-        .unwrap_or(mark.channels.x.is_some());
+    let (bin_x, bin_y) = bin_axes(mark);
+    let (x_field, y_field) = bin_fields(mark);
+    let tables: Vec<Table> = rows.iter().map(|row| row.row.clone()).collect();
+    let (x_edges, y_edges) = bin_edges(mark, &tables);
+    if (bin_x && x_edges.is_none()) || (bin_y && y_edges.is_none()) {
+        return Vec::new();
+    }
 
-    let (bins, _domain) = transform::bin(data, &field, bin.thresholds);
-    bins.into_iter()
-        .map(|bin| {
-            let count = bin.count();
-            let representative = bin.rows.first().and_then(|index| rows.get(*index)).cloned();
-            let mut row = representative.unwrap_or_else(|| PreparedRow {
-                row: Table::empty(),
-                index: 0,
-                x: Value::Null,
-                y: Value::Null,
-                x1: None,
-                x2: None,
-                y1: None,
-                y2: None,
-                z: None,
-                path: None,
-                r: None,
-                symbol: None,
-                opacity: None,
-                dodge_offset: None,
-            });
-            if bin_x {
-                // The bin's interval is the x axis, the count is the y value.
-                row.x1 = Some(Value::Number(bin.x0));
-                row.x2 = Some(Value::Number(bin.x1));
+    // The outputs: the mark's own, or a count into the length channel. A
+    // mark-level `reduce` stays the length's reducer, as before bins had
+    // outputs of their own.
+    let length_name = if bin_x { "y" } else { "x" };
+    let outputs: Vec<crate::mark::GroupOutput> = if bin.outputs.is_empty() {
+        if bin_x && bin_y {
+            vec![crate::mark::GroupOutput::new(
+                "fillOpacity",
+                transform::GroupReducer::Count,
+            )]
+        } else {
+            let reducer = match mark.reduce {
+                None | Some(Reducer::Count) => transform::GroupReducer::Count,
+                Some(Reducer::Sum) => transform::GroupReducer::Sum,
+                Some(Reducer::Mean) => transform::GroupReducer::Mean,
+                Some(Reducer::Min) => transform::GroupReducer::Min,
+                Some(Reducer::Max) => transform::GroupReducer::Max,
+                Some(Reducer::Median) => transform::GroupReducer::Median,
+                Some(_) => transform::GroupReducer::Count,
+            };
+            vec![crate::mark::GroupOutput::new(length_name, reducer)]
+        }
+    } else {
+        bin.outputs.clone()
+    };
+
+    // Group the rows by series, then by bin cell. The series keep their
+    // sorted order, the order the color scale and the stack use.
+    let mut series: std::collections::BTreeMap<Option<crate::value::ValueKey>, BinCells> =
+        std::collections::BTreeMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let slot =
+            |field: &Option<SharedString>, edges: Option<transform::BinEdges>| match (field, edges)
+            {
+                (Some(field), Some(edges)) => {
+                    let value = row.row.number(field).filter(|v| v.is_finite())?;
+                    Some(edges.slot(value))
+                }
+                _ => Some(0),
+            };
+        let (Some(xi), Some(yi)) = (slot(&x_field, x_edges), slot(&y_field, y_edges)) else {
+            continue;
+        };
+        series
+            .entry(row.z.as_ref().map(|z| z.key()))
+            .or_default()
+            .entry((xi, yi))
+            .or_default()
+            .push(index);
+    }
+
+    let mut binned: Vec<PreparedRow> = Vec::new();
+    // Each output's raw values, for the opacity outputs' scale.
+    let mut opacities: Vec<(usize, f64)> = Vec::new();
+    // The running top of each one-dimensional bin's stack.
+    let mut stack_tops: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+    for cells in series.values() {
+        for (&(xi, yi), members) in cells {
+            let mut row = rows[members[0]].clone();
+            let records: Vec<&Table> = members.iter().map(|index| &rows[*index].row).collect();
+            if let Some(edges) = x_edges.filter(|_| bin_x) {
+                let (x0, x1) = edges.bounds(xi);
                 row.x = Value::Null;
-                row.y = Value::Number(count);
-                row.y1 = Some(Value::Number(0.));
-                row.y2 = Some(Value::Number(count));
-            } else {
-                // Binned along y: the interval is the y axis, the count grows
-                // along x.
-                row.y1 = Some(Value::Number(bin.x0));
-                row.y2 = Some(Value::Number(bin.x1));
-                row.y = Value::Null;
-                row.x = Value::Number(count);
-                row.x1 = Some(Value::Number(0.));
-                row.x2 = Some(Value::Number(count));
+                row.x1 = Some(Value::Number(x0));
+                row.x2 = Some(Value::Number(x1));
             }
-            row
-        })
-        .collect()
+            if let Some(edges) = y_edges.filter(|_| bin_y) {
+                let (y0, y1) = edges.bounds(yi);
+                row.y = Value::Null;
+                row.y1 = Some(Value::Number(y0));
+                row.y2 = Some(Value::Number(y1));
+            }
+            for output in &outputs {
+                let input = output.input.clone().or_else(|| match output.name.as_ref() {
+                    "x" => x_field.clone().filter(|_| !bin_x),
+                    "y" => y_field.clone().filter(|_| !bin_y),
+                    name => Some(SharedString::from(name.to_string())),
+                });
+                let values: Vec<Value> = records
+                    .iter()
+                    .map(|record| match &input {
+                        Some(field) => record.value(field),
+                        None => Value::Null,
+                    })
+                    .collect();
+                let reduced = output.reducer.reduce(&values, &records);
+                let number = reduced.as_number().unwrap_or(0.);
+                match output.name.as_ref() {
+                    "y" if bin_x && !bin_y => {
+                        let base = stack_tops.entry(xi).or_insert(0.);
+                        row.y = Value::Number(number);
+                        row.y1 = Some(Value::Number(*base));
+                        row.y2 = Some(Value::Number(*base + number));
+                        *base += number;
+                    }
+                    "x" if bin_y && !bin_x => {
+                        let base = stack_tops.entry(yi).or_insert(0.);
+                        row.x = Value::Number(number);
+                        row.x1 = Some(Value::Number(*base));
+                        row.x2 = Some(Value::Number(*base + number));
+                        *base += number;
+                    }
+                    "y" => row.y = reduced.clone(),
+                    "x" => row.x = reduced.clone(),
+                    "fillOpacity" | "opacity" => opacities.push((binned.len(), number)),
+                    _ => {}
+                }
+                row.row = row.row.clone().with(output.name.clone(), reduced);
+            }
+            binned.push(row);
+        }
+    }
+
+    let max = opacities.iter().map(|(_, v)| *v).fold(0., f64::max);
+    if max > 0. {
+        for (index, value) in opacities {
+            binned[index].opacity = Some((value / max).clamp(0., 1.) as f32);
+        }
+    }
+    binned
 }
 
 /// Rewrite every row's y interval from the stacked series.
@@ -1025,7 +1183,10 @@ pub fn window_anchor(mark: &Mark) -> Anchor {
 
 /// The bin thresholds a mark uses.
 pub fn thresholds(mark: &Mark) -> Thresholds {
-    mark.bin.map(|bin| bin.thresholds).unwrap_or_default()
+    mark.bin
+        .as_ref()
+        .map(|bin| bin.thresholds)
+        .unwrap_or_default()
 }
 
 /// The stack offset a mark uses.
@@ -1613,4 +1774,107 @@ mod interval_domain_tests {
     }
 
     use crate::value::PlotKind;
+}
+
+#[cfg(test)]
+mod bin_tests {
+    use super::*;
+    use crate::mark::MarkKind;
+    use crate::transform::GroupReducer;
+
+    fn athletes() -> Dataset {
+        // Two series over weights 40..=99, heights two values apart.
+        Dataset::new((0..120).map(|i| {
+            Table::empty()
+                .with(
+                    "sex",
+                    Value::text(if i % 2 == 0 { "female" } else { "male" }),
+                )
+                .with("weight", Value::Number(40. + (i / 2) as f64))
+                .with("height", Value::Number(if i % 4 < 2 { 1.6 } else { 1.9 }))
+        }))
+    }
+
+    #[test]
+    fn a_fill_field_bins_and_stacks_each_series() {
+        let mark: Mark = Mark::new(MarkKind::RectY)
+            .x("weight")
+            .fill("sex")
+            .bin_output("y", GroupReducer::Count);
+        let prepared = prepare(&athletes(), &[mark]);
+        let rows = &prepared[0].rows;
+        // Both series share the bins' edges.
+        let edges = |z: &str| -> Vec<(Value, Value)> {
+            rows.iter()
+                .filter(|row| row.z.as_ref().map(Value::label).as_deref() == Some(z))
+                .map(|row| row.x_interval().unwrap())
+                .collect()
+        };
+        assert_eq!(edges("female"), edges("male"));
+        // Each bin's male rect stacks on its female rect, the counts summing
+        // to every row.
+        let total: f64 = rows.iter().filter_map(|row| row.y.as_number()).sum();
+        assert_eq!(total, 120.);
+        let top = rows
+            .iter()
+            .filter_map(|row| row.y2.as_ref()?.as_number())
+            .fold(0., f64::max);
+        let tallest_bin = rows
+            .iter()
+            .filter(|row| row.y1.as_ref().and_then(Value::as_number) == Some(0.))
+            .count();
+        assert!(top > 0. && tallest_bin > 0);
+        for row in rows
+            .iter()
+            .filter(|row| row.z.as_ref().unwrap().label() == "male")
+        {
+            assert!(
+                row.y1.as_ref().unwrap().as_number().unwrap() > 0.,
+                "male stacks on female"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rect_naming_x_and_y_bins_both() {
+        let mark: Mark = Mark::new(MarkKind::Rect)
+            .x("weight")
+            .y("height")
+            .fill("sex")
+            .bin_output("fillOpacity", GroupReducer::Count);
+        assert_eq!(bin_axes(&mark), (true, true));
+        let prepared = prepare(&athletes(), &[mark]);
+        let rows = &prepared[0].rows;
+        assert!(rows.iter().all(|row| row.x1.is_some() && row.y1.is_some()));
+        // The opacity scale runs [0, max] → [0, 1].
+        let max = rows.iter().filter_map(|row| row.opacity).fold(0., f32::max);
+        assert_eq!(max, 1.);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.row.number("fillOpacity").unwrap())
+                .sum::<f64>(),
+            120.
+        );
+    }
+
+    #[test]
+    fn auto_thresholds_follow_scotts_rule_on_nice_edges() {
+        let values: Vec<f64> = (0..1000).map(|i| (i % 100) as f64 + 31.).collect();
+        let edges = transform::BinEdges::of(&values, Thresholds::Auto).unwrap();
+        // Scott: 3.49·σ·n^(-1/3) ≈ 10 → ten bins of a nice width 10 from 30.
+        assert_eq!(edges.width, 10.);
+        assert_eq!(edges.start, 30.);
+        assert_eq!(edges.slot(130.), edges.count - 1);
+    }
+
+    #[test]
+    fn a_color_field_implies_the_series() {
+        let mark: Mark = Mark::new(MarkKind::Dot)
+            .x("weight")
+            .y("height")
+            .stroke("sex");
+        assert!(
+            matches!(&mark.channels.z, Some(crate::table::Channel::Field(name)) if name == "sex")
+        );
+    }
 }

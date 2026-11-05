@@ -137,22 +137,21 @@ impl Colors {
             prepared
                 .rows
                 .iter()
-                .map(|row| channel.read(&row.row))
+                .map(|row| ctx.colors.channel(channel, &row.row))
                 .collect()
         });
         let stroke = prepared.mark.channels.stroke.as_ref().map(|channel| {
             prepared
                 .rows
                 .iter()
-                .map(|row| channel.read(&row.row))
+                .map(|row| ctx.colors.channel(channel, &row.row))
                 .collect()
         });
 
         // Without a fill channel a row is colored by the plot's scales — the
         // continuous `color` option, then the shared ordinal `z` scale — the
         // same resolution the legend and tooltip read.
-        let scaled = fill.is_none()
-            && (has_series(prepared) || ctx.colors.continuous.is_some());
+        let scaled = fill.is_none() && (has_series(prepared) || ctx.colors.continuous.is_some());
         let fill = match fill {
             Some(colors) => Some(colors),
             None if scaled => Some(
@@ -263,7 +262,14 @@ fn draw_dots(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             // The hovered dot grows toward 1.6× its radius; the rest keep
             // theirs, so the hover reads as a lift rather than a redraw.
             let r = r * (1. + 0.6 * emphasis);
-            let fill = paint::alpha(colors.fill(index), ctx.row_fill_opacity(prepared, row));
+            // Plot's dot is hollow when it is given a stroke and no fill.
+            let hollow =
+                prepared.mark.channels.stroke.is_some() && prepared.mark.channels.fill.is_none();
+            let fill = if hollow {
+                Hsla::transparent_black()
+            } else {
+                paint::alpha(colors.fill(index), ctx.row_fill_opacity(prepared, row))
+            };
             let stroke = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
             paint_symbol(
                 ctx,
@@ -289,6 +295,37 @@ pub fn paint_symbol(
     stroke_width: f32,
 ) {
     let absolute = ctx.absolute(position);
+    // A circle is a fully rounded quad: one instance on the GPU, where a
+    // tessellated path costs far more. Plot's scatterplots draw thousands
+    // of dots, which overflow the path pipeline's buffer. SVG centers a
+    // stroke on the outline, so the quad grows by half the stroke and draws
+    // it as an inside border.
+    if matches!(symbol, Symbol::Circle | Symbol::CircleOpen) {
+        let stroke_width = if stroke.a > 0. {
+            stroke_width.max(0.)
+        } else {
+            0.
+        };
+        let outer = radius + stroke_width / 2.;
+        let fill = if symbol == Symbol::CircleOpen {
+            Hsla::transparent_black()
+        } else {
+            fill
+        };
+        let bounds = gpui::Bounds::new(
+            point(absolute.x - px(outer), absolute.y - px(outer)),
+            gpui::size(px(outer * 2.), px(outer * 2.)),
+        );
+        ctx.window.paint_quad(gpui::quad(
+            bounds,
+            gpui::Corners::all(px(outer)),
+            fill,
+            gpui::Edges::all(px(stroke_width)),
+            stroke,
+            gpui::BorderStyle::default(),
+        ));
+        return;
+    }
     let points = symbol.path(absolute, radius);
     if symbol.is_line() {
         // Stroke symbols draw their segments, not one closed path.
@@ -606,6 +643,24 @@ fn draw_rects(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             ) else {
                 continue;
             };
+            // Plot's `inset`: an explicit inset shrinks every side; a binned
+            // rect defaults to half a pixel along the axes it bins, so its
+            // neighbours read apart.
+            let (bin_x, bin_y) = crate::render::bin_axes(&prepared.mark);
+            let inset = |binned: bool| {
+                prepared
+                    .mark
+                    .style
+                    .inset
+                    .unwrap_or(if binned { 0.5 } else { 0. })
+            };
+            let shrink = |a: f32, b: f32, inset: f32| {
+                let (lo, hi) = (a.min(b), a.max(b));
+                let inset = inset.min((hi - lo) / 2.);
+                (lo + inset, hi - inset)
+            };
+            let (x0, x1) = shrink(x0, x1, inset(bin_x));
+            let (y0, y1) = shrink(y0, y1, inset(bin_y));
             let rect = paint::rect_between(
                 ctx.absolute(point(px(x0), px(y0))),
                 ctx.absolute(point(px(x1), px(y1))),
@@ -1689,7 +1744,7 @@ fn draw_tips(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             continue;
         }
         let fill = match &prepared.mark.channels.fill {
-            Some(channel) => channel.read(&row.row),
+            Some(channel) => ctx.colors.channel(channel, &row.row),
             None => {
                 let color = prepared.mark.style.fill;
                 if color == crate::mark::MarkStyle::default().fill {

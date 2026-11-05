@@ -93,6 +93,8 @@ pub enum MarkKind {
     DensityY,
     /// Contour lines over a raster, Plot's `contour`.
     Contour,
+    /// Two-dimensional density contours of x and y, Plot's `density`.
+    Density,
     /// A pie chart of one quantitative channel, Plot's `pie`.
     Pie,
     /// An arc chart, Plot's `arc`.
@@ -276,6 +278,7 @@ impl MarkKind {
             MarkKind::DensityX => "densityX",
             MarkKind::DensityY => "densityY",
             MarkKind::Contour => "contour",
+            MarkKind::Density => "density",
             MarkKind::Pie => "pie",
             MarkKind::Arc => "arc",
             MarkKind::Waffle => "waffle",
@@ -456,7 +459,7 @@ impl MarkKind {
                 band_x: true,
                 ..basic
             },
-            Hexbin | Contour => radial,
+            Hexbin | Contour | Density => radial,
             Link => basic,
             Tip => MarkCategory {
                 bivariate: false,
@@ -595,16 +598,30 @@ impl Default for StackConfig {
     }
 }
 
-/// How a mark's data is binned, Plot's `bin` option.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// How a mark's data is binned, Plot's `bin`, `binX` and `binY`.
+///
+/// The axes binned follow the mark: `rectY` bins x (`binX`), `rectX` bins y
+/// (`binY`), and a `rect` naming both x and y bins both (`bin`). Each bin is
+/// formed within its `z` series, so `fill: "sex"` bins each sex apart.
+#[derive(Clone, Debug)]
 pub struct BinConfig {
     pub thresholds: Thresholds,
+    /// The outputs, Plot's bin outputs `{y: "count"}` or
+    /// `{fillOpacity: "count"}`. With none, a one-dimensional bin counts into
+    /// its length channel (`y` for `binX`, `x` for `binY`).
+    pub outputs: Vec<GroupOutput>,
+    /// Edges fixed ahead of binning, `[x, y]`: a faceted plot computes them
+    /// from the whole data so every facet's bins line up. `None` computes
+    /// them from the rows being binned.
+    pub edges: [Option<crate::transform::BinEdges>; 2],
 }
 
 impl Default for BinConfig {
     fn default() -> Self {
         Self {
             thresholds: Thresholds::Auto,
+            outputs: Vec::new(),
+            edges: [None, None],
         }
     }
 }
@@ -782,6 +799,9 @@ pub struct MarkStyle {
     pub unit: f32,
     /// The gap between a waffle's cells, Plot's `gap`, in pixels.
     pub gap: f32,
+    /// How far a rect is shrunk on each side, Plot's `inset`; `None` takes
+    /// the mark's default (half a pixel along a binned axis, else zero).
+    pub inset: Option<f32>,
 }
 
 /// How a line or area connects its points, Plot's `curve`.
@@ -891,6 +911,7 @@ impl Default for MarkStyle {
             bin_width: 20.,
             unit: 1.,
             gap: 1.,
+            inset: None,
         }
     }
 }
@@ -1172,14 +1193,28 @@ impl Mark {
 
     /// Set the fill.
     pub fn fill(mut self, color: impl Into<ColorChannel>) -> Self {
-        self.channels.fill = Some(color.into());
+        let color = color.into();
+        self.series_from_color(&color);
+        self.channels.fill = Some(color);
         self
     }
 
     /// Set the stroke.
     pub fn stroke(mut self, color: impl Into<ColorChannel>) -> Self {
-        self.channels.stroke = Some(color.into());
+        let color = color.into();
+        self.series_from_color(&color);
+        self.channels.stroke = Some(color);
         self
+    }
+
+    /// A color named by field is also the mark's series, Plot's implicit
+    /// `z`: `fill: "sex"` groups, stacks and legends by sex.
+    fn series_from_color(&mut self, color: &ColorChannel) {
+        if let Some(field) = color.field()
+            && self.channels.z.is_none()
+        {
+            self.channels.z = Some(crate::table::Channel::Field(field.clone()));
+        }
     }
 
     /// Set the radius of a dot, in pixels.
@@ -1301,7 +1336,31 @@ impl Mark {
 
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
-        self.bin = Some(BinConfig { thresholds });
+        let outputs = self.bin.take().map(|bin| bin.outputs).unwrap_or_default();
+        self.bin = Some(BinConfig {
+            thresholds,
+            outputs,
+            edges: [None, None],
+        });
+        self
+    }
+
+    /// Add a bin output, Plot's `Plot.bin({fillOpacity: "count"}, …)`: each
+    /// bin's rows are reduced into `name` — `"x"`, `"y"`, `"fill"`,
+    /// `"fillOpacity"`, `"opacity"` or `"r"`. Bins with the default
+    /// thresholds when the mark has not chosen any.
+    pub fn bin_output(mut self, name: impl Into<SharedString>, reducer: GroupReducer) -> Self {
+        let mut bin = self.bin.take().unwrap_or_default();
+        bin.outputs.push(GroupOutput::new(name, reducer));
+        self.bin = Some(bin);
+        self
+    }
+
+    /// Shrink a rect or bar by `pixels` on every side, Plot's `inset`. A
+    /// binned rect defaults to half a pixel along its binned axes, so
+    /// adjacent bins read apart; `inset(0.)` closes the gap.
+    pub fn inset(mut self, pixels: f32) -> Self {
+        self.style.inset = Some(pixels);
         self
     }
 
@@ -1788,6 +1847,22 @@ macro_rules! mark_builder {
                 self
             }
 
+            /// Add a bin output, Plot's `Plot.bin({fillOpacity: "count"}, …)`.
+            pub fn bin_output(
+                mut self,
+                name: impl Into<SharedString>,
+                reducer: GroupReducer,
+            ) -> Self {
+                self.0 = self.0.bin_output(name, reducer);
+                self
+            }
+
+            /// Shrink a rect or bar on every side, Plot's `inset`.
+            pub fn inset(mut self, pixels: f32) -> Self {
+                self.0 = self.0.inset(pixels);
+                self
+            }
+
             /// Bucket a date or number into an interval, Plot's `interval`.
             pub fn interval(mut self, interval: Interval) -> Self {
                 self.0 = self.0.interval(interval);
@@ -2142,6 +2217,11 @@ mark_builder!(
     MarkKind::Contour
 );
 mark_builder!(
+    /// Two-dimensional density contours, Plot's `density`.
+    DensityMark,
+    MarkKind::Density
+);
+mark_builder!(
     /// A pie mark, Plot's `pie`.
     PieMark,
     MarkKind::Pie
@@ -2262,6 +2342,7 @@ mod tests {
             DensityX,
             DensityY,
             Contour,
+            Density,
             Link,
             DelaunayLink,
             DelaunayMesh,
@@ -2314,7 +2395,8 @@ mod tests {
         // The renderer family drives which module draws the mark.
         assert!(family(
             &[
-                Pie, Arc, Waffle, BoxX, BoxY, ViolinX, ViolinY, DensityX, DensityY, Hexbin, Contour
+                Pie, Arc, Waffle, BoxX, BoxY, ViolinX, ViolinY, DensityX, DensityY, Hexbin,
+                Contour, Density
             ],
             Radial
         ));

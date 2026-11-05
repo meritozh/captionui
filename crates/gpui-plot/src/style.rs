@@ -12,19 +12,52 @@ use gpui::{Hsla, PathBuilder, Pixels, Point, px};
 use crate::table::Table;
 use crate::value::Value;
 
-/// A color channel: one color for every datum, or one per datum.
+/// A color channel: one color for every datum, one per datum, or a field
+/// whose values the plot's ordinal color scale colors.
+///
+/// The field form is Plot's `fill: "sex"`: the field also becomes the mark's
+/// `z` series (when it has none), so the legend, the tooltip and grouping
+/// transforms see the same series the color shows.
 #[derive(Clone)]
 pub enum ColorChannel {
     Constant(Hsla),
     Accessor(Rc<dyn Fn(&Table) -> Hsla>),
+    /// A field colored through the plot's ordinal color scale. Resolve it with
+    /// [`crate::render::color::PlotColors::channel`]; [`ColorChannel::read`]
+    /// has no scale and returns transparent.
+    Field(gpui::SharedString),
 }
 
 impl ColorChannel {
+    /// The color for `row`, for the constant and accessor forms. A
+    /// [`ColorChannel::Field`] needs the plot's color scale, so it reads as
+    /// transparent here.
     pub fn read(&self, row: &Table) -> Hsla {
         match self {
             ColorChannel::Constant(color) => *color,
             ColorChannel::Accessor(accessor) => accessor(row),
+            ColorChannel::Field(_) => Hsla::transparent_black(),
         }
+    }
+
+    /// The field this channel colors by, when it is the field form.
+    pub fn field(&self) -> Option<&gpui::SharedString> {
+        match self {
+            ColorChannel::Field(name) => Some(name),
+            _ => None,
+        }
+    }
+}
+
+impl From<&str> for ColorChannel {
+    fn from(field: &str) -> Self {
+        ColorChannel::Field(field.to_string().into())
+    }
+}
+
+impl From<gpui::SharedString> for ColorChannel {
+    fn from(field: gpui::SharedString) -> Self {
+        ColorChannel::Field(field)
     }
 }
 
@@ -48,6 +81,7 @@ impl std::fmt::Debug for ColorChannel {
         match self {
             ColorChannel::Constant(color) => f.debug_tuple("Constant").field(color).finish(),
             ColorChannel::Accessor(_) => f.write_str("Accessor(..)"),
+            ColorChannel::Field(name) => f.debug_tuple("Field").field(name).finish(),
         }
     }
 }

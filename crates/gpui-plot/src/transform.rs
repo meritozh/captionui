@@ -273,77 +273,129 @@ pub fn bin(data: &Dataset, field: &str, thresholds: Thresholds) -> (Vec<Bin>, [f
         })
         .collect();
 
-    let Some(extent) = crate::scale::extent(values.iter().map(|(_, v)| Value::Number(*v))) else {
+    let numbers: Vec<f64> = values.iter().map(|(_, v)| *v).collect();
+    let Some(edges) = BinEdges::of(&numbers, thresholds) else {
         return (Vec::new(), [0., 1.]);
     };
-
-    let [lo, hi] = extent;
-    let (lo, hi) = if lo == hi {
-        (lo - 0.5, hi + 0.5)
-    } else {
-        (lo, hi)
-    };
-    /// More bins than any histogram draws; a bound against a tiny interval.
-    const MAX_BINS: f64 = 10_000.;
-    // An interval that is not a positive, finite width — or one too fine to
-    // bin this extent — falls back to the automatic thresholds.
-    let interval = match thresholds {
-        Thresholds::Interval(width)
-            if width.is_finite() && width > 0. && (hi - lo) / width <= MAX_BINS =>
-        {
-            Some(width)
-        }
-        _ => None,
-    };
-    let width = match (interval, thresholds) {
-        (Some(width), _) => width,
-        (None, Thresholds::Count(count)) => nice_bin_width((hi - lo) / count.max(1) as f64),
-        (None, _) => nice_bin_width((hi - lo) / 10.),
-    };
-
-    // Each edge is `lo + i * width` rather than a running sum, so rounding
-    // does not drift across the bins.
-    let count = ((hi - lo) / width).ceil().clamp(1., MAX_BINS) as usize;
-    let mut bins: Vec<Bin> = (0..count)
-        .map(|i| Bin {
-            x0: lo + i as f64 * width,
-            x1: lo + (i + 1) as f64 * width,
-            rows: Vec::new(),
+    let mut bins: Vec<Bin> = (0..edges.count)
+        .map(|i| {
+            let (x0, x1) = edges.bounds(i);
+            Bin {
+                x0,
+                x1,
+                rows: Vec::new(),
+            }
         })
         .collect();
-    if bins.is_empty() {
-        bins.push(Bin {
-            x0: lo,
-            x1: hi,
-            rows: Vec::new(),
-        });
-    }
-
     for (index, value) in values {
-        let slot = ((value - lo) / width).floor() as isize;
-        let slot = slot.clamp(0, bins.len() as isize - 1) as usize;
-        bins[slot].rows.push(index);
+        bins[edges.slot(value)].rows.push(index);
     }
 
     let domain = [bins[0].x0, bins[bins.len() - 1].x1];
     (bins, domain)
 }
 
+/// The edges a [`bin`] lays over one axis: `count` bins of `width`, the first
+/// starting at `start`.
+///
+/// Like d3's `bin` with tick thresholds, the edges fall on multiples of a
+/// nice width, so the bins read 30–32, 32–34 … rather than starting at the
+/// data's minimum; the maximum lands in the last bin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BinEdges {
+    pub start: f64,
+    pub width: f64,
+    pub count: usize,
+}
+
+impl BinEdges {
+    /// The edges for finite `values` under `thresholds`, or `None` when there
+    /// are no values.
+    pub fn of(values: &[f64], thresholds: Thresholds) -> Option<Self> {
+        let mut values = values.iter().copied().filter(|v| v.is_finite());
+        let first = values.next()?;
+        let (mut lo, mut hi, mut n, mut sum, mut sum_sq) =
+            (first, first, 1usize, first, first * first);
+        for v in values {
+            lo = lo.min(v);
+            hi = hi.max(v);
+            n += 1;
+            sum += v;
+            sum_sq += v * v;
+        }
+        let (lo, hi) = if lo == hi {
+            (lo - 0.5, hi + 0.5)
+        } else {
+            (lo, hi)
+        };
+        /// More bins than any histogram draws; a bound against a tiny interval.
+        const MAX_BINS: f64 = 10_000.;
+        let span = hi - lo;
+        let width = match thresholds {
+            Thresholds::Interval(width)
+                if width.is_finite() && width > 0. && span / width <= MAX_BINS =>
+            {
+                width
+            }
+            Thresholds::Count(count) => nice_bin_width(span / count.max(1) as f64),
+            _ => {
+                // Plot's default `auto` thresholds: Scott's normal reference
+                // rule, capped at 200 bins.
+                let mean = sum / n as f64;
+                let variance =
+                    (sum_sq / n as f64 - mean * mean).max(0.) * n as f64 / (n.max(2) - 1) as f64;
+                let scott = 3.49 * variance.sqrt() * (n as f64).powf(-1. / 3.);
+                let bins = if scott > 0. && scott.is_finite() {
+                    (span / scott).ceil().clamp(1., 200.)
+                } else {
+                    1.
+                };
+                nice_bin_width(span / bins)
+            }
+        };
+        let start = (lo / width).floor() * width;
+        // A maximum exactly on an edge belongs to the bin it closes.
+        let count = ((hi - start) / width).ceil().clamp(1., MAX_BINS) as usize;
+        Some(Self {
+            start,
+            width,
+            count,
+        })
+    }
+
+    /// The bounds of bin `index`. Each edge is `start + i * width` rather
+    /// than a running sum, so rounding does not drift across the bins.
+    pub fn bounds(&self, index: usize) -> (f64, f64) {
+        (
+            self.start + index as f64 * self.width,
+            self.start + (index + 1) as f64 * self.width,
+        )
+    }
+
+    /// The bin a value falls in, clamped to the edges.
+    pub fn slot(&self, value: f64) -> usize {
+        let slot = ((value - self.start) / self.width).floor() as isize;
+        slot.clamp(0, self.count as isize - 1) as usize
+    }
+}
+
 fn nice_bin_width(rough: f64) -> f64 {
     if rough <= 0. || !rough.is_finite() {
         return 1.;
     }
+    // d3's `tickIncrement`: the power of ten times 1, 2, 5 or 10 nearest the
+    // rough step on a log scale, so 2.3 rounds to 2 rather than up to 5.
     let exponent = rough.log10().floor();
     let base = 10f64.powf(exponent);
     let fraction = rough / base;
-    let nice = if fraction <= 1. {
-        1.
-    } else if fraction <= 2. {
-        2.
-    } else if fraction <= 5. {
-        5.
-    } else {
+    let nice = if fraction >= 50f64.sqrt() {
         10.
+    } else if fraction >= 10f64.sqrt() {
+        5.
+    } else if fraction >= 2f64.sqrt() {
+        2.
+    } else {
+        1.
     };
     nice * base
 }

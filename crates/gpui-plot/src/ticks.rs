@@ -313,10 +313,17 @@ fn advance(millis: f64, step: TimeStep) -> f64 {
                 return millis;
             };
             let total = datetime.year() * 12 + datetime.month0() as i32 + months as i32;
-            Utc.with_ymd_and_hms(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1, 0, 0, 0)
-                .single()
-                .map(|d| d.timestamp_millis() as f64)
-                .unwrap_or(millis)
+            Utc.with_ymd_and_hms(
+                total.div_euclid(12),
+                total.rem_euclid(12) as u32 + 1,
+                1,
+                0,
+                0,
+                0,
+            )
+            .single()
+            .map(|d| d.timestamp_millis() as f64)
+            .unwrap_or(millis)
         }
     }
 }
