@@ -121,20 +121,37 @@ fn e05() -> Plot {
         .mark(frame())
 }
 
-/// Gap: the identity projection ignores the scale its domain fits, so the
-/// plan draws at one unit per pixel, offset, rather than filling the frame.
+/// Gap: the plot-level `identity` (and `reflect-y`) projection ignores the
+/// scale its `domain` fits (`Fitted::project` adds the translate but never
+/// multiplies by the scale), so `geo(westport).plot().projection(identity
+/// .domain(westport))` draws the plan at one unit per pixel, mostly off the
+/// frame. Until that's fixed this keeps the geo mark's own planar view of
+/// the plan's bounds (y down), with the height from their aspect ratio.
 fn e06() -> Plot {
+    let text = data::text("westport-house.json");
     let westport = geo::features(&data::json("westport-house.json"));
-    let domain = Geometry::Collection(
-        westport
-            .rows()
-            .iter()
-            .filter_map(|d| d.value("geometry").as_geo().cloned())
-            .collect(),
-    );
-    geo(westport)
+    let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for row in westport.rows() {
+        let fitted = projection("identity").fit(1., 1.);
+        if let Some([[a, b], [c, d]]) = row.value("geometry").as_geo().and_then(|g| fitted.bounds(g)) {
+            // `identity` fits with a one-pixel translate of zero inset.
+            (x0, y0, x1, y1) = (x0.min(a), y0.min(b), x1.max(c), y1.max(d));
+        }
+    }
+    let view = gpui_plot::Projection::Equirectangular(gpui_plot::Equirectangular {
+        west: x0,
+        east: x1,
+        north: y0,
+        south: y1,
+    });
+    geo(Dataset::length(1))
+        .geojson(&text)
+        .projection(view)
+        .fill("none")
+        .stroke("currentColor")
         .plot()
-        .projection(projection("identity").domain(domain))
+        .no_axes()
+        .height((640. * (y1 - y0) / (x1 - x0)) as f32)
 }
 
 fn e07() -> Plot {

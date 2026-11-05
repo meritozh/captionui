@@ -119,6 +119,74 @@ pub fn albers() -> gpui_plot::GeoProjection {
         .domain(gpui_plot::Geometry::Collection(lower48))
 }
 
+/// Gap: the voronoi and hexbin marks ignore the plot's `projection`
+/// (they tessellate and bin in x/y scale space, so their output lands far
+/// from the map). Until they project, these ports place each record by the
+/// library's own fitted projection, as `x`/`y` fields, and pin linear x/y
+/// scales to the projection's frame so a unit is a pixel both ways: what
+/// Plot's projection does before those marks see the points.
+pub fn pre_projected(
+    data: gpui_plot::Dataset,
+    projection: &gpui_plot::GeoProjection,
+    lonlat: impl Fn(&gpui_plot::Table) -> Option<[f64; 2]>,
+) -> (gpui_plot::Dataset, gpui_plot::Plot) {
+    let fitted = projection.fit(1000., 1000.);
+    let [[x0, y0], [x1, y1]] = projection
+        .domain
+        .as_ref()
+        .and_then(|domain| fitted.bounds(domain))
+        .unwrap_or([[0., 0.], [1000., 1000.]]);
+    let rows = data.rows().iter().filter_map(|row| {
+        let [lon, lat] = lonlat(row)?;
+        let [x, y] = fitted.project(lon, lat)?;
+        Some(
+            row.clone()
+                .with("x", gpui_plot::Value::Number(x))
+                .with("y", gpui_plot::Value::Number(y)),
+        )
+    });
+    let plot = gpui_plot::Plot::plot()
+        .no_axes()
+        .margin(0.)
+        .aspect_ratio(1.)
+        .x(move |x| x.domain([x0, x1]).nice(false).zero(false))
+        // Projected y grows downward.
+        .y(move |y| y.domain([y0, y1]).reverse(true).nice(false).zero(false));
+    (gpui_plot::Dataset::new(rows), plot)
+}
+
+/// A geometry's lines through the same fitted projection as
+/// [`pre_projected`], as a `line` mark (one series per path), so a map can
+/// sit under pre-projected points.
+pub fn pre_projected_lines(
+    geometry: &gpui_plot::Geometry,
+    projection: &gpui_plot::GeoProjection,
+) -> gpui_plot::mark::LineMark {
+    let fitted = projection.fit(1000., 1000.);
+    let rows = fitted
+        .paths(geometry)
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, (path, _))| {
+            path.into_iter().map(move |[x, y]| {
+                gpui_plot::Table::empty()
+                    .with("x", gpui_plot::Value::Number(x))
+                    .with("y", gpui_plot::Value::Number(y))
+                    .with("path", gpui_plot::Value::Number(i as f64))
+            })
+        });
+    gpui_plot::marks::line(gpui_plot::Dataset::new(rows))
+        .x("x")
+        .y("y")
+        .z("path")
+        .clip(true)
+}
+
+/// A record's geometry's spherical centroid, Plot's `geoCentroid`.
+pub fn geo_centroid(row: &gpui_plot::Table) -> Option<[f64; 2]> {
+    gpui_plot::geo::centroid(row.value("geometry").as_geo()?)
+}
+
 /// Every ported example, in the docs' order.
 pub fn examples() -> Vec<Example> {
     let mut all = Vec::new();
