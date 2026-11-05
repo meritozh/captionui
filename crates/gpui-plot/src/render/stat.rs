@@ -58,10 +58,17 @@ pub fn draw_linear_regression(prepared: &PreparedMark, ctx: &mut DrawContext<'_>
                     .into_iter()
                     .map(|point| ctx.absolute(point))
                     .collect();
-                let fill = group
-                    .first()
-                    .map(|(index, _)| colors.fill(*index))
-                    .unwrap_or_else(|| ctx.default_fill(prepared));
+                // Plot's band is the mark's fill, `currentColor` by default
+                // (the stroke's color when only a stroke is set), at a
+                // tenth of its opacity.
+                let fill = match &prepared.mark.channels.fill {
+                    Some(_) => group
+                        .first()
+                        .map(|(index, _)| colors.fill(*index))
+                        .unwrap_or_else(|| ctx.default_fill(prepared)),
+                    None => line_color,
+                };
+                let opacity = if prepared.mark.style.fill_opacity == 1. { 0.1 } else { opacity };
                 paint::paint_fill(
                     &polygon,
                     paint::alpha(fill, opacity * ctx.appear),

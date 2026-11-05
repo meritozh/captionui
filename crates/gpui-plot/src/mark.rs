@@ -803,6 +803,9 @@ pub struct MarkStyle {
     pub clip: bool,
     /// Plot's `markerStart`, `markerMid` and `markerEnd`.
     pub markers: [Option<Marker>; 3],
+    /// A difference mark's `positiveFill` and `negativeFill`.
+    pub positive_fill: Option<Hsla>,
+    pub negative_fill: Option<Hsla>,
     /// Plot's `textStroke`: a halo behind a text mark's glyphs.
     pub text_stroke: Option<Hsla>,
     /// Plot's `textStrokeWidth`.
@@ -975,6 +978,8 @@ impl Default for MarkStyle {
             inset: None,
             clip: false,
             markers: [None; 3],
+            positive_fill: None,
+            negative_fill: None,
             text_stroke: None,
             text_stroke_width: 3.,
             text_anchor: TextAnchor::Middle,
@@ -2003,6 +2008,18 @@ impl Mark {
         self
     }
 
+    /// A difference mark's `positiveFill`.
+    pub fn positive_fill(mut self, color: &str) -> Self {
+        self.style.positive_fill = crate::css::parse(color);
+        self
+    }
+
+    /// A difference mark's `negativeFill`.
+    pub fn negative_fill(mut self, color: &str) -> Self {
+        self.style.negative_fill = crate::css::parse(color);
+        self
+    }
+
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
         let outputs = self.bin.take().map(|bin| bin.outputs).unwrap_or_default();
@@ -2558,6 +2575,18 @@ macro_rules! mark_builder {
             /// Clip the mark to the plot area, Plot's `clip: true`.
             pub fn clip(mut self, clip: bool) -> Self {
                 self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::positive_fill`].
+            pub fn positive_fill(mut self, color: &str) -> Self {
+                self.0 = self.0.positive_fill(color);
+                self
+            }
+
+            /// See [`Mark::negative_fill`].
+            pub fn negative_fill(mut self, color: &str) -> Self {
+                self.0 = self.0.negative_fill(color);
                 self
             }
 

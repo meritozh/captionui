@@ -814,13 +814,16 @@ fn draw_rects(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                 ctx.absolute(point(px(x0), px(y0))),
                 ctx.absolute(point(px(x1), px(y1))),
             );
+            // Plot's rect fills nothing when given only a stroke.
+            if !(prepared.mark.channels.stroke.is_some() && prepared.mark.channels.fill.is_none()) {
             let color = colors.fill(index);
-            paint::paint_rect(
-                rect,
-                prepared.mark.style.corner_radius,
-                paint::alpha(color, ctx.row_fill_opacity(prepared, row)),
-                ctx.window,
-            );
+                paint::paint_rect(
+                    rect,
+                    prepared.mark.style.corner_radius,
+                    paint::alpha(color, ctx.row_fill_opacity(prepared, row)),
+                    ctx.window,
+                );
+            }
             if prepared.mark.channels.stroke.is_some() {
                 paint::paint_rect_outline(
                     rect,
@@ -1284,39 +1287,41 @@ fn paint_arrow_head(
 
 fn draw_links(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
-    let width = prepared.mark.style.stroke_width.max(1.);
+    let style = &prepared.mark.style;
+    let width = style.stroke_width;
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let (Some(x0), Some(x1)) = (
-                ctx.frame
-                    .x
-                    .scale
-                    .position(&row.x1.clone().unwrap_or(Value::Number(0.))),
-                ctx.frame.x.scale.position(row.x_value()),
-            ) else {
+            // Plot's link runs from (x1, y1) to (x2, y2); a lone `x` (or
+            // `x1`) is both ends, Plot's `maybeSameValue`.
+            let x_start = row.x1.clone().unwrap_or_else(|| row.x.clone());
+            let x_end = row.x2.clone().unwrap_or_else(|| if row.x.is_null() { x_start.clone() } else { row.x.clone() });
+            let y_start = row.y1.clone().unwrap_or_else(|| row.y.clone());
+            let y_end = row.y2.clone().unwrap_or_else(|| if row.y.is_null() { y_start.clone() } else { row.y.clone() });
+            let place = |x: &Value, y: &Value| -> Option<Point<Pixels>> {
+                if let Some(projection) = &ctx.frame.projection {
+                    let [px_, py_] = projection.project(x.as_number()?, y.as_number()?)?;
+                    return Some(point(px(px_ as f32), px(py_ as f32)));
+                }
+                Some(point(px(ctx.frame.x.scale.position(x)?), px(ctx.frame.y.scale.position(y)?)))
+            };
+            let (Some(from), Some(to)) = (place(&x_start, &y_start), place(&x_end, &y_end)) else {
                 continue;
             };
-            let (Some(y0), Some(y1)) = (
-                ctx.frame
-                    .y
-                    .scale
-                    .position(&row.y1.clone().unwrap_or(Value::Number(0.))),
-                ctx.frame.y.scale.position(row.y_value()),
-            ) else {
-                continue;
-            };
-            let from = ctx.absolute(point(px(x0), px(y0)));
-            let to = ctx.absolute(point(px(x1), px(y1)));
-            // A quadratic curve whose control point is above the midpoint
-            // reads as a link, Plot's default curve for `link`.
-            let control = point(
-                px((from.x.as_f32() + to.x.as_f32()) / 2.),
-                px((from.y.as_f32() + to.y.as_f32()) / 2. - 30.),
-            );
-            let mut builder = PathBuilder::stroke(px(width));
-            builder.move_to(from);
-            builder.curve_to(to, control);
-            paint::paint_path(builder.build().ok(), colors.stroke(index), ctx.window);
+            let (from, to) = (ctx.absolute(from), ctx.absolute(to));
+            let color = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
+            // Plot's link is straight unless it names a curve.
+            let points = vec![from, to];
+            match style.curve {
+                crate::mark::Curve::Linear => {
+                    if style.dash.is_empty() {
+                        paint::paint_stroke(&points, width, color, ctx.window);
+                    } else {
+                        paint::paint_dashed(from, to, &style.dash, width, color, ctx.window);
+                    }
+                }
+                curve => paint::paint_path(curve_path(&points, curve, width, 1.), color, ctx.window),
+            }
+            paint_markers(&points, &style.markers, color, width, ctx.theme.background, ctx.window);
         }
     });
 }
@@ -2415,8 +2420,11 @@ fn draw_differences(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     // Plot's own fills: green where the second series is above the first,
     // blue where it is below.
     let opacity = prepared.mark.style.fill_opacity * ctx.appear;
-    let positive = paint::alpha(crate::scale::hsla_from_hex(0x3ca951), opacity);
-    let negative = paint::alpha(crate::scale::hsla_from_hex(0x4269d0), opacity);
+    let style = &prepared.mark.style;
+    let positive = style.positive_fill.unwrap_or(crate::scale::hsla_from_hex(0x3ca951));
+    let negative = style.negative_fill.unwrap_or(crate::scale::hsla_from_hex(0x4269d0));
+    let positive = paint::alpha(positive, opacity);
+    let negative = paint::alpha(negative, opacity);
     let line = ctx.default_stroke(prepared);
     let width = prepared.mark.style.stroke_width.max(1.);
 

@@ -140,6 +140,9 @@ pub struct Plot {
     no_axes: bool,
     /// Plot's `label: null`, which hides every axis label.
     no_labels: bool,
+    /// Plot's `width`: the figure's width, 640 by default; the element
+    /// shrinks to it when its container is wider.
+    width: Option<f32>,
     /// Plot's `projection`.
     projection: Option<crate::geo::GeoProjection>,
     /// Plot's `aspectRatio`: the plot's height follows from its width so a
@@ -218,6 +221,7 @@ impl Plot {
             margins: [None; 4],
             no_axes: false,
             no_labels: false,
+            width: None,
             projection: None,
             aspect_ratio: None,
             caption: None,
@@ -376,6 +380,17 @@ impl Plot {
     pub fn projection(mut self, projection: impl Into<crate::geo::GeoProjection>) -> Self {
         self.projection = Some(projection.into());
         self
+    }
+
+    /// Plot's `width`.
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    /// The width the plot asked for with [`Plot::width`], if any.
+    pub fn requested_width(&self) -> Option<f32> {
+        self.width
     }
 
     /// Plot's `aspectRatio`.
@@ -2312,6 +2327,13 @@ impl Plot {
                     bounds.size.width,
                     px(height + extras).min(bounds.size.height.max(px(height + extras))),
                 ),
+                ..bounds
+            },
+            _ => bounds,
+        };
+        let bounds = match self.width {
+            Some(width) if width > 0. && px(width) < bounds.size.width => Bounds {
+                size: gpui::size(px(width), bounds.size.height),
                 ..bounds
             },
             _ => bounds,

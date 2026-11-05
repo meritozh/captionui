@@ -711,6 +711,15 @@ fn derive_intervals(
     match mark.kind {
         MarkKind::RuleX => optional_zero(y, y1, y2),
         MarkKind::RuleY => optional_zero(x, x1, x2),
+        // Plot's difference compares y with zero when given only y.
+        MarkKind::DifferenceY if unset(y1, y2) && !y.is_null() => {
+            *y1 = Some(Value::Number(0.));
+            *y2 = Some(y.clone());
+        }
+        MarkKind::DifferenceX if unset(x1, x2) && !x.is_null() => {
+            *x1 = Some(Value::Number(0.));
+            *x2 = Some(x.clone());
+        }
         _ => {}
     }
     match mark.kind {
