@@ -1941,7 +1941,7 @@ impl PlotTrait for Plot {
             .collect();
         let dots = if dots.is_empty() { vec![hit] } else { dots };
 
-        Some(TooltipState::new(flat, gpui::point(hit.x, px(0.)), dots))
+        Some(TooltipState::new(flat, hit, dots))
     }
 
     fn tooltip(
