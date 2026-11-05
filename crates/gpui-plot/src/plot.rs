@@ -627,6 +627,12 @@ impl Plot {
         // interquartile bar, a median tick and outlier dots.
         match mark.kind {
             MarkKind::BoxX | MarkKind::BoxY => self.marks.extend(crate::mark::expand_box(mark)),
+            // Plot's tree mark composes a link, a dot and labels, over the
+            // tree transforms.
+            MarkKind::Tree if mark.tree.is_some() => {
+                let spec = mark.tree.clone().map(|(s, _)| s).unwrap_or_default();
+                self.marks.extend(crate::mark::expand_tree(mark, spec))
+            }
             _ => self.marks.push(mark),
         }
         self

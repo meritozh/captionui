@@ -336,3 +336,22 @@ pub fn bollinger_x(data: impl Into<Dataset>) -> BollingerXMark {
 pub fn bollinger_y(data: impl Into<Dataset>) -> BollingerYMark {
     BollingerYMark::new().data(data)
 }
+
+/// Plot's `tree(data, options)`: the composite of a link, dot and text mark
+/// over the tree transforms. Pass it to [`crate::Plot::mark`].
+pub fn tree_of(data: impl Into<Dataset>, spec: crate::hierarchy::TreeSpec) -> TreeMark {
+    let mut mark = TreeMark::new().data(data).into_mark();
+    mark.tree = Some((spec, false));
+    TreeMark::from_mark(mark)
+}
+
+/// Plot's `cluster(data, options)`: [`tree_of`] with the cluster layout.
+pub fn cluster(data: impl Into<Dataset>, spec: crate::hierarchy::TreeSpec) -> TreeMark {
+    tree_of(
+        data,
+        crate::hierarchy::TreeSpec {
+            layout: crate::hierarchy::TreeLayout::Cluster,
+            ..spec
+        },
+    )
+}

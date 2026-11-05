@@ -42,6 +42,7 @@ pub mod facet;
 pub mod format;
 pub mod frame;
 pub mod geo;
+pub mod hierarchy;
 pub mod io;
 pub mod mark;
 pub mod marks;
@@ -98,4 +99,5 @@ pub fn image_from_rgba(
     std::sync::Arc::new(render)
 }
 pub use geo::{GeoProjection, Geometry, Topology};
+pub use hierarchy::{TreeLayout, TreeSort, TreeSpec};
 pub use render::stack::{NormalizeBasis, Offset, StackAnchor, StackOrder};

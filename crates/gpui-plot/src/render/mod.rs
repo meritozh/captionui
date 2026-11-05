@@ -307,6 +307,24 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // the channels may read. Plot applies them to the mark's data in the same
     // order, and a mark's `shuffle` is only a reordering of what is left.
     let mut source = data.clone();
+    // Plot's tree transforms replace the records with the laid-out nodes or
+    // links.
+    if let Some((spec, links)) = &mark.tree {
+        source = match crate::hierarchy::layout(&source, spec) {
+            Some(h) if *links => h.link_records(spec),
+            Some(h) => h.node_records(spec),
+            None => Dataset::default(),
+        };
+        if let Some(filter) = &mark.tree_filter {
+            source = Dataset::new(
+                source
+                    .rows()
+                    .iter()
+                    .filter(|r| r.value(filter) == Value::Bool(true))
+                    .cloned(),
+            );
+        }
+    }
     if let Some(channel) = &mark.box_value {
         source = Dataset::new(source.rows().iter().map(|row| {
             let value = channel.read(row);

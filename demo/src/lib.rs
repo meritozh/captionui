@@ -16,7 +16,7 @@ pub mod prelude {
     pub use gpui_plot::{
         AxisAnchor, Channel, Dataset, GroupReducer, LabelAnchor, LegendPosition, NormalizeBasis,
         Offset, Plot, Reducer, ScaleType, Selector, StackOffset, StackOrder, Table, Thresholds,
-        Value,
+        TreeLayout, TreeSort, TreeSpec, Value,
     };
     pub use gpui_plot::{ColorChannel, Geometry, NumberChannel};
 }

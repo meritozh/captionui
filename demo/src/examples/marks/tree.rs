@@ -1,33 +1,18 @@
-//! Tree mark <VersionBadge version="0.4.3" />: `marks/tree.md`.
-//!
-//! The library's `tree` reads slash-separated paths only, so flare's
-//! dot-delimited names are rewritten with slashes (Plot's `delimiter: "."`).
+//! Tree mark: `marks/tree.md`.
 
 use crate::prelude::*;
 
 pub fn examples() -> Vec<Example> {
     vec![
-        Example {
-            height: 100.,
-            ..example("marks", "tree", 1, e01)
-        },
-        Example {
-            height: 1800.,
-            ..example("marks", "tree", 2, e02)
-        },
-        Example {
-            height: 2400.,
-            ..example("marks", "tree", 3, e03)
-        },
-        Example {
-            height: 3600.,
-            ..example("marks", "tree", 4, e04)
-        },
+        example("marks", "tree", 1, e01),
+        example("marks", "tree", 2, e02),
+        example("marks", "tree", 3, e03),
+        example("marks", "tree", 4, e04),
     ]
 }
 
 /// The docs' `gods`.
-fn gods() -> Dataset {
+pub fn gods() -> Dataset {
     Dataset::values_of(
         [
             "Chaos/Gaia/Mountains",
@@ -41,11 +26,16 @@ fn gods() -> Dataset {
     )
 }
 
-/// Plot's `path: "name", delimiter: "."`.
-fn flare_path(d: &Table) -> Value {
-    Value::text(d.value("name").label().replace('.', "/"))
+/// `{path: "name", delimiter: "."}`.
+fn flare_spec() -> TreeSpec {
+    TreeSpec {
+        path: Some("name".into()),
+        delimiter: '.',
+        ..TreeSpec::default()
+    }
 }
 
+/// `Plot.tree(gods, {textStroke: "var(--vp-c-bg)"})`
 fn e01() -> Plot {
     Plot::plot()
         .no_axes()
@@ -53,38 +43,62 @@ fn e01() -> Plot {
         .margin(10.)
         .margin_left(40.)
         .margin_right(120.)
-        .mark(tree(gods()).path(Channel::identity()))
+        .mark(tree_of(gods(), TreeSpec::default()).text_stroke("white"))
 }
 
+/// `Plot.tree(flare, {path: "name", delimiter: ".", textStroke: …})`
 fn e02() -> Plot {
     Plot::plot()
         .no_axes()
         .margin(10.)
         .margin_left(30.)
         .margin_right(160.)
+        .width(688.)
         .height(1800.)
-        .mark(tree(data::flare()).path(flare_path))
+        .mark(tree_of(data::flare(), flare_spec()).text_stroke("white"))
 }
 
-/// `Plot.cluster` (d3.cluster, `treeSort: "node:height"`) has no
-/// counterpart; this draws the tidy tree.
+/// `Plot.cluster(flare, {path: "name", treeSort: "node:height", delimiter: ".", …})`
 fn e03() -> Plot {
     Plot::plot()
         .no_axes()
         .margin(10.)
         .margin_left(30.)
         .margin_right(160.)
+        .width(688.)
         .height(2400.)
-        .mark(tree(data::flare()).path(flare_path))
+        .mark(
+            cluster(
+                data::flare(),
+                TreeSpec {
+                    sort: Some(TreeSort::Height),
+                    ..flare_spec()
+                },
+            )
+            .text_stroke("white"),
+        )
 }
 
-/// The custom `treeLayout: indent` and `curve: "step-before"` have no
-/// counterpart; this draws the tidy tree at the docs' size.
+/// `Plot.tree(flare, {path: "name", delimiter: ".", treeLayout: indent,
+/// strokeWidth: 1, curve: "step-before", textStroke: "none"})`; the docs'
+/// `indent` lays nodes out one row each in preorder, indented by depth.
 fn e04() -> Plot {
-    Plot::plot().no_axes().inset(10.).height(3600.).mark(
-        tree(data::flare())
-            .path(flare_path)
+    Plot::plot()
+        .no_axes()
+        .inset(10.)
+        .margin_right(120.)
+        .width(200.)
+        .height(3600.)
+        .mark(
+            tree_of(
+                data::flare(),
+                TreeSpec {
+                    layout: TreeLayout::Indent,
+                    ..flare_spec()
+                },
+            )
             .stroke_width(1.)
-            .curve(Curve::StepBefore),
-    )
+            .curve("step-before")
+            .text_stroke("none"),
+        )
 }

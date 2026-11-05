@@ -1019,6 +1019,10 @@ pub struct Mark {
     /// The mark's own data, Plot's first argument to a mark: `Plot.dot(data,
     /// …)`. `None` reads the plot's data.
     pub data: Option<crate::table::Dataset>,
+    /// Plot's `treeNode` (`false`) or `treeLink` (`true`) transform.
+    pub tree: Option<(crate::hierarchy::TreeSpec, bool)>,
+    /// A tree transform's `treeFilter`: `node:internal` or `node:external`.
+    pub tree_filter: Option<SharedString>,
     /// A density mark's options: `bandwidth`, `thresholds` and `weight`.
     pub density: Option<DensitySpec>,
     /// A raster or contour mark's grid options.
@@ -1473,6 +1477,8 @@ impl Mark {
         Self {
             kind,
             data: None,
+            tree: None,
+            tree_filter: None,
             density: None,
             raster: None,
             outliers: None,
@@ -2160,6 +2166,34 @@ impl Mark {
         self
     }
 
+    /// Plot's `treeNode` transform: one row per node of the hierarchy the
+    /// records' paths describe, at its layout position, with the `node:name`,
+    /// `node:path`, `node:internal`, `node:external`, `node:depth` and
+    /// `node:height` fields.
+    pub fn tree_node(mut self, spec: crate::hierarchy::TreeSpec) -> Self {
+        self.tree = Some((spec, false));
+        self.channels.x = Some(crate::table::Channel::Field("$tree:x".into()));
+        self.channels.y = Some(crate::table::Channel::Field("$tree:y".into()));
+        self
+    }
+
+    /// Plot's `treeLink` transform: one row per parent → child link.
+    pub fn tree_link(mut self, spec: crate::hierarchy::TreeSpec) -> Self {
+        self.tree = Some((spec, true));
+        self.channels.x1 = Some(crate::table::Channel::Field("$tree:x1".into()));
+        self.channels.y1 = Some(crate::table::Channel::Field("$tree:y1".into()));
+        self.channels.x2 = Some(crate::table::Channel::Field("$tree:x2".into()));
+        self.channels.y2 = Some(crate::table::Channel::Field("$tree:y2".into()));
+        self.style.curve = Curve::BumpX;
+        self
+    }
+
+    /// A tree transform's `treeFilter`.
+    pub fn tree_filter(mut self, field: &str) -> Self {
+        self.tree_filter = Some(field.to_string().into());
+        self
+    }
+
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
         let outputs = self.bin.take().map(|bin| bin.outputs).unwrap_or_default();
@@ -2733,6 +2767,24 @@ macro_rules! mark_builder {
             /// Clip the mark to the plot area, Plot's `clip: true`.
             pub fn clip(mut self, clip: bool) -> Self {
                 self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::tree_node`].
+            pub fn tree_node(mut self, spec: crate::hierarchy::TreeSpec) -> Self {
+                self.0 = self.0.tree_node(spec);
+                self
+            }
+
+            /// See [`Mark::tree_link`].
+            pub fn tree_link(mut self, spec: crate::hierarchy::TreeSpec) -> Self {
+                self.0 = self.0.tree_link(spec);
+                self
+            }
+
+            /// See [`Mark::tree_filter`].
+            pub fn tree_filter(mut self, field: &str) -> Self {
+                self.0 = self.0.tree_filter(field);
                 self
             }
 
@@ -3983,4 +4035,75 @@ pub fn expand_box(mark: Mark) -> Vec<Mark> {
         m
     };
     vec![tag(rule), tag(bar), tag(tick), tag(dots)]
+}
+
+/// Plot's `tree` (and `cluster`) mark as the marks it composes: a link per
+/// relation (stroked `#777` at half opacity with a bump curve, or by
+/// `node:internal`), a dot per node filled by `node:internal`, and the
+/// node names, mirrored — leaves' labels after the node, internal nodes'
+/// before it — with a halo.
+pub fn expand_tree(mark: Mark, spec: crate::hierarchy::TreeSpec) -> Vec<Mark> {
+    let data = mark.data.clone();
+    let base = |kind: MarkKind| {
+        let mut m = Mark::new(kind);
+        m.data = data.clone();
+        m.fx = mark.fx.clone();
+        m.fy = mark.fy.clone();
+        m
+    };
+    let mut link = base(MarkKind::Link).tree_link(spec.clone());
+    link.channels.stroke =
+        mark.channels
+            .stroke
+            .clone()
+            .or(Some(ColorChannel::Constant(crate::scale::hsla_from_hex(
+                0x777777,
+            ))));
+    link.style.stroke_opacity = 0.5;
+    link.style.stroke_width = if mark.style.stroke_width != MarkStyle::default().stroke_width {
+        mark.style.stroke_width
+    } else {
+        1.5
+    };
+    if mark.style.curve != Curve::Linear {
+        link.style.curve = mark.style.curve;
+    }
+    link.style.markers = mark.style.markers;
+    let mut node = base(MarkKind::Dot).tree_node(spec.clone());
+    node.channels.fill = mark
+        .channels
+        .fill
+        .clone()
+        .or(Some(ColorChannel::Field("node:internal".into())));
+    let dx = if spec.right { -6. } else { 6. };
+    let halo = mark.style.text_stroke.or(Some(Hsla::white()));
+    let mut labels = Vec::new();
+    for (filter, anchor, dx) in [
+        ("node:external", TextAnchor::Start, dx),
+        ("node:internal", TextAnchor::End, -dx),
+    ] {
+        let mut text = base(MarkKind::Text)
+            .tree_node(spec.clone())
+            .tree_filter(filter);
+        text.channels.text = Some(crate::table::Channel::Field("node:name".into()));
+        text.style.text_anchor = if spec.right {
+            if anchor == TextAnchor::Start {
+                TextAnchor::End
+            } else {
+                TextAnchor::Start
+            }
+        } else {
+            anchor
+        };
+        text.style.text_anchor_set = true;
+        text.style.dx = dx;
+        text.style.text_stroke = halo.filter(|c| c.a > 0.);
+        labels.push(text);
+    }
+    let mut out = vec![link];
+    if mark.style.markers.iter().all(Option::is_none) {
+        out.push(node);
+    }
+    out.extend(labels);
+    out
 }
