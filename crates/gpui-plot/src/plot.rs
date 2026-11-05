@@ -501,6 +501,18 @@ impl Plot {
                 base + if grid.fx.is_some() { 30. } else { 0. } + 60.
             }
         };
+        // Plot grows its automatic height by whatever explicit top and
+        // bottom margins add beyond the default ones.
+        let chart = if self.height.is_none() {
+            let defaults = {
+                let mut plot = self.clone_options();
+                plot.margins = [None; 4];
+                plot.plot_margins(&grid)
+            };
+            chart + (mt - defaults[0] + mb - defaults[2]).max(0.)
+        } else {
+            chart
+        };
         // The figure's extras: the title, legend and caption bands.
         let mut extras = 0.;
         if self.title.text.is_some() {
@@ -520,6 +532,46 @@ impl Plot {
             extras += 18.;
         }
         chart + extras
+    }
+
+    /// A copy of the plot's options and marks, without its caches.
+    fn clone_options(&self) -> Plot {
+        Plot {
+            data: self.data.clone(),
+            marks: self.marks.clone(),
+            frame_options: self.frame_options.clone(),
+            title: self.title.clone(),
+            legend: self.legend,
+            legend_title: self.legend_title.clone(),
+            grid: self.grid,
+            x_axis: self.x_axis,
+            y_axis: self.y_axis,
+            scales: self.scales.clone(),
+            margins: self.margins,
+            no_axes: self.no_axes,
+            no_labels: self.no_labels,
+            width: self.width,
+            projection: self.projection.clone(),
+            aspect_ratio: self.aspect_ratio,
+            caption: self.caption.clone(),
+            x_label: self.x_label.clone(),
+            y_label: self.y_label.clone(),
+            interaction: self.interaction.clone(),
+            id: self.id.clone(),
+            height: self.height,
+            tooltip_formatter: self.tooltip_formatter.clone(),
+            color_range: self.color_range.clone(),
+            color_field: self.color_field.clone(),
+            fx: self.fx.clone(),
+            fy: self.fy.clone(),
+            facet_cache: None,
+            facets_cache: None,
+            colors_cache: None,
+            hover: None,
+            hover_progress: 0.,
+            frame_cache: None,
+            appear_progress: 1.,
+        }
     }
 
     /// Whether the plot's color scale is a continuous ramp.
@@ -3216,13 +3268,20 @@ impl Plot {
                     continue;
                 }
             }
-            // A group's count output is "Frequency" too.
+            // A group's count output is "Frequency" too, including the
+            // default count a groupX writes to y.
             if let Some(group) = &mark.group {
                 let names: &[&str] = if x {
                     &["x", "x1", "x2"]
                 } else {
                     &["y", "y1", "y2"]
                 };
+                let by_x = group.both || group.axis == Some(crate::mark::Axis::X);
+                let by_y = group.both || group.axis == Some(crate::mark::Axis::Y);
+                if group.outputs.is_empty() && ((!x && by_x && !by_y) || (x && by_y && !by_x)) {
+                    labels.push(Some("Frequency".into()));
+                    continue;
+                }
                 if let Some(output) = group
                     .outputs
                     .iter()

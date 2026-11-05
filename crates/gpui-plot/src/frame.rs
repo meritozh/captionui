@@ -801,6 +801,7 @@ pub(crate) struct AxisStyle {
     pub(crate) anchor: crate::options::AxisAnchor,
     pub(crate) tick_size: f32,
     pub(crate) tick_padding: f32,
+    pub(crate) tick_rotate: f32,
     pub(crate) line: bool,
 }
 
@@ -811,10 +812,22 @@ impl AxisStyle {
         anchor: crate::options::AxisAnchor,
         options: &crate::options::ScaleOptions,
     ) -> Self {
+        let tick_size = options.tick_size.unwrap_or(6.);
+        let tick_rotate = options.tick_rotate.unwrap_or(0.);
+        // Plot's default padding: at least 3, more for short ticks, more
+        // still for rotated labels on x.
+        let rotated = if tick_rotate.abs() >= 10. {
+            4. * tick_rotate.to_radians().cos()
+        } else {
+            0.
+        };
         Self {
             anchor,
-            tick_size: options.tick_size.unwrap_or(6.),
-            tick_padding: options.tick_padding.unwrap_or(3.),
+            tick_size,
+            tick_padding: options
+                .tick_padding
+                .unwrap_or((9. - tick_size).max(3.) + rotated),
+            tick_rotate,
             line: options.line.unwrap_or(false),
         }
     }
@@ -889,6 +902,34 @@ pub(crate) fn paint_axes(
                     );
                 }
                 if tick.label.is_empty() {
+                    continue;
+                }
+                // Plot's `tickRotate`: the label turns about its tick, its
+                // start (or end) against the axis.
+                if style.tick_rotate.abs() >= 10. {
+                    let offset = style.tick_size.max(0.) + style.tick_padding;
+                    let ty = if top {
+                        edge - px(offset)
+                    } else {
+                        edge + px(offset)
+                    };
+                    let start = (style.tick_rotate < 0.) ^ !top;
+                    let align = if start {
+                        TextAlign::Left
+                    } else {
+                        TextAlign::Right
+                    };
+                    paint::paint_rotated_text(
+                        &tick.label,
+                        size.as_f32(),
+                        color,
+                        &theme.font_family,
+                        point(tx, ty),
+                        style.tick_rotate,
+                        align,
+                        window,
+                        cx,
+                    );
                     continue;
                 }
                 // A label may run to several lines, Plot's `Jan\n2021`.

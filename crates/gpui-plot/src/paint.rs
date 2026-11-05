@@ -344,3 +344,71 @@ pub fn paint_fill_rings(rings: &[Vec<Point<Pixels>>], color: Hsla, window: &mut 
         window.paint_path(with_alpha(path, color), color);
     }
 }
+
+/// Paint `text` rotated by `degrees` clockwise about `anchor`, Plot's
+/// `rotate` and `tickRotate`.
+///
+/// GPUI rotates sprites but not shaped text, so the label is drawn as a tiny
+/// SVG `<text>` (rendered with GPUI's SVG renderer and its system fonts) and
+/// the sprite is rotated about the anchor. `align` places the text's start,
+/// middle or end at the anchor; it is vertically centred on it.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_rotated_text(
+    text: &str,
+    font_size: f32,
+    color: Hsla,
+    family: &str,
+    anchor: Point<Pixels>,
+    degrees: f32,
+    align: TextAlign,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let measured = Label::new(
+        SharedString::from(text.to_string()),
+        px(font_size),
+        color,
+        FontWeight::NORMAL,
+        gpui::font(SharedString::from(family.to_string())),
+        window,
+    );
+    let width = measured.width.as_f32().ceil() + 4.;
+    let height = (font_size * 1.4).ceil();
+    let escaped = text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let (x, text_anchor) = match align {
+        TextAlign::Left => (2., "start"),
+        TextAlign::Center => (width / 2., "middle"),
+        TextAlign::Right => (width - 2., "end"),
+    };
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><text x="{x}" y="{}" font-family="{family}, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="{font_size}" text-anchor="{text_anchor}" fill="black">{escaped}</text></svg>"#,
+        height * 0.5 + font_size * 0.35,
+    );
+    // The SVG box's own point that sits on the anchor.
+    let offset_x = x;
+    let origin = point(anchor.x - px(offset_x), anchor.y - px(height / 2.));
+    let bounds = Bounds::new(origin, size(px(width), px(height)));
+    // Rotate about the anchor, in the scaled pixels the scene uses.
+    let scale = window.scale_factor();
+    let center = gpui::point(
+        gpui::ScaledPixels(anchor.x.as_f32() * scale),
+        gpui::ScaledPixels(anchor.y.as_f32() * scale),
+    );
+    let matrix = gpui::TransformationMatrix::unit()
+        .translate(center)
+        .rotate(gpui::Radians(degrees.to_radians()))
+        .translate(gpui::point(
+            gpui::ScaledPixels(-center.x.0),
+            gpui::ScaledPixels(-center.y.0),
+        ));
+    let key = SharedString::from(format!(
+        "gpui-plot-text:{family}:{font_size}:{text_anchor}:{text}"
+    ));
+    let _ = window.paint_svg(bounds, key, Some(svg.as_bytes()), matrix, color, cx);
+}
