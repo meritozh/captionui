@@ -151,34 +151,39 @@ impl Dataset {
 /// as a dataset whose `y` defaults to [`Channel::identity`].
 pub const VALUE: &str = "$value";
 
+/// The field holding a plain value's (or tuple's) index in its array, which
+/// Plot's `indexOf` reads.
+pub const INDEX: &str = "$index";
+
 impl Dataset {
     /// A dataset of plain values, Plot's arrays of numbers, strings or dates:
     /// each value becomes a record holding it under [`VALUE`].
     pub fn values_of<V: Into<Value>>(values: impl IntoIterator<Item = V>) -> Self {
-        Self::new(
-            values
-                .into_iter()
-                .map(|value| Table::empty().with(VALUE, value.into())),
-        )
+        Self::new(values.into_iter().enumerate().map(|(i, value)| {
+            Table::empty()
+                .with(VALUE, value.into())
+                .with(INDEX, Value::Number(i as f64))
+        }))
     }
 
     /// A dataset of tuples, Plot's arrays of `[x, y]` pairs: each element is a
     /// record with fields `"0"`, `"1"`, …, which the marks' `x` and `y` read
     /// by default, as Plot's do.
     pub fn tuples<V: Into<Value>, const N: usize>(rows: impl IntoIterator<Item = [V; N]>) -> Self {
-        Self::new(rows.into_iter().map(|row| {
+        Self::new(rows.into_iter().enumerate().map(|(i, row)| {
             Table::new(
                 row.into_iter()
                     .enumerate()
                     .map(|(index, value)| (SharedString::from(index.to_string()), value.into())),
             )
+            .with(INDEX, Value::Number(i as f64))
         }))
     }
 
     /// `n` records that hold only their index, Plot's `{length: n}` data for
     /// marks whose channels are all functions.
     pub fn length(n: usize) -> Self {
-        Self::new((0..n).map(|i| Table::empty().with("$index", Value::Number(i as f64))))
+        Self::new((0..n).map(|i| Table::empty().with(INDEX, Value::Number(i as f64))))
     }
 
     /// Whether this is a dataset of plain values ([`Dataset::values_of`]).
@@ -277,6 +282,11 @@ impl Channel {
     /// values.
     pub fn identity() -> Self {
         Channel::Field(VALUE.into())
+    }
+
+    /// Plot's `indexOf`: the datum's index in its array.
+    pub fn index() -> Self {
+        Channel::Field(INDEX.into())
     }
 
     /// A channel computed from each datum as a number, Plot's

@@ -471,8 +471,9 @@ impl MarkKind {
             // or vector) or spread by index (a cell).
             TextX => univariate(Some(Axis::X), anchor),
             TextY => univariate(Some(Axis::Y), anchor),
-            CellX => univariate(Some(Axis::X), index),
-            CellY => univariate(Some(Axis::Y), index),
+            // Plot's cellX has no y: its cells span the frame's height.
+            CellX => univariate(Some(Axis::X), anchor),
+            CellY => univariate(Some(Axis::Y), anchor),
             VectorX => univariate(Some(Axis::X), anchor),
             VectorY => univariate(Some(Axis::Y), anchor),
             // The oblique waffle bars draw through the basic renderer and take
@@ -3671,7 +3672,7 @@ mod tests {
         assert_eq!(TextY.cross_axis(), CrossAxis::Anchor);
         assert_eq!(VectorX.cross_axis(), CrossAxis::Anchor);
         assert_eq!(LineX.cross_axis(), CrossAxis::Index);
-        assert_eq!(CellY.cross_axis(), CrossAxis::Index);
+        assert_eq!(CellY.cross_axis(), CrossAxis::Anchor);
         assert_eq!(RectX.cross_axis(), CrossAxis::Index);
     }
 

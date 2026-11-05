@@ -2059,6 +2059,12 @@ impl Plot {
             {
                 return false;
             }
+            // The channels Plot's value-data defaults give the mark count.
+            let defaulted = mark
+                .data
+                .as_ref()
+                .and_then(|data| render::with_value_defaults(mark, data));
+            let mark = defaulted.as_ref().unwrap_or(mark);
             let c = &mark.channels;
             let named = if x {
                 c.x.is_some() || c.x1.is_some() || c.x2.is_some()
