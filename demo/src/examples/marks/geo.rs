@@ -129,24 +129,16 @@ fn e05() -> Plot {
 fn e06() -> Plot {
     // Gap: there is no `axisFy` mark, so the fy axis keeps its default
     // placement and dates (the docs label each facet "1960’s" at the top).
-    // Gap: the fy scale's `interval: "10 years"` is ignored when faceting
-    // (every distinct date becomes a facet), so the channel floors each date
-    // to its decade.
     Plot::plot()
         .margin(0.)
         .padding(0.)
         .projection(crate::examples::albers())
+        .fy_scale(|fy| fy.interval("10 years"))
         .mark(geo(data::statemesh()).stroke_opacity(0.2))
         .mark(geo(data::nation()))
         .mark(
             geo(data::walmart_points())
-                .fy(|d: &Table| {
-                    d.date("date")
-                        .and_then(|date| {
-                            chrono::NaiveDate::from_ymd_opt(date.year() / 10 * 10, 1, 1)
-                        })
-                        .map_or(Value::Null, Value::date)
-                })
+                .fy("date")
                 .r(1.5)
                 .fill("blue")
                 .tip_title("date"),

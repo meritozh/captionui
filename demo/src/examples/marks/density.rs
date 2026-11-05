@@ -21,7 +21,7 @@ pub fn examples() -> Vec<Example> {
 
 /// The docs' sliders, at their initial values.
 const SKEW: f64 = 0.;
-const BANDWIDTH: f64 = 20.;
+const BANDWIDTH: f32 = 20.;
 const THRESHOLDS: usize = 20;
 
 /// `penguins.filter((d) => d.sex)`.
@@ -35,8 +35,6 @@ fn sexed_penguins() -> Dataset {
 }
 
 fn e01() -> Plot {
-    // `thresholds: 4` has no port: the density mark always draws Plot's
-    // default 20 thresholds.
     Plot::plot()
         .inset(10.)
         .mark(
@@ -50,7 +48,8 @@ fn e01() -> Plot {
             density(data::faithful())
                 .x("waiting")
                 .y("eruptions")
-                .stroke("blue"),
+                .stroke("blue")
+                .thresholds(4),
         )
         .mark(
             dot(data::faithful())
@@ -62,27 +61,30 @@ fn e01() -> Plot {
 }
 
 fn e02() -> Plot {
-    // `bandwidth` has no port; the mark's fixed bandwidth is Plot's default
-    // 20, the slider's initial value.
-    let _ = BANDWIDTH;
     Plot::plot()
         .inset(20.)
-        .mark(density(data::faithful()).x("waiting").y("eruptions"))
+        .mark(
+            density(data::faithful())
+                .x("waiting")
+                .y("eruptions")
+                .bandwidth(BANDWIDTH),
+        )
         .mark(dot(data::faithful()).x("waiting").y("eruptions"))
 }
 
 fn e03() -> Plot {
-    // `thresholds` has no port; the mark's fixed 20 thresholds are Plot's
-    // default, the slider's initial value.
-    let _ = THRESHOLDS;
     Plot::plot()
         .inset(20.)
-        .mark(density(data::faithful()).x("waiting").y("eruptions"))
+        .mark(
+            density(data::faithful())
+                .x("waiting")
+                .y("eruptions")
+                .thresholds(THRESHOLDS),
+        )
         .mark(dot(data::faithful()).x("waiting").y("eruptions"))
 }
 
 fn e04() -> Plot {
-    // `bandwidth: 10` and `thresholds: 4` have no port.
     Plot::plot()
         .height(100.)
         .inset(10.)
@@ -90,9 +92,16 @@ fn e04() -> Plot {
             density(data::faithful())
                 .x("waiting")
                 .stroke("blue")
-                .stroke_width(0.25),
+                .stroke_width(0.25)
+                .bandwidth(10.),
         )
-        .mark(density(data::faithful()).x("waiting").stroke("blue"))
+        .mark(
+            density(data::faithful())
+                .x("waiting")
+                .stroke("blue")
+                .thresholds(4)
+                .bandwidth(10.),
+        )
         .mark(
             dot(data::faithful())
                 .x("waiting")
@@ -102,7 +111,6 @@ fn e04() -> Plot {
 }
 
 fn e05() -> Plot {
-    // Gap: the density mark has no `bandwidth` option (the docs ask for 10).
     Plot::plot()
         .projection(crate::examples::albers())
         .color(|c| c.scheme("YlGnBu"))
@@ -110,6 +118,7 @@ fn e05() -> Plot {
             density(data::walmarts())
                 .x("longitude")
                 .y("latitude")
+                .bandwidth(10.)
                 .fill("density"),
         )
         .mark(geo(data::statemesh()).stroke_opacity(0.3))
@@ -150,16 +159,24 @@ fn e07() -> Plot {
         .mark(frame())
 }
 
+/// `(d) => d.sex === "FEMALE" ? 1 - skew : 1 + skew`.
+fn skewed(d: &Table) -> f64 {
+    if d.value("sex").label() == "FEMALE" {
+        1. - SKEW
+    } else {
+        1. + SKEW
+    }
+}
+
 fn e08() -> Plot {
-    // `weight: (d) => d.sex === "FEMALE" ? 1 - skew : 1 + skew` has no port;
-    // at the slider's initial skew of 0 every weight is 1, as here. The
-    // dots' `strokeOpacity` channel is likewise 1 for every row.
-    let opacity = (1. + SKEW) as f32;
+    // Gap: `strokeOpacity` takes only a constant, not the docs' channel; at
+    // the slider's initial skew of 0 the channel is 1 for every row, as here.
     Plot::plot()
         .inset(10.)
         .color(|c| c.legend(true))
         .mark(
             density(sexed_penguins())
+                .weight(skewed)
                 .x("flipper_length_mm")
                 .y("culmen_length_mm")
                 .stroke_opacity(0.5)
@@ -170,15 +187,12 @@ fn e08() -> Plot {
                 .x("flipper_length_mm")
                 .y("culmen_length_mm")
                 .stroke("sex")
-                .stroke_opacity(opacity),
+                .stroke_opacity((1. + SKEW) as f32),
         )
         .mark(frame())
 }
 
 fn e09() -> Plot {
-    // One density per species, `fill: () => s` through the color scale.
-    // `weight: (d) => d.species === s ? 1 : -1` and `thresholds: [0.05]`
-    // have no port, so each draws the density of every penguin.
     let species = ["Adelie", "Chinstrap", "Gentoo"];
     let plot = Plot::plot().inset(10.).color(|c| c.legend(true));
     species
@@ -188,8 +202,16 @@ fn e09() -> Plot {
                 density(data::penguins())
                     .x("flipper_length_mm")
                     .y("culmen_length_mm")
+                    .weight(move |d| {
+                        if d.value("species").label() == s {
+                            1.
+                        } else {
+                            -1.
+                        }
+                    })
                     .fill(ColorChannel::value(move |_| Value::text(s)))
-                    .fill_opacity(0.2),
+                    .fill_opacity(0.2)
+                    .threshold_values([0.05]),
             )
         })
         .mark(

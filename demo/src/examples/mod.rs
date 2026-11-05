@@ -106,7 +106,12 @@ pub fn albers() -> gpui_plot::GeoProjection {
     let lower48 = crate::data::states()
         .rows()
         .iter()
-        .filter(|state| !matches!(state.value("id").label().as_ref(), "02" | "15" | "72"))
+        // The states' FIPS codes stop at 56; Alaska (02), Hawaii (15) and
+        // the territories (60 and up) lie outside d3's default view.
+        .filter(|state| {
+            let id = state.value("id").label();
+            id.parse::<u32>().is_ok_and(|n| n <= 56 && n != 2 && n != 15)
+        })
         .filter_map(|state| state.value("geometry").as_geo().cloned())
         .collect();
     gpui_plot::GeoProjection::named("albers")
