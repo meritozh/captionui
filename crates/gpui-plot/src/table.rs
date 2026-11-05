@@ -7,6 +7,7 @@
 //! struct for every dataset.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use gpui::SharedString;
@@ -24,9 +25,12 @@ use crate::value::Value;
 /// assert_eq!(row.number("weight"), Some(1.5));
 /// assert_eq!(row.get("name").map(Value::label), Some("alpha".into()));
 /// ```
+///
+/// A table shares its fields behind an `Rc`, so the copies the transforms and
+/// prepared rows keep are cheap; [`Table::with`] copies on write.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Table {
-    fields: BTreeMap<SharedString, Value>,
+    fields: Rc<BTreeMap<SharedString, Value>>,
 }
 
 impl Table {
@@ -38,10 +42,12 @@ impl Table {
         S: Into<SharedString>,
     {
         Self {
-            fields: fields
-                .into_iter()
-                .map(|(name, value)| (name.into(), value))
-                .collect(),
+            fields: Rc::new(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| (name.into(), value))
+                    .collect(),
+            ),
         }
     }
 
@@ -52,7 +58,7 @@ impl Table {
 
     /// Set a field, replacing any value already under that name.
     pub fn with(mut self, name: impl Into<SharedString>, value: impl Into<Value>) -> Self {
-        self.fields.insert(name.into(), value.into());
+        Rc::make_mut(&mut self.fields).insert(name.into(), value.into());
         self
     }
 
@@ -84,6 +90,12 @@ impl Table {
         self.fields.is_empty()
     }
 
+    /// Read a field as a number, `NaN` when it is missing: JavaScript's
+    /// `+d[name]`, for accessors that compute with it.
+    pub fn num(&self, name: &str) -> f64 {
+        self.number(name).unwrap_or(f64::NAN)
+    }
+
     /// Read a field as a number.
     pub fn number(&self, name: &str) -> Option<f64> {
         self.get(name).and_then(Value::as_number)
@@ -103,16 +115,17 @@ impl Table {
 /// A collection of [`Table`]s: Plot's data array.
 ///
 /// The convenience [`Table::from`] conversions let an iterator of records
-/// become a [`Dataset`] directly.
+/// become a [`Dataset`] directly. The rows are shared behind an `Rc`, so a
+/// dataset handed to several marks, or kept across frames, is not copied.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Dataset {
-    rows: Vec<Table>,
+    rows: Rc<Vec<Table>>,
 }
 
 impl Dataset {
     pub fn new(rows: impl IntoIterator<Item = Table>) -> Self {
         Self {
-            rows: rows.into_iter().collect(),
+            rows: Rc::new(rows.into_iter().collect()),
         }
     }
 
@@ -134,17 +147,102 @@ impl Dataset {
     }
 }
 
+/// The field a plain value's record holds it in, so `Plot.ruleY([0])` reads
+/// as a dataset whose `y` defaults to [`Channel::identity`].
+pub const VALUE: &str = "$value";
+
+impl Dataset {
+    /// A dataset of plain values, Plot's arrays of numbers, strings or dates:
+    /// each value becomes a record holding it under [`VALUE`].
+    pub fn values_of<V: Into<Value>>(values: impl IntoIterator<Item = V>) -> Self {
+        Self::new(
+            values
+                .into_iter()
+                .map(|value| Table::empty().with(VALUE, value.into())),
+        )
+    }
+
+    /// A dataset of tuples, Plot's arrays of `[x, y]` pairs: each element is a
+    /// record with fields `"0"`, `"1"`, …, which the marks' `x` and `y` read
+    /// by default, as Plot's do.
+    pub fn tuples<V: Into<Value>, const N: usize>(rows: impl IntoIterator<Item = [V; N]>) -> Self {
+        Self::new(rows.into_iter().map(|row| {
+            Table::new(
+                row.into_iter()
+                    .enumerate()
+                    .map(|(index, value)| (SharedString::from(index.to_string()), value.into())),
+            )
+        }))
+    }
+
+    /// `n` records that hold only their index, Plot's `{length: n}` data for
+    /// marks whose channels are all functions.
+    pub fn length(n: usize) -> Self {
+        Self::new((0..n).map(|i| Table::empty().with("$index", Value::Number(i as f64))))
+    }
+
+    /// Whether this is a dataset of plain values ([`Dataset::values_of`]).
+    pub fn is_values(&self) -> bool {
+        self.rows
+            .first()
+            .is_some_and(|row| row.get(VALUE).is_some())
+    }
+
+    /// Whether this is a dataset of tuples ([`Dataset::tuples`]).
+    pub fn is_tuples(&self) -> bool {
+        self.rows
+            .first()
+            .is_some_and(|row| row.get("0").is_some() && row.get(VALUE).is_none())
+    }
+}
+
+impl<const N: usize> From<[f64; N]> for Dataset {
+    fn from(values: [f64; N]) -> Self {
+        Dataset::values_of(values)
+    }
+}
+
+impl<const N: usize> From<[i32; N]> for Dataset {
+    fn from(values: [i32; N]) -> Self {
+        Dataset::values_of(values.map(|v| v as f64))
+    }
+}
+
+impl From<Vec<f64>> for Dataset {
+    fn from(values: Vec<f64>) -> Self {
+        Dataset::values_of(values)
+    }
+}
+
+impl From<Vec<Value>> for Dataset {
+    fn from(values: Vec<Value>) -> Self {
+        Dataset::values_of(values)
+    }
+}
+
+impl<const N: usize> From<[&str; N]> for Dataset {
+    fn from(values: [&str; N]) -> Self {
+        Dataset::values_of(values.map(|v| Value::text(v.to_string())))
+    }
+}
+
+impl From<&Dataset> for Dataset {
+    fn from(data: &Dataset) -> Self {
+        data.clone()
+    }
+}
+
 impl From<Vec<Table>> for Dataset {
     fn from(rows: Vec<Table>) -> Self {
-        Self { rows }
+        Self {
+            rows: Rc::new(rows),
+        }
     }
 }
 
 impl FromIterator<Table> for Dataset {
     fn from_iter<I: IntoIterator<Item = Table>>(iter: I) -> Self {
-        Self {
-            rows: iter.into_iter().collect(),
-        }
+        Self::new(iter)
     }
 }
 
@@ -153,7 +251,9 @@ impl IntoIterator for Dataset {
     type IntoIter = std::vec::IntoIter<Table>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.rows.into_iter()
+        Rc::try_unwrap(self.rows)
+            .unwrap_or_else(|rows| (*rows).clone())
+            .into_iter()
     }
 }
 
@@ -173,6 +273,18 @@ pub enum Channel {
 }
 
 impl Channel {
+    /// Plot's `Plot.identity`: the datum itself, for a dataset of plain
+    /// values.
+    pub fn identity() -> Self {
+        Channel::Field(VALUE.into())
+    }
+
+    /// A channel computed from each datum as a number, Plot's
+    /// `(d) => 100 / d.mpg`; a non-finite result is missing.
+    pub fn number(accessor: impl Fn(&Table) -> f64 + 'static) -> Self {
+        Channel::Accessor(std::rc::Rc::new(move |row| Value::number(accessor(row))))
+    }
+
     /// The value this channel reads from `row`.
     pub fn read(&self, row: &Table) -> Value {
         match self {

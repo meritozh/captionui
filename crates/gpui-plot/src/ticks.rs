@@ -46,7 +46,8 @@ fn nice_linear_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
     if !span.is_finite() {
         return vec![lo, hi];
     }
-    let step = nice_step(span / (count - 1) as f64);
+    // d3's `tickIncrement`: the span over the count.
+    let step = nice_step(span / count as f64);
     if !step.is_finite() || step <= 0. {
         return vec![lo];
     }
@@ -137,6 +138,82 @@ fn round_tick(value: f64, step: f64) -> f64 {
     let places = (-step.log10().floor()).max(0.) as i32 + 1;
     let factor = 10f64.powi(places);
     (value * factor).round() / factor
+}
+
+/// d3's tick step for `count` ticks over `[start, stop]`, as `ticks` lays
+/// them out.
+pub fn tick_increment_step(start: f64, stop: f64, count: usize) -> f64 {
+    let span = (stop - start).abs();
+    if span == 0. || !span.is_finite() {
+        return 1.;
+    }
+    nice_step(span / count.max(1) as f64)
+}
+
+/// d3's `log.ticks(count)`: every multiple 1–9 of each decade when the
+/// domain spans fewer decades than the count, else powers of ten.
+pub fn d3_log_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
+    let (u, v) = (lo.min(hi), lo.max(hi));
+    if u <= 0. || !v.is_finite() {
+        return Vec::new();
+    }
+    let (i, j) = (u.log10(), v.log10());
+    let n = count.max(1) as f64;
+    let mut z = Vec::new();
+    if j - i < n {
+        let (i0, j0) = (i.floor() as i32, j.ceil() as i32);
+        for e in i0..=j0 {
+            for k in 1..10 {
+                let t = if e < 0 {
+                    k as f64 / 10f64.powi(-e)
+                } else {
+                    k as f64 * 10f64.powi(e)
+                };
+                if t < u * (1. - 1e-12) {
+                    continue;
+                }
+                if t > v * (1. + 1e-12) {
+                    break;
+                }
+                z.push(t);
+            }
+        }
+        if (z.len() as f64) * 2. < n {
+            z = nice_linear_ticks(u, v, count);
+        }
+    } else {
+        let step = nice_step((j - i) / n.min(j - i).max(1.));
+        let first = (i / step).ceil();
+        let last = (j / step).floor();
+        let mut e = first;
+        while e <= last {
+            z.push(10f64.powf(e * step));
+            e += 1.;
+        }
+    }
+    z
+}
+
+/// d3's `log.tickFormat(count)`: SI labels, blank for the multiples beyond
+/// what the count leaves room for.
+pub fn d3_log_tick_label(
+    value: f64,
+    count: usize,
+    tick_total: usize,
+    spec: Option<&str>,
+) -> String {
+    let k = (10. * count as f64 / tick_total.max(1) as f64).max(1.);
+    let mut i = value / 10f64.powf(value.log10().round());
+    if i * 10. < 10. - 0.5 {
+        i *= 10.;
+    }
+    if i <= k + 1e-9 {
+        let mut format = crate::format::NumberFormat::parse(spec.unwrap_or("s"));
+        format.trim_if_unset();
+        format.format(value)
+    } else {
+        String::new()
+    }
 }
 
 /// Calendar ticks inside a millisecond domain, the way Plot labels a time axis.

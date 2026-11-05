@@ -2534,6 +2534,7 @@ dependencies = [
  "gpui-kit",
  "gpui-plot",
  "image",
+ "serde_json",
 ]
 
 [[package]]

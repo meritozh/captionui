@@ -94,9 +94,14 @@ impl PlotTheme {
         ];
         Self {
             background: colors.background,
-            grid: colors.chart_grid,
-            axis: colors.border,
-            label: colors.muted_foreground,
+            // Plot draws its grid in `currentColor` at a tenth of its opacity,
+            // and its axes and labels in `currentColor` itself.
+            grid: Hsla {
+                a: colors.foreground.a * 0.1,
+                ..colors.foreground
+            },
+            axis: colors.foreground,
+            label: colors.foreground,
             title: colors.foreground,
             tooltip_background: colors.popover,
             tooltip_border: colors.border,
@@ -104,16 +109,18 @@ impl PlotTheme {
             tooltip_muted: colors.muted_foreground,
             // A theme whose chart colors span the hue circle is using them as
             // categories; the stock one-blue ramp is not, so it is replaced.
-            palette: if categorical_chart_colors(&chart_colors) {
-                chart_colors.clone()
-            } else {
+            // Plot's categorical scheme is Observable10 whatever the page's
+            // theme, so a chart reads the same everywhere.
+            palette: {
+                let _ = categorical_chart_colors(&chart_colors);
                 ColorRange::observable10_colors()
             },
             sequential: chart_colors,
-            mark_color: colors.chart_3,
-            grid_dash: vec![px(3.), px(3.)],
+            mark_color: colors.foreground,
+            grid_dash: Vec::new(),
             font_family: theme.font_family.clone(),
-            label_size: px(11.),
+            // Plot's default font is 10px.
+            label_size: px(10.),
             title_size: px(13.),
             line_width: px(1.),
         }

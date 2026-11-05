@@ -799,6 +799,28 @@ pub struct MarkStyle {
     pub unit: f32,
     /// The gap between a waffle's cells, Plot's `gap`, in pixels.
     pub gap: f32,
+    /// Whether the mark clips to the plot area, Plot's `clip`.
+    pub clip: bool,
+    /// Plot's `markerStart`, `markerMid` and `markerEnd`.
+    pub markers: [Option<Marker>; 3],
+    /// Plot's `textAnchor`.
+    pub text_anchor: TextAnchor,
+    /// Plot's `lineAnchor`.
+    pub line_anchor: LineAnchor,
+    /// Plot's `frameAnchor`.
+    pub frame_anchor: Option<FrameAnchor>,
+    /// Plot's `fontSize`, in pixels.
+    pub font_size: Option<f32>,
+    /// Plot's `fontWeight`.
+    pub font_weight: Option<u16>,
+    /// Plot's `fontStyle: "italic"`.
+    pub italic: bool,
+    /// Plot's `lineWidth`: wrap text at this many ems.
+    pub line_width: Option<f32>,
+    /// Plot's `strokeDasharray`, in pixels.
+    pub dash: Vec<f32>,
+    /// Plot's `rotate` for text, in degrees.
+    pub text_rotate: f32,
     /// How far a rect is shrunk on each side, Plot's `inset`; `None` takes
     /// the mark's default (half a pixel along a binned axis, else zero).
     pub inset: Option<f32>,
@@ -890,7 +912,7 @@ impl Default for MarkStyle {
                 a: 1.,
             },
             stroke_width: 1.5,
-            radius: 3.5,
+            radius: 3.,
             symbol: Symbol::Circle,
             curve: Curve::Natural,
             fill_opacity: 1.,
@@ -912,6 +934,17 @@ impl Default for MarkStyle {
             unit: 1.,
             gap: 1.,
             inset: None,
+            clip: false,
+            markers: [None; 3],
+            text_anchor: TextAnchor::Middle,
+            line_anchor: LineAnchor::Middle,
+            frame_anchor: None,
+            font_size: None,
+            font_weight: None,
+            italic: false,
+            line_width: None,
+            dash: Vec::new(),
+            text_rotate: 0.,
         }
     }
 }
@@ -924,10 +957,31 @@ impl Default for MarkStyle {
 #[derive(Clone, Debug)]
 pub struct Mark {
     pub kind: MarkKind,
+    /// The mark's own data, Plot's first argument to a mark: `Plot.dot(data,
+    /// …)`. `None` reads the plot's data.
+    pub data: Option<crate::table::Dataset>,
+    /// The mark's horizontal facet channel, Plot's mark-level `fx` option.
+    pub fx: Option<crate::table::Channel>,
+    /// The mark's vertical facet channel, Plot's mark-level `fy` option.
+    pub fy: Option<crate::table::Channel>,
     pub channels: Channels,
     pub style: MarkStyle,
     /// How the mark stacks its series.
     pub stack: Option<StackConfig>,
+    /// Plot's `stackY`/`stackX` transforms, when the mark asks for one; the
+    /// bar, area and rect marks stack implicitly otherwise.
+    pub stack_spec: Option<crate::render::stack::StackSpec>,
+    /// Plot's `normalizeX`/`normalizeY`: the axis and the basis.
+    pub normalize_by: Option<(Axis, crate::render::stack::NormalizeBasis)>,
+    /// An axis, grid or frame mark's options, Plot's `axisX({ticks, anchor,
+    /// tickFormat, label, …})`; an axis mark's `x` or `y` channel (a
+    /// constant) places it, Plot's `axisY({x: 0})`.
+    pub axis: crate::options::ScaleOptions,
+    /// How a text mark formats a non-text value, Plot's text `format`.
+    pub text_format: Option<crate::options::TickFormat>,
+    /// Plot's mark `sort` option for scale domains: `sort: {y: "x1"}` orders
+    /// the y domain by each value's x1.
+    pub domain_sort: Vec<DomainSort>,
     /// How the mark bins its data.
     pub bin: Option<BinConfig>,
     /// How the mark orders its data.
@@ -967,79 +1021,244 @@ pub struct Mark {
     pub geo_geometry: Option<Vec<Vec<(f64, f64)>>>,
 }
 
+/// One entry of Plot's mark `sort` option: order the `scale`'s domain by the
+/// `by` channel's values, reduced per domain value (`max` by default).
+#[derive(Clone, Debug)]
+pub struct DomainSort {
+    /// The scale whose domain is sorted: `"x"`, `"y"`, `"fx"`, `"fy"`,
+    /// `"color"`.
+    pub scale: SharedString,
+    /// The channel to sort by: `"x"`, `"x1"`, `"y"`, `"r"`, `"length"` … or
+    /// `"data"` for the input order.
+    pub by: SharedString,
+    pub reduce: GroupReducer,
+    pub reverse: bool,
+    /// Keep only the first `limit` values, Plot's `limit`.
+    pub limit: Option<usize>,
+}
+
+/// A marker drawn at a line's vertices, Plot's `marker` options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Marker {
+    Arrow,
+    ArrowReverse,
+    Dot,
+    CircleFill,
+    CircleStroke,
+    Tick,
+    TickX,
+    TickY,
+}
+
+impl Marker {
+    /// Plot's marker names; `"none"` is no marker.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "arrow" => Marker::Arrow,
+            "arrow-reverse" => Marker::ArrowReverse,
+            "dot" => Marker::Dot,
+            "circle" | "circle-fill" | "true" => Marker::CircleFill,
+            "circle-stroke" => Marker::CircleStroke,
+            "tick" => Marker::Tick,
+            "tick-x" => Marker::TickX,
+            "tick-y" => Marker::TickY,
+            _ => return None,
+        })
+    }
+}
+
+/// How a text label sits against its point, Plot's `textAnchor`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextAnchor {
+    Start,
+    #[default]
+    Middle,
+    End,
+}
+
+/// How a text label's lines sit against its point, Plot's `lineAnchor`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineAnchor {
+    Top,
+    #[default]
+    Middle,
+    Bottom,
+}
+
+/// Where a mark without a position sits in the frame, Plot's `frameAnchor`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrameAnchor {
+    #[default]
+    Middle,
+    Top,
+    Right,
+    Bottom,
+    Left,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
 /// A time or numeric bucket, Plot's `interval` option: turn a singular value
 /// into an extent `[floor, floor + step)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Interval {
-    /// Whole years.
-    Year,
-    /// Whole calendar months.
-    Month,
-    /// Whole days.
-    Day,
+    /// Every `n` milliseconds.
+    Millisecond(u32),
+    /// Every `n` seconds.
+    Second(u32),
+    /// Every `n` minutes.
+    Minute(u32),
+    /// Every `n` hours.
+    Hour(u32),
+    /// Every `n` days.
+    Days(u32),
+    /// Every `n` weeks starting on the given weekday (0 = Sunday).
+    Week(u32, u32),
+    /// Every `n` months.
+    Months(u32),
+    /// Every `n` quarters.
+    Quarter(u32),
+    /// Every `n` years.
+    Years(u32),
     /// A fixed numeric step.
     Step(f64),
+    /// Whole years, `Years(1)`.
+    Year,
+    /// Whole calendar months, `Months(1)`.
+    Month,
+    /// Whole days, `Days(1)`.
+    Day,
 }
 
 impl Interval {
+    /// Plot's interval names: `"day"`, `"month"`, `"3 months"`, `"monday"`,
+    /// `"week"`, `"quarter"`, `"5 years"` …
+    pub fn parse(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        let (n, unit) = match name.split_once(' ') {
+            Some((n, unit)) => (n.parse::<u32>().ok()?, unit.trim().to_string()),
+            None => (1, name.clone()),
+        };
+        let unit = unit.strip_suffix('s').unwrap_or(&unit).to_string();
+        let weekday = [
+            "sunday",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+        ];
+        if let Some(day) = weekday
+            .iter()
+            .position(|d| d.trim_end_matches('s') == unit || *d == unit)
+        {
+            return Some(Interval::Week(n, day as u32));
+        }
+        Some(match unit.as_str() {
+            "millisecond" => Interval::Millisecond(n),
+            "second" => Interval::Second(n),
+            "minute" => Interval::Minute(n),
+            "hour" => Interval::Hour(n),
+            "day" => Interval::Days(n),
+            "week" => Interval::Week(n, 0),
+            "month" => Interval::Months(n),
+            "quarter" => Interval::Quarter(n),
+            "year" => Interval::Years(n),
+            _ => return None,
+        })
+    }
+
     /// The extent this interval spans for a value, `(start, end)`, in the
     /// value's own units (dates as UTC instants, numbers as numbers).
     pub fn extent(self, value: &crate::value::Value) -> Option<(f64, f64)> {
+        use chrono::{Datelike, TimeZone, Utc};
         let instant = value.as_number()?;
-        use chrono::{Datelike, Duration, TimeZone, Utc};
-        let (start, end) = match self {
-            Interval::Day => {
-                let date = Utc.timestamp_millis_opt(instant as i64).single()?;
-                let start = date
-                    .date_naive()
-                    .and_hms_opt(0, 0, 0)?
-                    .and_utc()
-                    .timestamp_millis();
-                let end = start + Duration::days(1).num_milliseconds();
-                (start as f64, end as f64)
-            }
-            Interval::Month => {
-                let date = Utc.timestamp_millis_opt(instant as i64).single()?;
-                // Reconstruct the first of the month directly from its
-                // year and month, so a date like Jan 31 doesn't rely on
-                // clamping `with_month`/`with_day` (which returns None when
-                // the day doesn't fit the new month).
-                let naive = date.date_naive();
-                let start = Utc
-                    .with_ymd_and_hms(naive.year(), naive.month(), 1, 0, 0, 0)
-                    .single()?
-                    .timestamp_millis();
-                let (end_year, end_month) = if naive.month() == 12 {
-                    (naive.year() + 1, 1)
-                } else {
-                    (naive.year(), naive.month() + 1)
-                };
-                let end = Utc
-                    .with_ymd_and_hms(end_year, end_month, 1, 0, 0, 0)
-                    .single()?
-                    .timestamp_millis();
-                (start as f64, end as f64)
-            }
-            Interval::Year => {
-                let date = Utc.timestamp_millis_opt(instant as i64).single()?;
-                let naive = date.date_naive();
-                let start = Utc
-                    .with_ymd_and_hms(naive.year(), 1, 1, 0, 0, 0)
-                    .single()?
-                    .timestamp_millis();
-                let end = Utc
-                    .with_ymd_and_hms(naive.year() + 1, 1, 1, 0, 0, 0)
-                    .single()?
-                    .timestamp_millis();
-                (start as f64, end as f64)
-            }
-            Interval::Step(width) if width > 0. => {
-                let start = (instant / width).floor() * width;
-                (start, start + width)
-            }
-            Interval::Step(_) => return None,
+        let fixed = |step: f64| {
+            let start = (instant / step).floor() * step;
+            Some((start, start + step))
         };
-        Some((start, end))
+        let months = |n: u32| -> Option<(f64, f64)> {
+            let date = Utc
+                .timestamp_millis_opt(instant as i64)
+                .single()?
+                .date_naive();
+            let total = date.year() * 12 + date.month0() as i32;
+            let start = total - total.rem_euclid(n as i32);
+            let at = |m: i32| {
+                Utc.with_ymd_and_hms(m.div_euclid(12), m.rem_euclid(12) as u32 + 1, 1, 0, 0, 0)
+                    .single()
+                    .map(|d| d.timestamp_millis() as f64)
+            };
+            Some((at(start)?, at(start + n as i32)?))
+        };
+        const DAY: f64 = 86_400_000.;
+        match self {
+            Interval::Step(width) if width > 0. => fixed(width),
+            Interval::Step(_) => None,
+            Interval::Millisecond(n) => fixed(n.max(1) as f64),
+            Interval::Second(n) => fixed(1_000. * n.max(1) as f64),
+            Interval::Minute(n) => fixed(60_000. * n.max(1) as f64),
+            Interval::Hour(n) => fixed(3_600_000. * n.max(1) as f64),
+            Interval::Day => Interval::Days(1).extent(value),
+            Interval::Days(n) => {
+                // d3's utcDay.every(n): days counted within each month.
+                let date = Utc
+                    .timestamp_millis_opt(instant as i64)
+                    .single()?
+                    .date_naive();
+                let n = n.max(1);
+                let day0 = date.day0() - date.day0() % n;
+                let start = Utc
+                    .with_ymd_and_hms(date.year(), date.month(), day0 + 1, 0, 0, 0)
+                    .single()?
+                    .timestamp_millis() as f64;
+                Some((start, start + DAY * n as f64))
+            }
+            Interval::Week(n, weekday) => {
+                let date = Utc
+                    .timestamp_millis_opt(instant as i64)
+                    .single()?
+                    .date_naive();
+                let back = (date.weekday().num_days_from_sunday() + 7 - weekday) % 7;
+                let start = Utc
+                    .from_utc_datetime(
+                        &(date - chrono::Duration::days(back as i64)).and_hms_opt(0, 0, 0)?,
+                    )
+                    .timestamp_millis() as f64;
+                Some((start, start + 7. * DAY * n.max(1) as f64))
+            }
+            Interval::Month => months(1),
+            Interval::Months(n) => months(n.max(1)),
+            Interval::Quarter(n) => months(3 * n.max(1)),
+            Interval::Year => months(12),
+            Interval::Years(n) => months(12 * n.max(1)),
+        }
+    }
+
+    /// Whether the interval steps through time rather than numbers.
+    pub fn is_temporal(self) -> bool {
+        !matches!(self, Interval::Step(_))
+    }
+}
+
+impl From<f64> for Interval {
+    fn from(step: f64) -> Self {
+        Interval::Step(step)
+    }
+}
+
+impl From<i32> for Interval {
+    fn from(step: i32) -> Self {
+        Interval::Step(step as f64)
+    }
+}
+
+impl From<&str> for Interval {
+    fn from(name: &str) -> Self {
+        Interval::parse(name).unwrap_or(Interval::Step(1.))
     }
 }
 
@@ -1118,6 +1337,31 @@ impl Mark {
             style.fill_opacity = 0.3;
             style.anchor = VectorAnchor::Start;
         }
+        // Plot leaves SVG's one-pixel stroke on its rules, ticks, links and
+        // frames; only its lines, dots and the like take 1.5.
+        if matches!(
+            kind,
+            MarkKind::RuleX
+                | MarkKind::RuleY
+                | MarkKind::TickX
+                | MarkKind::TickY
+                | MarkKind::Link
+                | MarkKind::Frame
+                | MarkKind::Hull
+                | MarkKind::Geo
+                | MarkKind::DelaunayLink
+                | MarkKind::DelaunayMesh
+                | MarkKind::Voronoi
+                | MarkKind::VoronoiMesh
+                | MarkKind::Contour
+                | MarkKind::Density
+        ) {
+            style.stroke_width = 1.;
+        }
+        // Plot's grid marks draw in `currentColor` at a tenth of its opacity.
+        if matches!(kind, MarkKind::GridX | MarkKind::GridY) {
+            style.stroke_opacity = 0.1;
+        }
         // The meshes are a faint underlay: Plot strokes them at 0.2 opacity so
         // the data drawn over them stays the figure's subject.
         if matches!(kind, MarkKind::DelaunayMesh | MarkKind::VoronoiMesh) {
@@ -1125,9 +1369,17 @@ impl Mark {
         }
         Self {
             kind,
+            data: None,
+            fx: None,
+            fy: None,
             channels: Channels::default(),
             style,
             stack: None,
+            stack_spec: None,
+            normalize_by: None,
+            domain_sort: Vec::new(),
+            text_format: None,
+            axis: Default::default(),
             bin: None,
             sort: None,
             reduce: None,
@@ -1147,6 +1399,26 @@ impl Mark {
             projection: None,
             geo_geometry: None,
         }
+    }
+
+    /// Give the mark its own data, Plot's `Plot.dot(data, …)`: an array of
+    /// records, or of plain values (`[0]` for `Plot.ruleY([0])`), whose
+    /// channels default to the value itself.
+    pub fn data(mut self, data: impl Into<crate::table::Dataset>) -> Self {
+        self.data = Some(data.into());
+        self
+    }
+
+    /// Facet the mark into columns by a channel, Plot's mark-level `fx`.
+    pub fn fx(mut self, channel: impl IntoChannel) -> Self {
+        self.fx = Some(channel.into_channel());
+        self
+    }
+
+    /// Facet the mark into rows by a channel, Plot's mark-level `fy`.
+    pub fn fy(mut self, channel: impl IntoChannel) -> Self {
+        self.fy = Some(channel.into_channel());
+        self
     }
 
     /// Set the x channel.
@@ -1334,6 +1606,295 @@ impl Mark {
         self
     }
 
+    /// Plot's `stackY`: stack the rows' y values within each x, outputting
+    /// `y1`, `y2` and their middle as `y`.
+    pub fn stack_y(mut self) -> Self {
+        self.stack_spec = Some(crate::render::stack::StackSpec::new(Axis::Y));
+        self
+    }
+
+    /// Plot's `stackY1`: as [`Self::stack_y`], with `y` the interval's start.
+    pub fn stack_y1(mut self) -> Self {
+        let mut spec = crate::render::stack::StackSpec::new(Axis::Y);
+        spec.anchor = crate::render::stack::StackAnchor::Start;
+        self.stack_spec = Some(spec);
+        self
+    }
+
+    /// Plot's `stackY2`: as [`Self::stack_y`], with `y` the interval's end.
+    pub fn stack_y2(mut self) -> Self {
+        let mut spec = crate::render::stack::StackSpec::new(Axis::Y);
+        spec.anchor = crate::render::stack::StackAnchor::End;
+        self.stack_spec = Some(spec);
+        self
+    }
+
+    /// Plot's `stackX`.
+    pub fn stack_x(mut self) -> Self {
+        self.stack_spec = Some(crate::render::stack::StackSpec::new(Axis::X));
+        self
+    }
+
+    /// Plot's `stackX1`.
+    pub fn stack_x1(mut self) -> Self {
+        let mut spec = crate::render::stack::StackSpec::new(Axis::X);
+        spec.anchor = crate::render::stack::StackAnchor::Start;
+        self.stack_spec = Some(spec);
+        self
+    }
+
+    /// Plot's `stackX2`.
+    pub fn stack_x2(mut self) -> Self {
+        let mut spec = crate::render::stack::StackSpec::new(Axis::X);
+        spec.anchor = crate::render::stack::StackAnchor::End;
+        self.stack_spec = Some(spec);
+        self
+    }
+
+    fn stack_spec_mut(&mut self) -> &mut crate::render::stack::StackSpec {
+        if self.stack_spec.is_none() {
+            let axis = match self.kind.category().groups_on_y {
+                true => Axis::X,
+                false => Axis::Y,
+            };
+            self.stack_spec = Some(crate::render::stack::StackSpec::new(axis));
+        }
+        self.stack_spec.as_mut().expect("just set")
+    }
+
+    /// Plot's stack `offset`.
+    pub fn stack_offset(mut self, offset: crate::render::stack::Offset) -> Self {
+        self.stack_spec_mut().offset = offset;
+        self
+    }
+
+    /// Plot's stack `order`.
+    pub fn stack_order(mut self, order: crate::render::stack::StackOrder) -> Self {
+        self.stack_spec_mut().order = order;
+        self
+    }
+
+    /// Plot's stack `reverse`.
+    pub fn stack_reverse(mut self, reverse: bool) -> Self {
+        self.stack_spec_mut().reverse = reverse;
+        self
+    }
+
+    /// Plot's `normalizeX`: divide each series' x by its basis.
+    pub fn normalize_x(mut self, basis: crate::render::stack::NormalizeBasis) -> Self {
+        self.normalize_by = Some((Axis::X, basis));
+        self
+    }
+
+    /// Plot's `normalizeY`.
+    pub fn normalize_y(mut self, basis: crate::render::stack::NormalizeBasis) -> Self {
+        self.normalize_by = Some((Axis::Y, basis));
+        self
+    }
+
+    /// Plot's mark `sort: {scale: by}`: order `scale`'s domain by the `by`
+    /// channel, the largest value per domain value; `"-x"` or `reverse`
+    /// sorts descending.
+    pub fn sort_domain(mut self, scale: &str, by: &str, reverse: bool) -> Self {
+        let (by, descending) = match by.strip_prefix('-') {
+            Some(by) => (by, true),
+            None => (by, false),
+        };
+        self.domain_sort.push(DomainSort {
+            scale: scale.to_string().into(),
+            by: by.to_string().into(),
+            reduce: GroupReducer::Max,
+            reverse: reverse != descending,
+            limit: None,
+        });
+        self
+    }
+
+    /// Plot's mark `sort` with an explicit reducer and limit.
+    pub fn sort_domain_by(mut self, sort: DomainSort) -> Self {
+        self.domain_sort.push(sort);
+        self
+    }
+
+    /// Plot's text `format`: a d3-format or d3-time-format specifier, or a
+    /// function, for the label's value.
+    pub fn format(mut self, format: impl Into<crate::options::TickFormat>) -> Self {
+        self.text_format = Some(format.into());
+        self
+    }
+
+    /// Plot's `textAnchor`.
+    pub fn text_anchor(mut self, anchor: TextAnchor) -> Self {
+        self.style.text_anchor = anchor;
+        self
+    }
+
+    /// Plot's `lineAnchor`.
+    pub fn line_anchor(mut self, anchor: LineAnchor) -> Self {
+        self.style.line_anchor = anchor;
+        self
+    }
+
+    /// Plot's `frameAnchor`.
+    pub fn frame_anchor(mut self, anchor: FrameAnchor) -> Self {
+        self.style.frame_anchor = Some(anchor);
+        self
+    }
+
+    /// Plot's `fontSize`.
+    pub fn font_size(mut self, size: f32) -> Self {
+        self.style.font_size = Some(size);
+        self
+    }
+
+    /// Plot's `fontWeight`.
+    pub fn font_weight(mut self, weight: u16) -> Self {
+        self.style.font_weight = Some(weight);
+        self
+    }
+
+    /// Plot's `fontStyle: "italic"`.
+    pub fn italic(mut self) -> Self {
+        self.style.italic = true;
+        self
+    }
+
+    /// Plot's `lineWidth`, in ems.
+    pub fn line_width(mut self, ems: f32) -> Self {
+        self.style.line_width = Some(ems);
+        self
+    }
+
+    /// Plot's `strokeDasharray`.
+    pub fn dash(mut self, dash: impl IntoIterator<Item = f32>) -> Self {
+        self.style.dash = dash.into_iter().collect();
+        self
+    }
+
+    /// Plot's `rotate` for a text label, in degrees.
+    pub fn text_rotate(mut self, degrees: f32) -> Self {
+        self.style.text_rotate = degrees;
+        self
+    }
+
+    /// An axis or grid mark's tick count, Plot's `ticks: n`.
+    pub fn ticks(mut self, count: usize) -> Self {
+        self.axis.ticks = Some(crate::options::Ticks::Count(count));
+        self
+    }
+
+    /// An axis or grid mark's explicit ticks, Plot's `ticks: [values]`.
+    pub fn tick_values<V: Into<crate::value::Value>>(
+        mut self,
+        values: impl IntoIterator<Item = V>,
+    ) -> Self {
+        self.axis.ticks = Some(crate::options::Ticks::Values(
+            values.into_iter().map(Into::into).collect(),
+        ));
+        self
+    }
+
+    /// An axis or grid mark's tick interval, Plot's `interval`.
+    pub fn tick_interval(mut self, interval: Interval) -> Self {
+        self.axis.ticks = Some(crate::options::Ticks::Interval(interval));
+        self
+    }
+
+    /// An axis mark's `tickFormat`.
+    pub fn tick_format(mut self, format: impl Into<crate::options::TickFormat>) -> Self {
+        self.axis.tick_format = Some(format.into());
+        self
+    }
+
+    /// An axis mark's `tickSize`.
+    pub fn tick_size(mut self, size: f32) -> Self {
+        self.axis.tick_size = Some(size);
+        self
+    }
+
+    /// An axis mark's `tickPadding`.
+    pub fn tick_padding(mut self, padding: f32) -> Self {
+        self.axis.tick_padding = Some(padding);
+        self
+    }
+
+    /// An axis mark's `tickRotate`, in degrees.
+    pub fn tick_rotate(mut self, degrees: f32) -> Self {
+        self.axis.tick_rotate = Some(degrees);
+        self
+    }
+
+    /// An axis or frame mark's `anchor`: which side it draws on.
+    pub fn axis_anchor(mut self, anchor: crate::options::AxisAnchor) -> Self {
+        self.axis.axis = Some(Some(anchor));
+        self
+    }
+
+    /// An axis mark's `label`.
+    pub fn axis_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.axis.label = Some(Some(label.into()));
+        self
+    }
+
+    /// An axis mark's `label: null`.
+    pub fn no_axis_label(mut self) -> Self {
+        self.axis.label = Some(None);
+        self
+    }
+
+    /// An axis mark's `labelAnchor`.
+    pub fn axis_label_anchor(mut self, anchor: crate::options::LabelAnchor) -> Self {
+        self.axis.label_anchor = Some(anchor);
+        self
+    }
+
+    /// An axis mark's `labelOffset`.
+    pub fn axis_label_offset(mut self, offset: f32) -> Self {
+        self.axis.label_offset = Some(offset);
+        self
+    }
+
+    /// An axis mark's `labelArrow`.
+    pub fn axis_label_arrow(mut self, arrow: bool) -> Self {
+        self.axis.label_arrow = Some(arrow);
+        self
+    }
+
+    /// An axis mark's `color`: its ticks and labels.
+    pub fn color(self, color: &str) -> Self {
+        self.stroke(color).fill(color)
+    }
+
+    /// Plot's `textStroke` for an axis's labels, a halo.
+    pub fn axis_line(mut self, line: bool) -> Self {
+        self.axis.line = Some(line);
+        self
+    }
+
+    /// Plot's `marker`: the same marker at every vertex.
+    pub fn marker(mut self, marker: &str) -> Self {
+        self.style.markers = [Marker::parse(marker); 3];
+        self
+    }
+
+    /// Plot's `markerStart`.
+    pub fn marker_start(mut self, marker: &str) -> Self {
+        self.style.markers[0] = Marker::parse(marker);
+        self
+    }
+
+    /// Plot's `markerMid`.
+    pub fn marker_mid(mut self, marker: &str) -> Self {
+        self.style.markers[1] = Marker::parse(marker);
+        self
+    }
+
+    /// Plot's `markerEnd`.
+    pub fn marker_end(mut self, marker: &str) -> Self {
+        self.style.markers[2] = Marker::parse(marker);
+        self
+    }
+
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
         let outputs = self.bin.take().map(|bin| bin.outputs).unwrap_or_default();
@@ -1353,6 +1914,12 @@ impl Mark {
         let mut bin = self.bin.take().unwrap_or_default();
         bin.outputs.push(GroupOutput::new(name, reducer));
         self.bin = Some(bin);
+        self
+    }
+
+    /// Clip the mark to the plot area, Plot's `clip: true`.
+    pub fn clip(mut self, clip: bool) -> Self {
+        self.style.clip = clip;
         self
     }
 
@@ -1681,6 +2248,29 @@ macro_rules! mark_builder {
         }
 
         impl $name {
+            /// Give the mark its own data, Plot's `Plot.dot(data, …)`.
+            pub fn data(mut self, data: impl Into<crate::table::Dataset>) -> Self {
+                self.0 = self.0.data(data);
+                self
+            }
+
+            /// Facet the mark into columns, Plot's mark-level `fx`.
+            pub fn fx(mut self, channel: impl IntoChannel) -> Self {
+                self.0 = self.0.fx(channel);
+                self
+            }
+
+            /// Facet the mark into rows, Plot's mark-level `fy`.
+            pub fn fy(mut self, channel: impl IntoChannel) -> Self {
+                self.0 = self.0.fy(channel);
+                self
+            }
+
+            /// Draw this mark alone, Plot's `mark.plot()`.
+            pub fn plot(self) -> crate::plot::Plot {
+                crate::plot::Plot::plot().mark(self.0)
+            }
+
             /// Set the x channel.
             pub fn x(mut self, channel: impl IntoChannel) -> Self {
                 self.0 = self.0.x(channel);
@@ -1854,6 +2444,264 @@ macro_rules! mark_builder {
                 reducer: GroupReducer,
             ) -> Self {
                 self.0 = self.0.bin_output(name, reducer);
+                self
+            }
+
+            /// Clip the mark to the plot area, Plot's `clip: true`.
+            pub fn clip(mut self, clip: bool) -> Self {
+                self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::marker`].
+            pub fn marker(mut self, marker: &str) -> Self {
+                self.0 = self.0.marker(marker);
+                self
+            }
+
+            /// See [`Mark::marker_start`].
+            pub fn marker_start(mut self, marker: &str) -> Self {
+                self.0 = self.0.marker_start(marker);
+                self
+            }
+
+            /// See [`Mark::marker_mid`].
+            pub fn marker_mid(mut self, marker: &str) -> Self {
+                self.0 = self.0.marker_mid(marker);
+                self
+            }
+
+            /// See [`Mark::marker_end`].
+            pub fn marker_end(mut self, marker: &str) -> Self {
+                self.0 = self.0.marker_end(marker);
+                self
+            }
+
+            /// See [`Mark::ticks`].
+            pub fn ticks(mut self, count: usize) -> Self {
+                self.0 = self.0.ticks(count);
+                self
+            }
+
+            /// See [`Mark::tick_values`].
+            pub fn tick_values(mut self, values: impl IntoIterator<Item = crate::value::Value>) -> Self {
+                self.0 = self.0.tick_values(values);
+                self
+            }
+
+            /// See [`Mark::tick_interval`].
+            pub fn tick_interval(mut self, interval: Interval) -> Self {
+                self.0 = self.0.tick_interval(interval);
+                self
+            }
+
+            /// See [`Mark::tick_format`].
+            pub fn tick_format(mut self, format: impl Into<crate::options::TickFormat>) -> Self {
+                self.0 = self.0.tick_format(format);
+                self
+            }
+
+            /// See [`Mark::tick_size`].
+            pub fn tick_size(mut self, size: f32) -> Self {
+                self.0 = self.0.tick_size(size);
+                self
+            }
+
+            /// See [`Mark::tick_padding`].
+            pub fn tick_padding(mut self, padding: f32) -> Self {
+                self.0 = self.0.tick_padding(padding);
+                self
+            }
+
+            /// See [`Mark::tick_rotate`].
+            pub fn tick_rotate(mut self, degrees: f32) -> Self {
+                self.0 = self.0.tick_rotate(degrees);
+                self
+            }
+
+            /// See [`Mark::axis_anchor`].
+            pub fn axis_anchor(mut self, anchor: crate::options::AxisAnchor) -> Self {
+                self.0 = self.0.axis_anchor(anchor);
+                self
+            }
+
+            /// See [`Mark::axis_label`].
+            pub fn axis_label(mut self, label: impl Into<SharedString>) -> Self {
+                self.0 = self.0.axis_label(label);
+                self
+            }
+
+            /// See [`Mark::no_axis_label`].
+            pub fn no_axis_label(mut self) -> Self {
+                self.0 = self.0.no_axis_label();
+                self
+            }
+
+            /// See [`Mark::axis_label_anchor`].
+            pub fn axis_label_anchor(mut self, anchor: crate::options::LabelAnchor) -> Self {
+                self.0 = self.0.axis_label_anchor(anchor);
+                self
+            }
+
+            /// See [`Mark::axis_label_offset`].
+            pub fn axis_label_offset(mut self, offset: f32) -> Self {
+                self.0 = self.0.axis_label_offset(offset);
+                self
+            }
+
+            /// See [`Mark::axis_label_arrow`].
+            pub fn axis_label_arrow(mut self, arrow: bool) -> Self {
+                self.0 = self.0.axis_label_arrow(arrow);
+                self
+            }
+
+            /// See [`Mark::color`].
+            pub fn color(mut self, color: &str) -> Self {
+                self.0 = self.0.color(color);
+                self
+            }
+
+            /// See [`Mark::axis_line`].
+            pub fn axis_line(mut self, line: bool) -> Self {
+                self.0 = self.0.axis_line(line);
+                self
+            }
+
+            /// See [`Mark::stack_y`].
+            pub fn stack_y(mut self) -> Self {
+                self.0 = self.0.stack_y();
+                self
+            }
+
+            /// See [`Mark::stack_y1`].
+            pub fn stack_y1(mut self) -> Self {
+                self.0 = self.0.stack_y1();
+                self
+            }
+
+            /// See [`Mark::stack_y2`].
+            pub fn stack_y2(mut self) -> Self {
+                self.0 = self.0.stack_y2();
+                self
+            }
+
+            /// See [`Mark::stack_x`].
+            pub fn stack_x(mut self) -> Self {
+                self.0 = self.0.stack_x();
+                self
+            }
+
+            /// See [`Mark::stack_x1`].
+            pub fn stack_x1(mut self) -> Self {
+                self.0 = self.0.stack_x1();
+                self
+            }
+
+            /// See [`Mark::stack_x2`].
+            pub fn stack_x2(mut self) -> Self {
+                self.0 = self.0.stack_x2();
+                self
+            }
+
+            /// See [`Mark::stack_offset`].
+            pub fn stack_offset(mut self, offset: crate::render::stack::Offset) -> Self {
+                self.0 = self.0.stack_offset(offset);
+                self
+            }
+
+            /// See [`Mark::stack_order`].
+            pub fn stack_order(mut self, order: crate::render::stack::StackOrder) -> Self {
+                self.0 = self.0.stack_order(order);
+                self
+            }
+
+            /// See [`Mark::stack_reverse`].
+            pub fn stack_reverse(mut self, reverse: bool) -> Self {
+                self.0 = self.0.stack_reverse(reverse);
+                self
+            }
+
+            /// See [`Mark::normalize_x`].
+            pub fn normalize_x(mut self, basis: crate::render::stack::NormalizeBasis) -> Self {
+                self.0 = self.0.normalize_x(basis);
+                self
+            }
+
+            /// See [`Mark::normalize_y`].
+            pub fn normalize_y(mut self, basis: crate::render::stack::NormalizeBasis) -> Self {
+                self.0 = self.0.normalize_y(basis);
+                self
+            }
+
+            /// See [`Mark::sort_domain`].
+            pub fn sort_domain(mut self, scale: &str, by: &str, reverse: bool) -> Self {
+                self.0 = self.0.sort_domain(scale, by, reverse);
+                self
+            }
+
+            /// See [`Mark::sort_domain_by`].
+            pub fn sort_domain_by(mut self, sort: DomainSort) -> Self {
+                self.0 = self.0.sort_domain_by(sort);
+                self
+            }
+
+            /// See [`Mark::format`].
+            pub fn format(mut self, format: impl Into<crate::options::TickFormat>) -> Self {
+                self.0 = self.0.format(format);
+                self
+            }
+
+            /// See [`Mark::text_anchor`].
+            pub fn text_anchor(mut self, anchor: TextAnchor) -> Self {
+                self.0 = self.0.text_anchor(anchor);
+                self
+            }
+
+            /// See [`Mark::line_anchor`].
+            pub fn line_anchor(mut self, anchor: LineAnchor) -> Self {
+                self.0 = self.0.line_anchor(anchor);
+                self
+            }
+
+            /// See [`Mark::frame_anchor`].
+            pub fn frame_anchor(mut self, anchor: FrameAnchor) -> Self {
+                self.0 = self.0.frame_anchor(anchor);
+                self
+            }
+
+            /// See [`Mark::font_size`].
+            pub fn font_size(mut self, size: f32) -> Self {
+                self.0 = self.0.font_size(size);
+                self
+            }
+
+            /// See [`Mark::font_weight`].
+            pub fn font_weight(mut self, weight: u16) -> Self {
+                self.0 = self.0.font_weight(weight);
+                self
+            }
+
+            /// See [`Mark::italic`].
+            pub fn italic(mut self) -> Self {
+                self.0 = self.0.italic();
+                self
+            }
+
+            /// See [`Mark::line_width`].
+            pub fn line_width(mut self, ems: f32) -> Self {
+                self.0 = self.0.line_width(ems);
+                self
+            }
+
+            /// See [`Mark::dash`].
+            pub fn dash(mut self, dash: impl IntoIterator<Item = f32>) -> Self {
+                self.0 = self.0.dash(dash);
+                self
+            }
+
+            /// See [`Mark::text_rotate`].
+            pub fn text_rotate(mut self, degrees: f32) -> Self {
+                self.0 = self.0.text_rotate(degrees);
                 self
             }
 
@@ -2424,7 +3272,7 @@ mod tests {
         let dot = DotMark::new().x("a").y("b").r(5.);
         assert_eq!(dot.kind, MarkKind::Dot);
         assert!(dot.channels.x.is_some());
-        assert_eq!(dot.style.radius, 3.5);
+        assert_eq!(dot.style.radius, 3.);
         assert!(dot.into_mark().channels.y.is_some());
     }
 

@@ -212,6 +212,37 @@ impl Grid {
             .position(|cell| cell.x.as_ref() == x && cell.y.as_ref() == y)
     }
 
+    /// Split `data` into the rows of each facet by facet channels, in the
+    /// grid's order. A missing channel matches every facet along its axis,
+    /// so a mark faceted by `fy` alone repeats across the `fx` columns.
+    pub fn partition_channels(
+        &self,
+        data: &crate::table::Dataset,
+        fx: Option<&crate::table::Channel>,
+        fy: Option<&crate::table::Channel>,
+    ) -> Vec<Vec<crate::table::Table>> {
+        let mut groups: Vec<Vec<crate::table::Table>> = vec![Vec::new(); self.cells.len()];
+        for row in data.rows() {
+            let key = |channel: Option<&crate::table::Channel>| {
+                channel.map(|channel| {
+                    let value = channel.read(row);
+                    (!value.is_null()).then(|| value.key())
+                })
+            };
+            let (x, y) = (key(fx), key(fy));
+            for (index, cell) in self.cells.iter().enumerate() {
+                let fits = |want: &Option<Option<ValueKey>>, have: &Option<ValueKey>| match want {
+                    None => true,
+                    Some(key) => key.as_ref() == have.as_ref() && key.is_some(),
+                };
+                if fits(&x, &cell.x) && fits(&y, &cell.y) {
+                    groups[index].push(row.clone());
+                }
+            }
+        }
+        groups
+    }
+
     /// Split `data` into the rows of each facet, in the grid's order.
     ///
     /// A row whose `fx`/`fy` values are outside the domains lands in no

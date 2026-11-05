@@ -37,6 +37,9 @@ pub struct DrawContext<'a> {
     /// The plot's color scales, shared by every mark so a series keeps one
     /// color wherever it appears, and read by the legend and tooltip too.
     pub colors: &'a crate::render::color::PlotColors,
+    /// Whether the mark clips to the plot area, Plot's `clip`. Plot does not
+    /// clip by default, so a dot on the domain's edge shows whole.
+    pub clip: bool,
     pub window: &'a mut Window,
     pub cx: &'a mut App,
 }
@@ -47,8 +50,12 @@ impl DrawContext<'_> {
         point + self.frame.plot.origin
     }
 
-    /// Paint inside the plot, so shapes never spill over the axes.
+    /// Paint inside the plot when the mark clips, Plot's `clip: true`;
+    /// otherwise paint as is.
     pub fn clipped<R>(&mut self, f: impl FnOnce(&mut DrawContext<'_>) -> R) -> R {
+        if !self.clip {
+            return f(self);
+        }
         let bounds = self.frame.plot;
         let frame = self.frame;
         let theme = self.theme;
@@ -67,6 +74,7 @@ impl DrawContext<'_> {
                 hovered: self.hovered,
                 row_offset: self.row_offset,
                 colors,
+                clip: true,
                 window,
                 cx,
             };
@@ -235,11 +243,9 @@ pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         MarkKind::Image => draw_image(prepared, ctx),
         MarkKind::Geo => draw_geo(prepared, ctx),
         MarkKind::Tip => draw_tips(prepared, ctx),
-        MarkKind::AxisX => draw_axis_x(prepared, ctx),
-        MarkKind::AxisY => draw_axis_y(prepared, ctx),
-        MarkKind::GridX => draw_grid_x(prepared, ctx),
-        MarkKind::GridY => draw_grid_y(prepared, ctx),
-        MarkKind::Frame => draw_frame(prepared, ctx),
+        MarkKind::AxisX | MarkKind::AxisY | MarkKind::GridX | MarkKind::GridY | MarkKind::Frame => {
+            crate::render::furniture::draw(prepared, ctx)
+        }
         _ => {}
     }
 }
@@ -253,6 +259,13 @@ fn draw_dots(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             let Some(position) = position(prepared, ctx, row) else {
                 continue;
             };
+            // Plot's dot defaults to a radius of 3, or 4.5 with a symbol
+            // channel, so its shapes read.
+            let radius = if prepared.mark.channels.symbol.is_some() && radius == 3. {
+                4.5
+            } else {
+                radius
+            };
             let r = row.r.unwrap_or(radius) * ctx.appear;
             if r <= 0. {
                 continue;
@@ -262,15 +275,30 @@ fn draw_dots(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             // The hovered dot grows toward 1.6× its radius; the rest keep
             // theirs, so the hover reads as a lift rather than a redraw.
             let r = r * (1. + 0.6 * emphasis);
-            // Plot's dot is hollow when it is given a stroke and no fill.
-            let hollow =
-                prepared.mark.channels.stroke.is_some() && prepared.mark.channels.fill.is_none();
+            // Plot's dot is hollow unless it is given a fill: it strokes in
+            // `currentColor` (or its stroke channel) and fills nothing. A
+            // constant fill symbol (`symbol: "square"`) fills instead.
+            let fill_symbol = !symbol.is_line()
+                && symbol != Symbol::Circle
+                && prepared
+                    .mark
+                    .channels
+                    .symbol
+                    .as_ref()
+                    .is_none_or(|channel| crate::render::constant_symbol(channel).is_some())
+                && prepared.mark.channels.stroke.is_none();
+            let hollow = prepared.mark.channels.fill.is_none() && !fill_symbol;
             let fill = if hollow {
                 Hsla::transparent_black()
             } else {
                 paint::alpha(colors.fill(index), ctx.row_fill_opacity(prepared, row))
             };
-            let stroke = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
+            // A filled dot with no stroke of its own draws no outline.
+            let stroke = if prepared.mark.channels.stroke.is_none() && !hollow {
+                Hsla::transparent_black()
+            } else {
+                paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row))
+            };
             paint_symbol(
                 ctx,
                 position,
@@ -284,7 +312,9 @@ fn draw_dots(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     });
 }
 
-/// Paint one symbol at a plot-relative position.
+/// Paint one symbol at a plot-relative position: d3's symbol of area `π r²`,
+/// filled and stroked as the dot asks. A stroke symbol (`plus`, `times` …)
+/// is drawn in the stroke alone.
 pub fn paint_symbol(
     ctx: &mut DrawContext<'_>,
     position: Point<Pixels>,
@@ -300,18 +330,13 @@ pub fn paint_symbol(
     // of dots, which overflow the path pipeline's buffer. SVG centers a
     // stroke on the outline, so the quad grows by half the stroke and draws
     // it as an inside border.
-    if matches!(symbol, Symbol::Circle | Symbol::CircleOpen) {
+    if symbol == Symbol::Circle {
         let stroke_width = if stroke.a > 0. {
             stroke_width.max(0.)
         } else {
             0.
         };
         let outer = radius + stroke_width / 2.;
-        let fill = if symbol == Symbol::CircleOpen {
-            Hsla::transparent_black()
-        } else {
-            fill
-        };
         let bounds = gpui::Bounds::new(
             point(absolute.x - px(outer), absolute.y - px(outer)),
             gpui::size(px(outer * 2.), px(outer * 2.)),
@@ -326,96 +351,176 @@ pub fn paint_symbol(
         ));
         return;
     }
-    let points = symbol.path(absolute, radius);
-    if symbol.is_line() {
-        // Stroke symbols draw their segments, not one closed path.
-        let segments = symbol_segments(symbol, absolute, radius);
-        for segment in segments {
-            paint::paint_stroke(&segment, stroke_width, stroke, ctx.window);
+    for (points, closed) in symbol.subpaths(absolute, radius) {
+        if closed && fill.a > 0. {
+            paint::paint_fill(&points, fill, ctx.window);
         }
-        if symbol == Symbol::CircleOpen {
-            let circle = paint::circle_points(absolute, radius, 24);
-            paint::paint_stroke(&circle, stroke_width, stroke, ctx.window);
-        }
-    } else {
-        paint::paint_fill(&points, fill, ctx.window);
         if stroke.a > 0. && stroke_width > 0. {
-            paint::paint_stroke(&points, stroke_width, stroke, ctx.window);
-        }
-    }
-}
-
-/// The line segments a stroke symbol draws.
-fn symbol_segments(symbol: Symbol, center: Point<Pixels>, radius: f32) -> Vec<Vec<Point<Pixels>>> {
-    let (x, y) = (center.x.as_f32(), center.y.as_f32());
-    let p = |dx: f32, dy: f32| point(px(x + dx), px(y + dy));
-    let r = radius;
-    let k = std::f32::consts::FRAC_1_SQRT_2 * r;
-    match symbol {
-        Symbol::Cross | Symbol::Plus => vec![vec![p(-r, 0.), p(r, 0.)], vec![p(0., -r), p(0., r)]],
-        Symbol::Times | Symbol::CrossRotate => {
-            vec![vec![p(-k, -k), p(k, k)], vec![p(k, -k), p(-k, k)]]
-        }
-        Symbol::Star => {
-            let mut segments = Vec::new();
-            for i in 0..4 {
-                let angle = std::f32::consts::PI * i as f32 / 4.;
-                segments.push(vec![
-                    p(-r * angle.cos(), -r * angle.sin()),
-                    p(r * angle.cos(), r * angle.sin()),
-                ]);
+            let mut outline = points.clone();
+            if closed && let Some(first) = points.first() {
+                outline.push(*first);
             }
-            segments
+            paint::paint_stroke(&outline, stroke_width, stroke, ctx.window);
         }
-        Symbol::Asterisk => {
-            let mut segments = Vec::new();
-            for i in 0..3 {
-                let angle = std::f32::consts::PI * i as f32 / 3.;
-                segments.push(vec![
-                    p(-r * angle.cos(), -r * angle.sin()),
-                    p(r * angle.cos(), r * angle.sin()),
-                ]);
-            }
-            segments
-        }
-        _ => vec![],
     }
 }
 
 fn draw_lines(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
-    let width = prepared.mark.style.stroke_width;
-    let curve = prepared.mark.style.curve;
-
+    let style = &prepared.mark.style;
+    let width = style.stroke_width;
+    let curve = style.curve;
     let groups = series_groups(prepared);
 
     ctx.clipped(|ctx| {
-        for (group_index, group) in groups.iter().enumerate() {
-            let mut points: Vec<Point<Pixels>> = group
-                .iter()
-                .filter_map(|(index, row)| position(prepared, ctx, row).map(|p| (index, p)))
-                .map(|(_, p)| ctx.absolute(p))
-                .collect();
-            if points.len() < 2 {
-                continue;
+        for group in groups.iter() {
+            // Plot breaks a line where a value is missing, so each run of
+            // defined points is its own path.
+            let mut runs: Vec<Vec<(usize, Point<Pixels>)>> = vec![Vec::new()];
+            for (index, row) in group {
+                let defined = !row.x_value().is_null() && !row.y_value().is_null();
+                match defined.then(|| position(prepared, ctx, row)).flatten() {
+                    Some(p) => runs
+                        .last_mut()
+                        .expect("non-empty")
+                        .push((*index, ctx.absolute(p))),
+                    None => {
+                        if !runs.last().expect("non-empty").is_empty() {
+                            runs.push(Vec::new());
+                        }
+                    }
+                }
             }
-            // A line's color is its series': a chart drawn as one line per
-            // series has a `z` value on every row, and each line takes that
-            // series' color rather than the mark's one palette entry.
-            let color = match group.first() {
-                Some((index, row)) => colors
+            for run in runs.iter().filter(|run| !run.is_empty()) {
+                let (first, _) = run[0];
+                let row = &prepared.rows[first];
+                let color = colors
                     .stroke
                     .as_ref()
-                    .and_then(|colors| colors.get(*index).copied())
-                    .unwrap_or_else(|| ctx.series_color(prepared, row)),
-                None => continue,
-            };
-            let _ = group_index;
-            let path = curve_path(&points, curve, width, ctx.appear);
-            paint::paint_path(path, color, ctx.window);
-            let _ = &mut points;
+                    .and_then(|colors| colors.get(first).copied())
+                    .unwrap_or_else(|| ctx.series_color(prepared, row));
+                let color = paint::alpha(color, ctx.row_stroke_opacity(prepared, row));
+                let points: Vec<Point<Pixels>> = run.iter().map(|(_, p)| *p).collect();
+                if points.len() >= 2 {
+                    if style.dash.is_empty() {
+                        let path = curve_path(&points, curve, width, ctx.appear);
+                        paint::paint_path(path, color, ctx.window);
+                    } else {
+                        paint::paint_dashed_path(&points, &style.dash, width, color, ctx.window);
+                    }
+                }
+                paint_markers(
+                    &points,
+                    &style.markers,
+                    color,
+                    width,
+                    ctx.theme.background,
+                    ctx.window,
+                );
+            }
         }
     });
+}
+
+/// Paint Plot's markers at a path's vertices: `markerStart` at the first,
+/// `markerMid` between, `markerEnd` at the last. A marker scales with the
+/// stroke width, as SVG's `markerUnits="strokeWidth"` does.
+pub fn paint_markers(
+    points: &[Point<Pixels>],
+    markers: &[Option<crate::mark::Marker>; 3],
+    color: Hsla,
+    stroke_width: f32,
+    background: Hsla,
+    window: &mut Window,
+) {
+    use crate::mark::Marker;
+    if points.is_empty() || markers.iter().all(Option::is_none) {
+        return;
+    }
+    let k = 0.667 * stroke_width;
+    let direction = |i: usize| -> f32 {
+        let (a, b) = if i + 1 < points.len() {
+            (points[i], points[i + 1])
+        } else if i > 0 {
+            (points[i - 1], points[i])
+        } else {
+            return 0.;
+        };
+        (b.y.as_f32() - a.y.as_f32()).atan2(b.x.as_f32() - a.x.as_f32())
+    };
+    let last = points.len() - 1;
+    for (i, at) in points.iter().enumerate() {
+        let which = if i == 0 {
+            0
+        } else if i == last {
+            2
+        } else {
+            1
+        };
+        let marker = if points.len() == 1 {
+            markers[0].or(markers[2])
+        } else {
+            markers[which]
+        };
+        let Some(marker) = marker else {
+            continue;
+        };
+        let (cx, cy) = (at.x.as_f32(), at.y.as_f32());
+        let rotate = |x: f32, y: f32, angle: f32| {
+            let (s, c) = angle.sin_cos();
+            point(px(cx + (x * c - y * s) * k), px(cy + (x * s + y * c) * k))
+        };
+        match marker {
+            Marker::Dot => {
+                paint::paint_fill(&paint::circle_points(*at, 2.5 * k, 20), color, window)
+            }
+            Marker::CircleFill => {
+                paint::paint_fill(&paint::circle_points(*at, 3. * k, 20), color, window);
+                let mut ring = paint::circle_points(*at, 3. * k, 20);
+                ring.push(ring[0]);
+                paint::paint_stroke(&ring, 1.5 * k, background, window);
+            }
+            Marker::CircleStroke => {
+                paint::paint_fill(&paint::circle_points(*at, 3. * k, 20), background, window);
+                let mut ring = paint::circle_points(*at, 3. * k, 20);
+                ring.push(ring[0]);
+                paint::paint_stroke(&ring, 1.5 * k, color, window);
+            }
+            Marker::Arrow | Marker::ArrowReverse => {
+                let mut angle = direction(i);
+                if marker == Marker::ArrowReverse && which == 0 {
+                    angle += std::f32::consts::PI;
+                }
+                let chevron = [
+                    rotate(-1.5, -3., angle),
+                    rotate(1.5, 0., angle),
+                    rotate(-1.5, 3., angle),
+                ];
+                paint::paint_stroke(&chevron, 1.5 * k, color, window);
+            }
+            Marker::Tick | Marker::TickX | Marker::TickY => {
+                let angle = match marker {
+                    Marker::TickX => std::f32::consts::FRAC_PI_2,
+                    Marker::TickY => 0.,
+                    _ => direction(i),
+                };
+                let scale = stroke_width;
+                let rot = |x: f32, y: f32| {
+                    let (s, c) = angle.sin_cos();
+                    point(
+                        px(cx + (x * c - y * s) * scale),
+                        px(cy + (x * s + y * c) * scale),
+                    )
+                };
+                paint::paint_stroke(
+                    &[rot(0., -3.), rot(0., 3.)],
+                    stroke_width.min(1.),
+                    color,
+                    window,
+                );
+            }
+        }
+    }
 }
 
 fn draw_areas_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
@@ -539,8 +644,19 @@ fn draw_bars_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
 
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let Some(center) = ctx.frame.x.scale.position(row.x_value()) else {
+            // A bar without an x spans the frame, Plot's `barY` with only y.
+            let full = row.x_value().is_null() && row.x1.is_none();
+            let Some(center) = (if full {
+                Some(ctx.frame.plot.size.width.as_f32() / 2.)
+            } else {
+                ctx.frame.x.scale.position(row.x_value())
+            }) else {
                 continue;
+            };
+            let width = if full {
+                ctx.frame.plot.size.width.as_f32()
+            } else {
+                width
             };
             let Some((start, end)) = row.y_interval() else {
                 continue;
@@ -551,8 +667,14 @@ fn draw_bars_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             ) else {
                 continue;
             };
-            let x0 = center - width / 2.;
-            let x1 = center + width / 2.;
+            let inset = prepared.mark.style.inset.unwrap_or(0.);
+            let x0 = center - width / 2. + inset;
+            let x1 = center + width / 2. - inset;
+            let (y0, y1) = {
+                let (lo, hi) = (y0.min(y1), y0.max(y1));
+                let inset = inset.min((hi - lo) / 2.);
+                (lo + inset, hi - inset)
+            };
             let rect = paint::rect_between(
                 ctx.absolute(point(px(x0), px(y0))),
                 ctx.absolute(point(px(x1), px(y1))),
@@ -583,8 +705,19 @@ fn draw_bars_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
 
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let Some(center) = ctx.frame.y.scale.position(row.y_value()) else {
+            // A bar without a y spans the frame, Plot's `barX` with only x.
+            let full = row.y_value().is_null() && row.y1.is_none();
+            let Some(center) = (if full {
+                Some(ctx.frame.plot.size.height.as_f32() / 2.)
+            } else {
+                ctx.frame.y.scale.position(row.y_value())
+            }) else {
                 continue;
+            };
+            let width = if full {
+                ctx.frame.plot.size.height.as_f32()
+            } else {
+                width
             };
             let Some((start, end)) = row.x_interval() else {
                 continue;
@@ -595,8 +728,14 @@ fn draw_bars_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             ) else {
                 continue;
             };
-            let y0 = center - width / 2.;
-            let y1 = center + width / 2.;
+            let inset = prepared.mark.style.inset.unwrap_or(0.);
+            let y0 = center - width / 2. + inset;
+            let y1 = center + width / 2. - inset;
+            let (x0, x1) = {
+                let (lo, hi) = (x0.min(x1), x0.max(x1));
+                let inset = inset.min((hi - lo) / 2.);
+                (lo + inset, hi - inset)
+            };
             let rect = paint::rect_between(
                 ctx.absolute(point(px(x0), px(y0))),
                 ctx.absolute(point(px(x1), px(y1))),
@@ -765,13 +904,48 @@ fn draw_rules_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let width = prepared.mark.style.stroke_width;
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
+            // A rule reads its own `x`; an `x1` stands in when only the
+            // interval is set.
             let Some(x) = ctx.frame.x.scale.position(row.x_value()) else {
                 continue;
             };
-            let start = ctx.absolute(point(px(x), px(0.)));
-            let end = ctx.absolute(point(px(x), px(height)));
+            // Plot's ruleX spans `y1`..`y2` when given them, else the frame.
+            let (top, bottom) = match (&row.y1, &row.y2) {
+                (Some(y1), Some(y2)) => {
+                    let (Some(a), Some(b)) = (
+                        ctx.frame.y.scale.position(y1),
+                        ctx.frame.y.scale.position(y2),
+                    ) else {
+                        continue;
+                    };
+                    (a, b)
+                }
+                _ => (0., height),
+            };
+            // Plot draws a rule from y1 to y2: bottom to top in pixels.
+            let start = ctx.absolute(point(px(x), px(bottom)));
+            let end = ctx.absolute(point(px(x), px(top)));
             let color = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
-            paint::paint_stroke(&[start, end], width, color, ctx.window);
+            if prepared.mark.style.dash.is_empty() {
+                paint::paint_stroke(&[start, end], width, color, ctx.window);
+            } else {
+                paint::paint_dashed(
+                    start,
+                    end,
+                    &prepared.mark.style.dash,
+                    width,
+                    color,
+                    ctx.window,
+                );
+            }
+            paint_markers(
+                &[start, end],
+                &prepared.mark.style.markers,
+                color,
+                width,
+                ctx.theme.background,
+                ctx.window,
+            );
         }
     });
 }
@@ -785,60 +959,158 @@ fn draw_rules_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             let Some(y) = ctx.frame.y.scale.position(row.y_value()) else {
                 continue;
             };
-            let start = ctx.absolute(point(px(0.), px(y)));
-            let end = ctx.absolute(point(px(width), px(y)));
+            let (left, right) = match (&row.x1, &row.x2) {
+                (Some(x1), Some(x2)) => {
+                    let (Some(a), Some(b)) = (
+                        ctx.frame.x.scale.position(x1),
+                        ctx.frame.x.scale.position(x2),
+                    ) else {
+                        continue;
+                    };
+                    (a, b)
+                }
+                _ => (0., width),
+            };
+            let start = ctx.absolute(point(px(left), px(y)));
+            let end = ctx.absolute(point(px(right), px(y)));
             let color = paint::alpha(colors.stroke(index), ctx.row_stroke_opacity(prepared, row));
-            paint::paint_stroke(&[start, end], stroke_width, color, ctx.window);
+            if prepared.mark.style.dash.is_empty() {
+                paint::paint_stroke(&[start, end], stroke_width, color, ctx.window);
+            } else {
+                paint::paint_dashed(
+                    start,
+                    end,
+                    &prepared.mark.style.dash,
+                    stroke_width,
+                    color,
+                    ctx.window,
+                );
+            }
+            paint_markers(
+                &[start, end],
+                &prepared.mark.style.markers,
+                color,
+                stroke_width,
+                ctx.theme.background,
+                ctx.window,
+            );
         }
     });
 }
 
 fn draw_texts(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
-    let font = gpui::font(ctx.theme.font_family.clone());
-    // Text has no outline: Plot's `text` mark paints its glyphs in `fill`,
-    // and a caller that set only `stroke` (a dark label over a bar) means the
-    // glyph color, not an outline.
+    use crate::mark::{LineAnchor, TextAnchor};
+    let style = &prepared.mark.style;
+    let mut font = gpui::font(ctx.theme.font_family.clone());
+    if style.italic {
+        font.style = gpui::FontStyle::Italic;
+    }
+    let weight = style
+        .font_weight
+        .map(|w| gpui::FontWeight(w as f32))
+        .unwrap_or(gpui::FontWeight::NORMAL);
+    // Plot's text paints its glyphs in `fill`, `currentColor` by default; a
+    // stroke alone (a halo) does not color the glyphs.
     let colors = Colors::resolve(prepared, ctx);
-    let size = px(11.);
-    let (dx, dy) = (prepared.mark.style.dx, prepared.mark.style.dy);
+    let size = px(style.font_size.unwrap_or(10.));
+    let (dx, dy) = (style.dx, style.dy);
+    let values = prepared
+        .rows
+        .first()
+        .is_some_and(|row| row.row.get(crate::table::VALUE).is_some());
 
-    // Text is not clipped to the plot: a label above the first or last bar
-    // overhangs the plot's edge, and Plot draws it whole. Clipping it to the
-    // plot would cut the label in half.
+    // Text is not clipped to the plot: Plot draws a label whole even where it
+    // overhangs the frame.
     for (index, row) in prepared.rows.iter().enumerate() {
         let Some(position) = position(prepared, ctx, row) else {
             continue;
         };
         let color = if prepared.mark.channels.fill.is_some() {
             colors.fill(index)
-        } else if prepared.mark.channels.stroke.is_some() {
-            colors.stroke(index)
         } else {
-            prepared.mark.style.fill
+            ctx.colors.default_fill(prepared, ctx.mark_index)
         };
-        let text = prepared
-            .mark
-            .channels
-            .text
-            .as_ref()
-            .map(|channel| channel.read(&row.row).label())
-            .or_else(|| Some(row.y_value().label()))
-            .unwrap_or_else(|| SharedString::from(""));
+        let color = paint::alpha(color, ctx.row_fill_opacity(prepared, row));
+        let text = match &prepared.mark.channels.text {
+            Some(channel) => channel.read(&row.row),
+            None if values => row.row.value(crate::table::VALUE),
+            None => Value::Null,
+        };
+        let text = match (&text, &prepared.mark.text_format) {
+            (Value::Null, _) => continue,
+            (value, Some(format)) => SharedString::from(format.format(value)),
+            (value, None) => value.label(),
+        };
         if text.is_empty() {
             continue;
         }
-        let label = Label::new(
-            text,
-            size,
-            color,
+        // Plot splits on newlines and, given a `lineWidth` in ems, wraps.
+        let mut lines: Vec<String> = Vec::new();
+        for line in text.split('\n') {
+            match style.line_width {
+                Some(ems) => lines.extend(wrap(line, ems, size.as_f32(), ctx.window, &font)),
+                None => lines.push(line.to_string()),
+            }
+        }
+        let line_height = size.as_f32() * 1.2;
+        let block = line_height * lines.len() as f32;
+        let origin = ctx.absolute(position);
+        let top = match style.line_anchor {
+            LineAnchor::Top => origin.y.as_f32() + dy,
+            LineAnchor::Middle => origin.y.as_f32() + dy - block / 2.,
+            LineAnchor::Bottom => origin.y.as_f32() + dy - block,
+        };
+        let align = match style.text_anchor {
+            TextAnchor::Start => TextAlign::Left,
+            TextAnchor::Middle => TextAlign::Center,
+            TextAnchor::End => TextAlign::Right,
+        };
+        for (i, line) in lines.into_iter().enumerate() {
+            let label = Label::new(line.into(), size, color, weight, font.clone(), ctx.window);
+            let y = top + i as f32 * line_height + (line_height - label.height.as_f32()) / 2.;
+            label.paint_at(
+                point(px(origin.x.as_f32() + dx), px(y)),
+                align,
+                None,
+                ctx.window,
+                ctx.cx,
+            );
+        }
+    }
+}
+
+/// Wrap `text` to `ems` em-widths, at spaces, as Plot's `lineWidth` does.
+fn wrap(text: &str, ems: f32, size: f32, window: &mut Window, font: &gpui::Font) -> Vec<String> {
+    let limit = ems * size;
+    let measure = |text: &str, window: &mut Window| {
+        Label::new(
+            text.to_string().into(),
+            px(size),
+            Hsla::black(),
             gpui::FontWeight::NORMAL,
             font.clone(),
-            ctx.window,
-        );
-        let origin = ctx.absolute(position);
-        let origin = point(px(origin.x.as_f32() + dx), px(origin.y.as_f32() + dy));
-        label.paint_at(origin, TextAlign::Center, None, ctx.window, ctx.cx);
+            window,
+        )
+        .width
+        .as_f32()
+    };
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ') {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if !current.is_empty() && measure(&candidate, window) > limit {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+        } else {
+            current = candidate;
+        }
     }
+    lines.push(current);
+    lines
 }
 
 fn draw_ticks_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
@@ -1252,18 +1524,39 @@ pub fn position_in(
             px(frame.plot.size.height.as_f32() * fy as f32),
         ));
     }
-    let placed = if prepared.mark.kind.is_x_only()
-        && prepared.mark.kind.cross_axis() == CrossAxis::Anchor
-    {
-        let x = frame.x.scale.position(row.x_value())?;
-        Some(point(px(x), px(frame.plot.size.height.as_f32() / 2.)))
-    } else if prepared.mark.kind.is_y_only() && prepared.mark.kind.cross_axis() == CrossAxis::Anchor
-    {
-        let y = frame.y.scale.position(row.y_value())?;
-        Some(point(px(frame.plot.size.width.as_f32() / 2.), px(y)))
+    // A missing coordinate sits where the mark's `frameAnchor` says, the
+    // frame's middle by default: Plot's dot with only an `x`, or a `dotX`.
+    use crate::mark::FrameAnchor;
+    let anchor = prepared.mark.style.frame_anchor.unwrap_or_default();
+    let (width, height) = (
+        frame.plot.size.width.as_f32(),
+        frame.plot.size.height.as_f32(),
+    );
+    let anchor_x = match anchor {
+        FrameAnchor::Left | FrameAnchor::TopLeft | FrameAnchor::BottomLeft => 0.,
+        FrameAnchor::Right | FrameAnchor::TopRight | FrameAnchor::BottomRight => width,
+        _ => width / 2.,
+    };
+    let anchor_y = match anchor {
+        FrameAnchor::Top | FrameAnchor::TopLeft | FrameAnchor::TopRight => 0.,
+        FrameAnchor::Bottom | FrameAnchor::BottomLeft | FrameAnchor::BottomRight => height,
+        _ => height / 2.,
+    };
+    let only_x =
+        prepared.mark.kind.is_x_only() && prepared.mark.kind.cross_axis() == CrossAxis::Anchor;
+    let only_y =
+        prepared.mark.kind.is_y_only() && prepared.mark.kind.cross_axis() == CrossAxis::Anchor;
+    let x = if only_y || row.x_value().is_null() {
+        anchor_x
     } else {
-        frame.point(row.x_value(), row.y_value())
-    }?;
+        frame.x.scale.position(row.x_value())?
+    };
+    let y = if only_x || row.y_value().is_null() {
+        anchor_y
+    } else {
+        frame.y.scale.position(row.y_value())?
+    };
+    let placed = point(px(x), px(y));
 
     // A dodged row carries its packed position across the axis it spreads
     // along, which replaces that coordinate rather than offsetting it.
@@ -1790,148 +2083,6 @@ fn draw_tips(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         );
         label.paint_at(text_at, TextAlign::Left, None, ctx.window, ctx.cx);
     }
-}
-
-/// Plot's `axisX`: an x axis drawn as a mark, so it can sit inside the frame
-/// or take a color of its own rather than the plot-level axis.
-fn draw_axis_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
-    let color = furniture_color(prepared, ctx.theme.axis);
-    let frame = ctx.frame;
-    let plot = frame.plot;
-    // The axis line along the bottom of the plot, with a tick at each x tick.
-    ctx.clipped(|ctx| {
-        let baseline = plot.origin.y + plot.size.height;
-        paint::paint_stroke(
-            &[
-                point(plot.origin.x, baseline),
-                point(plot.origin.x + plot.size.width, baseline),
-            ],
-            ctx.theme.line_width.as_f32(),
-            color,
-            ctx.window,
-        );
-        for tick in frame.x.ticks.iter() {
-            let x = plot.origin.x + px(tick.position);
-            paint::paint_stroke(
-                &[point(x, baseline), point(x, baseline - px(4.))],
-                1.,
-                color,
-                ctx.window,
-            );
-        }
-    });
-}
-
-/// Plot's `axisY`: a y axis drawn as a mark.
-fn draw_axis_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
-    let color = furniture_color(prepared, ctx.theme.axis);
-    let frame = ctx.frame;
-    let plot = frame.plot;
-    ctx.clipped(|ctx| {
-        paint::paint_stroke(
-            &[
-                point(plot.origin.x, plot.origin.y),
-                point(plot.origin.x, plot.origin.y + plot.size.height),
-            ],
-            ctx.theme.line_width.as_f32(),
-            color,
-            ctx.window,
-        );
-        for tick in frame.y.ticks.iter() {
-            let y = plot.origin.y + px(tick.position);
-            paint::paint_stroke(
-                &[point(plot.origin.x, y), point(plot.origin.x + px(4.), y)],
-                1.,
-                color,
-                ctx.window,
-            );
-        }
-    });
-}
-
-/// Plot's `gridX`: a vertical grid line at each x tick.
-fn draw_grid_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
-    let color = grid_color(prepared, ctx);
-    let frame = ctx.frame;
-    let plot = frame.plot;
-    ctx.clipped(|ctx| {
-        for tick in frame.x.ticks.iter() {
-            let x = plot.origin.x + px(tick.position);
-            paint::paint_stroke(
-                &[
-                    point(x, plot.origin.y),
-                    point(x, plot.origin.y + plot.size.height),
-                ],
-                ctx.theme.line_width.as_f32(),
-                color,
-                ctx.window,
-            );
-        }
-    });
-}
-
-/// Plot's `gridY`: a horizontal grid line at each y tick.
-fn draw_grid_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
-    let color = grid_color(prepared, ctx);
-    let frame = ctx.frame;
-    let plot = frame.plot;
-    ctx.clipped(|ctx| {
-        for tick in frame.y.ticks.iter() {
-            let y = plot.origin.y + px(tick.position);
-            paint::paint_stroke(
-                &[
-                    point(plot.origin.x, y),
-                    point(plot.origin.x + plot.size.width, y),
-                ],
-                ctx.theme.line_width.as_f32(),
-                color,
-                ctx.window,
-            );
-        }
-    });
-}
-
-/// The color a furniture mark draws in: the stroke the mark sets, else the
-/// theme's color for that piece of furniture.
-fn furniture_color(prepared: &PreparedMark, fallback: Hsla) -> Hsla {
-    match &prepared.mark.channels.stroke {
-        Some(channel) => channel.read(&crate::table::Table::empty()),
-        None => {
-            let color = prepared.mark.style.stroke;
-            // A mark that never set a stroke still carries the style's default,
-            // so the theme's color for this piece of furniture wins unless the
-            // mark asked for one: the defaults are what "no stroke" looks like.
-            if color == crate::mark::MarkStyle::default().stroke {
-                fallback
-            } else {
-                color
-            }
-        }
-    }
-}
-fn grid_color(prepared: &PreparedMark, ctx: &DrawContext<'_>) -> Hsla {
-    furniture_color(prepared, ctx.theme.grid)
-}
-
-/// Plot's `frame`: the plot's outline, drawn as a mark so a chart can turn the
-/// frame on without turning on the axes.
-fn draw_frame(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
-    let color = grid_color(prepared, ctx);
-    let plot = ctx.frame.plot;
-    let width = prepared.mark.style.stroke_width;
-    ctx.clipped(|ctx| {
-        let corners = [
-            point(plot.origin.x, plot.origin.y),
-            point(plot.origin.x + plot.size.width, plot.origin.y),
-            point(
-                plot.origin.x + plot.size.width,
-                plot.origin.y + plot.size.height,
-            ),
-            point(plot.origin.x, plot.origin.y + plot.size.height),
-            point(plot.origin.x, plot.origin.y),
-        ];
-        paint::paint_stroke(&corners, width, color, ctx.window);
-    });
 }
 
 /// The WCAG contrast ratio between two colors' relative luminances, so a

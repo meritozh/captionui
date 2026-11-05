@@ -158,7 +158,7 @@ fn heatmap(plot: Plot, x: &str, y: &str) -> Plot {
     // A rect spanning each cell, filled by its count through a sequential ramp.
     Plot::new(rows)
         .rect(|mark| mark.x1("x0").x2("x1").y1("y0").y2("y1"))
-        .color(
+        .color_by(
             "count",
             crate::scale::ColorRange::Continuous(vec![
                 Hsla {

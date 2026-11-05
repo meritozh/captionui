@@ -6,9 +6,11 @@
 //! unions their values to build the scales. Drawing then only reads pixels.
 
 pub(crate) mod basic;
-pub(crate) mod color;
+pub mod color;
 pub(crate) mod delaunay;
+pub(crate) mod furniture;
 pub(crate) mod radial;
+pub mod stack;
 pub(crate) mod stat;
 
 use gpui::{Hsla, SharedString};
@@ -55,6 +57,11 @@ pub struct PreparedRow {
     pub symbol: Option<crate::style::Symbol>,
     /// The row's opacity from its `opacity` channel, when it has one.
     pub opacity: Option<f32>,
+    /// The data value of a scaled `r` channel, before the radius scale.
+    pub r_value: Option<f64>,
+    /// The data value of a scaled `opacity` channel (or a bin's or group's
+    /// `fillOpacity` output), before the opacity scale.
+    pub opacity_value: Option<f64>,
     /// Where the row sits across the axis a dodge packs along, in pixels from
     /// that axis's start. Set by [`apply_dodge`] once the frame is known.
     pub dodge_offset: Option<f32>,
@@ -106,18 +113,42 @@ impl PreparedRow {
     }
 }
 
-/// Resolve every mark against `data`, for an unfaceted plot.
+/// Resolve every mark against its data, for an unfaceted plot: the mark's
+/// own data when it has some, else the plot's `data`.
 pub fn prepare(data: &Dataset, marks: &[Mark]) -> Vec<PreparedMark> {
-    marks.iter().map(|mark| prepare_mark(data, mark)).collect()
+    marks
+        .iter()
+        .map(|mark| prepare_mark(mark.data.as_ref().unwrap_or(data), mark))
+        .collect()
 }
 
-/// Resolve every mark against the part of `data` that lands in each facet.
+/// The facet channels a mark is split by: its own `fx`/`fy`, else — for a
+/// mark reading the plot's data — the plot's facet fields. A mark with its
+/// own data and no facet channels of its own is not faceted: Plot repeats it
+/// in every facet (its `facet: "auto"`).
+fn facet_channels(
+    mark: &Mark,
+    fx: Option<&str>,
+    fy: Option<&str>,
+) -> (Option<crate::table::Channel>, Option<crate::table::Channel>) {
+    if mark.fx.is_some() || mark.fy.is_some() {
+        return (mark.fx.clone(), mark.fy.clone());
+    }
+    if mark.data.is_some() {
+        return (None, None);
+    }
+    let field = |name: Option<&str>| name.map(|name| crate::table::Channel::Field(name.into()));
+    (field(fx), field(fy))
+}
+
+/// Resolve every mark against the part of its data that lands in each facet.
 ///
-/// A mark's rows are split by the facet fields, and each facet's share then
-/// resolves on its own, so a stack, bin or reducer summarizes within its
-/// facet. The facets come back in the grid's order, one list of marks per
-/// facet, with the facets that hold no rows; a figure that is not faceted has
-/// one facet holding every row and no empty facets.
+/// A mark's rows are split by its facet channels (see [`facet_channels`]),
+/// and each facet's share then resolves on its own, so a stack, bin or
+/// reducer summarizes within its facet; a mark with no facet channels draws
+/// all its rows in every facet. The facets come back in the grid's order, one
+/// list of marks per facet, with which facets hold any faceted rows; a figure
+/// that is not faceted has one facet holding every row and no empty facets.
 pub fn prepare_facets(
     data: &Dataset,
     marks: &[Mark],
@@ -128,24 +159,102 @@ pub fn prepare_facets(
     if !grid.is_faceted() {
         return (vec![prepare(data, marks)], Vec::new());
     }
-    let (groups, populated) = grid.partition(data, fx, fy);
     let marks = pin_bin_edges(data, marks);
-    let prepared = groups
-        .into_iter()
-        .map(|rows| prepare(&Dataset::new(rows), &marks))
-        .collect();
+    let cells = grid.cells.len();
+    let mut prepared: Vec<Vec<PreparedMark>> = vec![Vec::with_capacity(marks.len()); cells];
+    let mut populated = vec![false; cells];
+    // A furniture mark faceted by constants reads one placeholder record,
+    // which lands in the facet the constants name.
+    let placeholder = Dataset::new([Table::empty()]);
+    for mark in &marks {
+        let source = if mark.kind.is_furniture() && mark.data.is_none() {
+            &placeholder
+        } else {
+            mark.data.as_ref().unwrap_or(data)
+        };
+        let (mark_fx, mark_fy) = facet_channels(mark, fx, fy);
+        if mark_fx.is_none() && mark_fy.is_none() {
+            let resolved = prepare_mark(source, mark);
+            for cell in prepared.iter_mut() {
+                cell.push(resolved.clone());
+            }
+            continue;
+        }
+        let groups = grid.partition_channels(source, mark_fx.as_ref(), mark_fy.as_ref());
+        for (cell, rows) in groups.into_iter().enumerate() {
+            populated[cell] |= !rows.is_empty();
+            prepared[cell].push(prepare_mark(&Dataset::new(rows), mark));
+        }
+    }
     (prepared, populated)
 }
 
+/// A mark over plain values or tuples reads them by default, as Plot's marks
+/// do: `Plot.ruleY([0])` puts `y` on the value, `Plot.dotX(numbers)` puts
+/// `x` on it, and `Plot.line([[0, 1], [1, 2]])` reads `x` and `y` from each
+/// pair.
+fn with_value_defaults(mark: &Mark, data: &Dataset) -> Option<Mark> {
+    use crate::table::Channel;
+    let channels = &mark.channels;
+    let unset_x = channels.x.is_none() && channels.x1.is_none() && channels.x2.is_none();
+    let unset_y = channels.y.is_none() && channels.y1.is_none() && channels.y2.is_none();
+    if data.is_values() {
+        let category = mark.kind.category();
+        let mut mark = mark.clone();
+        match category.single_axis {
+            Some(Axis::X) if unset_x => mark.channels.x = Some(Channel::identity()),
+            Some(Axis::Y) if unset_y => mark.channels.y = Some(Channel::identity()),
+            _ => {
+                // The marks without a single axis that Plot reads a value
+                // with: a rule or tick across one axis, a bar's length.
+                match mark.kind {
+                    MarkKind::RuleX
+                    | MarkKind::TickX
+                    | MarkKind::BarX
+                    | MarkKind::GridX
+                    | MarkKind::AxisX
+                        if unset_x =>
+                    {
+                        mark.channels.x = Some(Channel::identity())
+                    }
+                    MarkKind::RuleY
+                    | MarkKind::TickY
+                    | MarkKind::BarY
+                    | MarkKind::GridY
+                    | MarkKind::AxisY
+                        if unset_y =>
+                    {
+                        mark.channels.y = Some(Channel::identity())
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        return Some(mark);
+    }
+    if data.is_tuples() && (unset_x || unset_y) {
+        let mut mark = mark.clone();
+        if unset_x {
+            mark.channels.x = Some(Channel::Field("0".into()));
+        }
+        if unset_y {
+            mark.channels.y = Some(Channel::Field("1".into()));
+        }
+        return Some(mark);
+    }
+    None
+}
+
 fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
+    let defaulted = with_value_defaults(mark, data);
+    let mark = defaulted.as_ref().unwrap_or(mark);
     // A furniture mark draws the plot's axes, grid or frame rather than data,
     // so it reads no channels and resolves no rows.
-    if mark.kind.is_furniture() {
-        return PreparedMark {
-            mark: mark.clone(),
-            rows: Vec::new(),
-            dodge_along_x: false,
-        };
+    // A furniture mark without data reads one placeholder record, which its
+    // constant channels (`axisY({x: 0})`, `gridX({stroke: "white"})`) read.
+    if mark.kind.is_furniture() && mark.data.is_none() && data.len() != 1 {
+        let placeholder = Dataset::new([Table::empty()]);
+        return prepare_mark(&placeholder, mark);
     }
     let channels = &mark.channels;
 
@@ -154,7 +263,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // the channels may read. Plot applies them to the mark's data in the same
     // order, and a mark's `shuffle` is only a reordering of what is left.
     let mut source = data.clone();
-    if let Some(config) = &mark.select {
+    if let Some(config) = mark.select.as_ref().filter(|config| config.axis.is_none()) {
         let group = config.group.as_deref().map(|field| field.to_string());
         let selector = match (&config.selector, config.axis) {
             // A select over an axis reads that axis's channel, which may be a
@@ -254,6 +363,14 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     if mark.normalize {
         normalize_rows(&mut rows);
     }
+    if let Some((axis, basis)) = mark.normalize_by {
+        stack::normalize(&mut rows, axis, basis);
+    }
+    // A select over an axis (`selectMinX`) reads the mark's resolved channel,
+    // after the transforms that rewrite it, per `z` series (or group field).
+    if let Some(config) = mark.select.as_ref().filter(|config| config.axis.is_some()) {
+        rows = select_rows(rows, config);
+    }
 
     // A grouping collapses the rows sharing a category into one row each,
     // Plot's `groupX`/`groupY`/`groupZ`.
@@ -278,6 +395,9 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     if mark.stack.is_some() {
         rows = stack_rows(rows, mark);
     }
+    if let Some(spec) = stack::effective_stack(mark) {
+        stack::stack(&mut rows, &spec);
+    }
 
     // Statistical marks summarize their category themselves, so they keep the
     // raw rows and group at draw time.
@@ -286,6 +406,195 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         mark: mark.clone(),
         rows,
         dodge_along_x: false,
+    }
+}
+
+/// Keep the row of each group with the least or greatest value on the
+/// selector's axis, Plot's `selectMinX` and its siblings.
+fn select_rows(rows: Vec<PreparedRow>, config: &crate::mark::SelectConfig) -> Vec<PreparedRow> {
+    let along_x = config.axis == Some(Axis::X);
+    let want_max = matches!(config.selector, Selector::Max(_));
+    let mut best: Vec<(crate::value::ValueKey, usize, f64)> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let group = match &config.group {
+            Some(field) => row.row.value(field).key(),
+            None => row
+                .z
+                .as_ref()
+                .map(Value::key)
+                .unwrap_or_else(|| Value::Null.key()),
+        };
+        let Some(v) = (if along_x {
+            row.x_value()
+        } else {
+            row.y_value()
+        })
+        .as_number() else {
+            continue;
+        };
+        match best.iter_mut().find(|(g, _, _)| *g == group) {
+            Some(entry) => {
+                if (want_max && v > entry.2) || (!want_max && v < entry.2) {
+                    entry.1 = i;
+                    entry.2 = v;
+                }
+            }
+            None => best.push((group, i, v)),
+        }
+    }
+    let keep: std::collections::HashSet<usize> = best.into_iter().map(|(_, i, _)| i).collect();
+    rows.into_iter()
+        .enumerate()
+        .filter(|(i, _)| keep.contains(i))
+        .map(|(_, row)| row)
+        .collect()
+}
+
+/// Put every scaled `r` and `opacity` value through Plot's scales: a sqrt
+/// radius scale over `[0, max]` whose first quartile is three pixels (capped
+/// so the largest dot is 30), and a linear opacity scale from `[0, max]` to
+/// `[0, 1]`. Both span every facet, so sizes compare across the figure.
+pub fn apply_quantity_scales(
+    facets: &mut [Vec<PreparedMark>],
+    r: &crate::options::ScaleOptions,
+    opacity: &crate::options::ScaleOptions,
+) {
+    let values =
+        |facets: &[Vec<PreparedMark>], read: fn(&PreparedRow) -> Option<f64>| -> Vec<f64> {
+            facets
+                .iter()
+                .flatten()
+                .flat_map(|mark| mark.rows.iter().filter_map(read))
+                .filter(|v| v.is_finite())
+                .collect()
+        };
+    let radii = values(facets, |row| row.r_value);
+    if !radii.is_empty() {
+        let max = radii.iter().copied().fold(0., f64::max);
+        let [d0, d1] = r.numeric_domain().unwrap_or([0., max]);
+        let range = match &r.range {
+            Some(range) if range.len() >= 2 => [range[0], range[1]],
+            _ => {
+                // Plot's `inferRadialRange`: the median of the marks' first
+                // quartiles of positive values maps to three pixels.
+                let mut positive: Vec<f64> = radii.iter().copied().filter(|v| *v > 0.).collect();
+                positive.sort_by(f64::total_cmp);
+                let q25 = positive
+                    .get(((positive.len().max(1) - 1) as f64 * 0.25).round() as usize)
+                    .copied()
+                    .unwrap_or(1.)
+                    .max(f64::MIN_POSITIVE);
+                let range = [
+                    3. * (d0 / q25).max(0.).sqrt(),
+                    3. * (d1 / q25).max(0.).sqrt(),
+                ];
+                let k = 30. / range[1].max(f64::MIN_POSITIVE);
+                if k < 1. {
+                    [range[0] * k, range[1] * k]
+                } else {
+                    range
+                }
+            }
+        };
+        let kind = r.r#type.unwrap_or(crate::options::ScaleType::Sqrt);
+        let t = |v: f64| match kind {
+            crate::options::ScaleType::Linear => v,
+            crate::options::ScaleType::Pow => v.signum() * v.abs().powf(r.exponent.unwrap_or(1.)),
+            crate::options::ScaleType::Log => v.max(f64::MIN_POSITIVE).ln(),
+            _ => v.signum() * v.abs().sqrt(),
+        };
+        let (t0, t1) = (t(d0), t(d1));
+        for row in facets
+            .iter_mut()
+            .flatten()
+            .flat_map(|mark| mark.rows.iter_mut())
+        {
+            if let Some(value) = row.r_value {
+                let ratio = if t1 == t0 {
+                    1.
+                } else {
+                    (t(value) - t0) / (t1 - t0)
+                };
+                row.r = Some((range[0] + (range[1] - range[0]) * ratio).max(0.) as f32);
+            }
+        }
+    }
+    let opacities = values(facets, |row| row.opacity_value);
+    if !opacities.is_empty() {
+        let max = opacities.iter().copied().fold(0., f64::max);
+        let [d0, d1] = opacity.numeric_domain().unwrap_or([0., max]);
+        let range = match &opacity.range {
+            Some(range) if range.len() >= 2 => [range[0], range[1]],
+            _ => [0., 1.],
+        };
+        for row in facets
+            .iter_mut()
+            .flatten()
+            .flat_map(|mark| mark.rows.iter_mut())
+        {
+            if let Some(value) = row.opacity_value {
+                let ratio = if d1 == d0 {
+                    1.
+                } else {
+                    (value - d0) / (d1 - d0)
+                };
+                row.opacity = Some((range[0] + (range[1] - range[0]) * ratio).clamp(0., 1.) as f32);
+            }
+        }
+    }
+}
+
+/// Put every symbol channel that names categories rather than symbols
+/// through Plot's ordinal symbol scale: the sorted domain (or the `symbol`
+/// options' domain) onto d3's fill symbols for a filled dot, its stroke
+/// symbols otherwise.
+pub fn apply_symbol_scale(
+    facets: &mut [Vec<PreparedMark>],
+    options: &crate::options::ScaleOptions,
+) {
+    use crate::style::{SYMBOLS_FILL, SYMBOLS_STROKE};
+    let mut values: Vec<Value> = Vec::new();
+    for mark in facets.iter().flatten() {
+        if let Some(channel) = &mark.mark.channels.symbol {
+            for row in &mark.rows {
+                let value = channel.read(&row.row);
+                if !value.is_null() && symbol_from_value(&value).is_none() {
+                    values.push(value);
+                }
+            }
+        }
+    }
+    if values.is_empty() {
+        return;
+    }
+    let domain: Vec<crate::value::ValueKey> = match &options.domain {
+        Some(domain) => domain.iter().map(Value::key).collect(),
+        None => {
+            let mut keys = crate::scale::dedup(values.iter().map(Value::key));
+            keys.sort();
+            keys
+        }
+    };
+    for mark in facets.iter_mut().flatten() {
+        let Some(channel) = mark.mark.channels.symbol.clone() else {
+            continue;
+        };
+        if constant_symbol(&channel).is_some() {
+            continue;
+        }
+        let range = if mark.mark.channels.fill.is_some() {
+            SYMBOLS_FILL
+        } else {
+            SYMBOLS_STROKE
+        };
+        for row in mark.rows.iter_mut() {
+            let value = channel.read(&row.row);
+            if row.symbol.is_none()
+                && let Some(index) = domain.iter().position(|key| *key == value.key())
+            {
+                row.symbol = Some(range[index % range.len()]);
+            }
+        }
     }
 }
 
@@ -378,6 +687,28 @@ fn derive_intervals(
             *y1 = Some(interval_value(y, start));
             *y2 = Some(interval_value(y, end));
         }
+    }
+    // Plot's `maybeOptionalZero` for rules: a `ruleX` given a `y` spans from
+    // zero to it, and one given only `y1` or `y2` spans from zero to that.
+    let optional_zero = |v: &Value, start: &mut Option<Value>, end: &mut Option<Value>| {
+        if !v.is_null() && start.is_none() && end.is_none() {
+            *start = Some(Value::Number(0.));
+            *end = Some(v.clone());
+        } else if v.is_null() {
+            match (start.is_some(), end.is_some()) {
+                (true, false) => {
+                    *end = start.take();
+                    *start = Some(Value::Number(0.));
+                }
+                (false, true) => *start = Some(Value::Number(0.)),
+                _ => {}
+            }
+        }
+    };
+    match mark.kind {
+        MarkKind::RuleX => optional_zero(y, y1, y2),
+        MarkKind::RuleY => optional_zero(x, x1, x2),
+        _ => {}
     }
     match mark.kind {
         MarkKind::BarY | MarkKind::AreaY | MarkKind::WaffleY if unset(y1, y2) && !y.is_null() => {
@@ -476,51 +807,46 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
             .map(|channel| channel.read(row))
             .filter(|v| !v.is_null())
             .map(|v| v.label()),
-        r: channels.r.as_ref().map(|channel| channel.read(row)),
-        symbol: channels
-            .symbol
+        r: channels
+            .r
             .as_ref()
-            .map(|channel| symbol_from_value(&channel.read(row)))
-            .filter(|symbol| symbol.is_some())
-            .flatten(),
-        opacity: channels.opacity.as_ref().map(|channel| channel.read(row)),
+            .filter(|channel| !channel.is_scaled())
+            .map(|channel| channel.read(row)),
+        r_value: channels
+            .r
+            .as_ref()
+            .and_then(|channel| channel.data_value(row)),
+        opacity_value: channels
+            .opacity
+            .as_ref()
+            .and_then(|channel| channel.data_value(row)),
+        symbol: channels.symbol.as_ref().and_then(|channel| {
+            constant_symbol(channel).or_else(|| symbol_from_value(&channel.read(row)))
+        }),
+        opacity: channels
+            .opacity
+            .as_ref()
+            .filter(|channel| !channel.is_scaled())
+            .map(|channel| channel.read(row)),
         dodge_offset: None,
     }
 }
 
 /// A symbol channel's value as a [`Symbol`](crate::style::Symbol): a name
 /// (`"circle"`, `"square"`, …) or an index into the symbol set.
-fn symbol_from_value(value: &Value) -> Option<crate::style::Symbol> {
-    const SYMBOLS: [crate::style::Symbol; 13] = [
-        crate::style::Symbol::Circle,
-        crate::style::Symbol::Square,
-        crate::style::Symbol::Diamond,
-        crate::style::Symbol::Triangle,
-        crate::style::Symbol::Cross,
-        crate::style::Symbol::CrossRotate,
-        crate::style::Symbol::Star,
-        crate::style::Symbol::Asterisk,
-        crate::style::Symbol::Plus,
-        crate::style::Symbol::Times,
-        crate::style::Symbol::Arrow,
-        crate::style::Symbol::TriangleDown,
-        crate::style::Symbol::CircleOpen,
-    ];
+/// A symbol channel that names a symbol (`symbol: "square"`) is a constant,
+/// as Plot reads it.
+pub fn constant_symbol(channel: &crate::table::Channel) -> Option<crate::style::Symbol> {
+    match channel {
+        crate::table::Channel::Field(name) => crate::style::Symbol::parse(name),
+        crate::table::Channel::Constant(value) => symbol_from_value(value),
+        _ => None,
+    }
+}
 
+fn symbol_from_value(value: &Value) -> Option<crate::style::Symbol> {
     match value {
-        Value::Number(number) => Some(SYMBOLS[(*number as usize) % SYMBOLS.len()]),
-        Value::Text(text) => match text.as_ref() {
-            "circle" => Some(crate::style::Symbol::Circle),
-            "square" => Some(crate::style::Symbol::Square),
-            "diamond" => Some(crate::style::Symbol::Diamond),
-            "triangle" => Some(crate::style::Symbol::Triangle),
-            "cross" => Some(crate::style::Symbol::Cross),
-            "star" => Some(crate::style::Symbol::Star),
-            "plus" => Some(crate::style::Symbol::Plus),
-            "times" => Some(crate::style::Symbol::Times),
-            "arrow" => Some(crate::style::Symbol::Arrow),
-            _ => None,
-        },
+        Value::Text(text) => crate::style::Symbol::parse(text),
         _ => None,
     }
 }
@@ -864,7 +1190,8 @@ fn pin_bin_edges(data: &Dataset, marks: &[Mark]) -> Vec<Mark> {
         .map(|mark| {
             let mut mark = mark.clone();
             if mark.bin.is_some() {
-                let (x, y) = bin_edges(&mark, data.rows());
+                let source = mark.data.clone().unwrap_or_else(|| data.clone());
+                let (x, y) = bin_edges(&mark, source.rows());
                 if let Some(bin) = mark.bin.as_mut() {
                     bin.edges = [x, y];
                 }
@@ -949,23 +1276,40 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
     }
 
     let mut binned: Vec<PreparedRow> = Vec::new();
-    // Each output's raw values, for the opacity outputs' scale.
-    let mut opacities: Vec<(usize, f64)> = Vec::new();
     // The running top of each one-dimensional bin's stack.
     let mut stack_tops: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
     for cells in series.values() {
         for (&(xi, yi), members) in cells {
             let mut row = rows[members[0]].clone();
             let records: Vec<&Table> = members.iter().map(|index| &rows[*index].row).collect();
+            // A bin outputs its extent (`x1`, `x2`) and, for the marks that
+            // read a point (a dot, a text), its midpoint as `x`.
+            let point_mark = !matches!(
+                mark.kind,
+                MarkKind::Rect
+                    | MarkKind::RectX
+                    | MarkKind::RectY
+                    | MarkKind::BarX
+                    | MarkKind::BarY
+                    | MarkKind::Cell
+            );
             if let Some(edges) = x_edges.filter(|_| bin_x) {
                 let (x0, x1) = edges.bounds(xi);
-                row.x = Value::Null;
+                row.x = if point_mark {
+                    Value::Number((x0 + x1) / 2.)
+                } else {
+                    Value::Null
+                };
                 row.x1 = Some(Value::Number(x0));
                 row.x2 = Some(Value::Number(x1));
             }
             if let Some(edges) = y_edges.filter(|_| bin_y) {
                 let (y0, y1) = edges.bounds(yi);
-                row.y = Value::Null;
+                row.y = if point_mark {
+                    Value::Number((y0 + y1) / 2.)
+                } else {
+                    Value::Null
+                };
                 row.y1 = Some(Value::Number(y0));
                 row.y2 = Some(Value::Number(y1));
             }
@@ -1001,7 +1345,8 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
                     }
                     "y" => row.y = reduced.clone(),
                     "x" => row.x = reduced.clone(),
-                    "fillOpacity" | "opacity" => opacities.push((binned.len(), number)),
+                    "fillOpacity" | "opacity" => row.opacity_value = Some(number),
+                    "r" => row.r_value = Some(number),
                     _ => {}
                 }
                 row.row = row.row.clone().with(output.name.clone(), reduced);
@@ -1010,12 +1355,6 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
         }
     }
 
-    let max = opacities.iter().map(|(_, v)| *v).fold(0., f64::max);
-    if max > 0. {
-        for (index, value) in opacities {
-            binned[index].opacity = Some((value / max).clamp(0., 1.) as f32);
-        }
-    }
     binned
 }
 
@@ -1120,6 +1459,8 @@ fn stack_rows_from_series(
                 r: None,
                 symbol: None,
                 opacity: None,
+                r_value: None,
+                opacity_value: None,
                 dodge_offset: None,
             });
             if group_by_y {
@@ -1843,8 +2184,9 @@ mod bin_tests {
             .fill("sex")
             .bin_output("fillOpacity", GroupReducer::Count);
         assert_eq!(bin_axes(&mark), (true, true));
-        let prepared = prepare(&athletes(), &[mark]);
-        let rows = &prepared[0].rows;
+        let mut facets = vec![prepare(&athletes(), &[mark])];
+        apply_quantity_scales(&mut facets, &Default::default(), &Default::default());
+        let rows = &facets[0][0].rows;
         assert!(rows.iter().all(|row| row.x1.is_some() && row.y1.is_some()));
         // The opacity scale runs [0, max] → [0, 1].
         let max = rows.iter().filter_map(|row| row.opacity).fold(0., f32::max);

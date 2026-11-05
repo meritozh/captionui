@@ -8,14 +8,12 @@
 use gpui::{
     App, Bounds, FontWeight, Hsla, Pixels, Point, Size, TextAlign, Window, font, point, px,
 };
-use gpui_kit::base::plot::label::TEXT_SIZE;
-use gpui_kit::base::plot::{AxisLabelSide, AxisText, PlotAxis};
 
 use crate::facet::{FACET_LABEL_GAP, Grid, band};
 use crate::paint::{self, Label};
 use crate::scale::{ContinuousScale, PositionScale, Transform};
 use crate::theme::PlotTheme;
-use crate::ticks::{format_linear_tick, format_time_tick};
+use crate::ticks::format_time_tick;
 use crate::value::PlotKind;
 
 /// The space reserved around the plot for its frame.
@@ -122,6 +120,11 @@ pub struct FrameOptions {
     /// labels. A faceted figure is a grid of small charts, so every facet
     /// repeats the axis gutters rather than sharing one at the figure's edge.
     pub facet_insets: Insets,
+    /// The x scale's options, Plot's `x: {…}`, read where [`FrameOptions`]'
+    /// own fields do not cover them (an ordinal domain, ticks, formats).
+    pub x_options: crate::options::ScaleOptions,
+    /// The y scale's options, Plot's `y: {…}`.
+    pub y_options: crate::options::ScaleOptions,
     /// The size of one facet's marks area, when the figure is faceted, Plot's
     /// `innerDimensions`. The x and y scales are laid out in this size rather
     /// than across the whole figure, because every facet shares them.
@@ -154,8 +157,12 @@ impl Default for FrameOptions {
             // gap between them and a margin at the plot's edges.
             padding: 0.1,
             padding_outer: 0.1,
-            x_tick_count: 6,
-            y_tick_count: 5,
+            // Zero asks for Plot's default: one tick per 80 pixels across,
+            // one per 35 down.
+            x_tick_count: 0,
+            y_tick_count: 0,
+            x_options: Default::default(),
+            y_options: Default::default(),
             insets: Insets::default(),
             facet_insets: Insets::default(),
             facet_size: None,
@@ -248,6 +255,7 @@ impl Frame {
                 tick_count: options.x_tick_count,
                 range: [0., facet_width],
                 axis: AxisSide::X,
+                scale: &options.x_options,
             },
         );
         let y = resolve_axis(
@@ -268,6 +276,7 @@ impl Frame {
                 tick_count: options.y_tick_count,
                 range: [facet_height, 0.],
                 axis: AxisSide::Y,
+                scale: &options.y_options,
             },
         );
 
@@ -313,7 +322,7 @@ impl Frame {
 }
 
 /// How one axis resolves its scale, the per-axis half of [`FrameOptions`].
-struct AxisOptions {
+struct AxisOptions<'a> {
     kind: Option<ScaleKind>,
     transform: Transform,
     exponent: f64,
@@ -330,6 +339,8 @@ struct AxisOptions {
     range: [f32; 2],
     /// Which axis this is, for tick placement.
     axis: AxisSide,
+    /// Plot's scale options, for what the fields above do not carry.
+    scale: &'a crate::options::ScaleOptions,
 }
 
 /// Which axis a resolved scale belongs to.
@@ -340,6 +351,7 @@ enum AxisSide {
 }
 
 fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
+    use crate::options::{ScaleType, Ticks};
     let AxisOptions {
         kind,
         transform,
@@ -356,22 +368,78 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
         tick_count,
         range,
         axis,
+        scale: plot,
     } = *options;
     let is_x = axis == AxisSide::X;
+    // Plot's scale options override the frame's fields they overlap.
+    let (kind, transform, exponent) = match plot.r#type {
+        Some(ScaleType::Log) => (Some(ScaleKind::Continuous), Transform::Log, exponent),
+        Some(ScaleType::Sqrt) => (Some(ScaleKind::Continuous), Transform::Sqrt, 0.5),
+        Some(ScaleType::Pow) => (
+            Some(ScaleKind::Continuous),
+            Transform::Pow,
+            plot.exponent.unwrap_or(exponent),
+        ),
+        Some(ScaleType::Symlog) => (Some(ScaleKind::Continuous), Transform::Symlog, exponent),
+        Some(ScaleType::Linear | ScaleType::Utc) => {
+            (Some(ScaleKind::Continuous), Transform::Linear, exponent)
+        }
+        Some(ScaleType::Band) => (Some(ScaleKind::Band), transform, exponent),
+        Some(ScaleType::Point | ScaleType::Ordinal) => {
+            (Some(ScaleKind::Point), transform, exponent)
+        }
+        _ => (kind, transform, plot.exponent.unwrap_or(exponent)),
+    };
+    let zero = plot.zero.unwrap_or(zero);
+    let nice = plot.nice.unwrap_or(nice);
+    let clamp = plot.clamp.unwrap_or(clamp);
+    let reverse = plot.reverse.unwrap_or(reverse);
+    let inset = plot.inset.unwrap_or(inset);
+    let padding_inner = plot.padding_inner.or(plot.padding).unwrap_or(padding);
+    let padding_outer = plot.padding_outer.or(plot.padding).unwrap_or(padding_outer);
+    let percent = plot.percent.unwrap_or(false);
     let inferred = values
         .iter()
+        .chain(plot.domain.iter().flatten())
         .find(|v| !v.is_null())
         .map(|v| v.kind())
         .unwrap_or(PlotKind::Null);
     let kind = kind.unwrap_or_else(|| ScaleKind::for_kind(inferred));
-    let temporal = inferred == PlotKind::Date;
+    let temporal = inferred == PlotKind::Date || plot.r#type == Some(ScaleType::Utc);
     let range = pinned_range.unwrap_or(range);
-    let range = [range[0] + inset, range[1] - inset];
+    let range = [
+        range[0] + plot.inset_start.unwrap_or(0.) * range_sign(range) + inset * range_sign(range),
+        range[1] - plot.inset_end.unwrap_or(0.) * range_sign(range) - inset * range_sign(range),
+    ];
     let range = if reverse { [range[1], range[0]] } else { range };
+    // Plot's default tick density: one per 80 pixels across x, one per 35
+    // pixels down y.
+    let tick_count = match plot.ticks {
+        Some(Ticks::Count(count)) => count,
+        _ if tick_count > 0 => tick_count,
+        _ => {
+            let length = (range[1] - range[0]).abs();
+            ((length / if is_x { 80. } else { 35. }).round() as usize).max(2)
+        }
+    };
+    let label = |value: &crate::value::Value, default: gpui::SharedString| -> gpui::SharedString {
+        match &plot.tick_format {
+            Some(format) => {
+                let shown = match (percent, value) {
+                    (true, crate::value::Value::Number(n)) => crate::value::Value::Number(n * 100.),
+                    _ => value.clone(),
+                };
+                format.format(&shown).into()
+            }
+            None => default,
+        }
+    };
 
     match kind {
         ScaleKind::Continuous => {
-            let domain = pinned
+            let domain = plot
+                .numeric_domain()
+                .or(pinned)
                 .or_else(|| crate::scale::extent(values.iter().cloned()))
                 .unwrap_or([0., 1.]);
             let mut domain = domain;
@@ -380,6 +448,9 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
                 domain[1] = domain[1].max(0.);
             }
             let mut scale = ContinuousScale::new(transform, domain, range).with_exponent(exponent);
+            if let Some(constant) = plot.constant {
+                scale = scale.with_constant(constant);
+            }
             if nice {
                 scale = scale.nice(tick_count);
             }
@@ -387,28 +458,71 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
                 scale = scale.clamped(true);
             }
             let domain = scale.domain();
+            let explicit: Option<Vec<f64>> = match &plot.ticks {
+                Some(Ticks::Values(values)) => {
+                    Some(values.iter().filter_map(|v| v.as_number()).collect())
+                }
+                Some(Ticks::Interval(interval)) => {
+                    Some(interval_ticks(*interval, domain, temporal))
+                }
+                _ => None,
+            };
             let ticks = if temporal {
-                let millis = scale.time_ticks(tick_count);
+                let millis = explicit.unwrap_or_else(|| scale.time_ticks(tick_count));
                 millis
                     .into_iter()
                     .filter_map(|millis| {
+                        let value = crate::value::Value::date_from_millis(millis as i64);
                         scale.position(millis).map(|position| AxisTick {
-                            value: crate::value::Value::date_from_millis(millis as i64),
+                            label: label(&value, format_time_tick(millis, domain)),
+                            value,
                             position,
-                            label: format_time_tick(millis, domain),
                         })
                     })
                     .collect()
             } else {
-                let step = tick_step(domain, tick_count);
-                scale
-                    .ticks(tick_count)
+                // A percent scale labels its proportions as percentages: the
+                // ticks are nice in percent, then mapped back.
+                let factor = if percent { 100. } else { 1. };
+                let shown = [domain[0] * factor, domain[1] * factor];
+                let log = transform == Transform::Log;
+                let ticks = explicit.unwrap_or_else(|| {
+                    if log {
+                        crate::ticks::d3_log_ticks(domain[0], domain[1], tick_count)
+                    } else if percent {
+                        crate::ticks::linear_ticks(shown, tick_count, Transform::Linear)
+                            .into_iter()
+                            .map(|t| t / factor)
+                            .collect()
+                    } else {
+                        scale.ticks(tick_count)
+                    }
+                });
+                let spec = match &plot.tick_format {
+                    Some(crate::options::TickFormat::Spec(spec)) => Some(spec.to_string()),
+                    _ => None,
+                };
+                let custom = matches!(plot.tick_format, Some(crate::options::TickFormat::Fn(_)));
+                // d3's tick formats: the precision follows the tick step, and
+                // a log scale labels only the multiples the count has room for.
+                let linear_format =
+                    crate::format::tick_format(shown[0], shown[1], tick_count, spec.as_deref());
+                let total = ticks.len();
+                ticks
                     .into_iter()
                     .filter_map(|tick| {
+                        let value = crate::value::Value::Number(tick);
+                        let text: gpui::SharedString = if custom {
+                            label(&value, gpui::SharedString::default())
+                        } else if log && spec.is_none() {
+                            crate::ticks::d3_log_tick_label(tick, tick_count, total, None).into()
+                        } else {
+                            linear_format.format(tick * factor).into()
+                        };
                         scale.position(tick).map(|position| AxisTick {
-                            value: crate::value::Value::Number(tick),
+                            label: text,
+                            value,
                             position,
-                            label: format_linear_tick(tick, step),
                         })
                     })
                     .collect()
@@ -421,28 +535,88 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
                 categories: 0,
             }
         }
-        ScaleKind::Band => {
-            let domain: Vec<_> = crate::scale::dedup(values.iter().map(|v| v.key()));
+        ScaleKind::Band | ScaleKind::Point => {
+            // Plot lays an ordinal y scale out top-down: its first value at
+            // the top, where a continuous y puts its maximum.
+            let range = if is_x { range } else { [range[1], range[0]] };
+            // An explicit domain fixes the categories and their order;
+            // otherwise Plot sorts the distinct values ascending.
+            let domain: Vec<_> = match &plot.domain {
+                Some(domain) => crate::scale::dedup(domain.iter().map(|v| v.key())),
+                // An interval fills the domain with every step from the
+                // least value to the greatest.
+                None if plot.interval.is_some() => {
+                    let interval = plot.interval.expect("checked");
+                    let numbers: Vec<f64> = values.iter().filter_map(|v| v.as_number()).collect();
+                    let lo = numbers.iter().copied().fold(f64::INFINITY, f64::min);
+                    let hi = numbers.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    let temporal = values
+                        .iter()
+                        .any(|v| matches!(v, crate::value::Value::Date(_)));
+                    let make = |n: f64| {
+                        if temporal {
+                            crate::value::Value::date_from_millis(n as i64)
+                        } else {
+                            crate::value::Value::Number(n)
+                        }
+                    };
+                    let mut keys = Vec::new();
+                    if lo.is_finite() && hi.is_finite() {
+                        let mut current = interval
+                            .extent(&make(lo))
+                            .map(|(start, _)| start)
+                            .unwrap_or(lo);
+                        while current <= hi + 1e-9 && keys.len() < 10_000 {
+                            keys.push(make(current).key());
+                            match interval.extent(&make(current)) {
+                                Some((_, next)) if next > current => current = next,
+                                _ => break,
+                            }
+                        }
+                    }
+                    keys
+                }
+                None => {
+                    let mut keys = crate::scale::dedup(values.iter().map(|v| v.key()));
+                    keys.sort();
+                    keys
+                }
+            };
             let categories = domain.len();
-            let scale = crate::scale::BandScale::new(domain.clone(), range)
-                .padding_inner(padding)
-                .padding_outer(padding_outer);
-            let ticks = band_ticks(&domain, &scale, values, is_x, tick_count);
+            let explicit: Option<Vec<crate::value::ValueKey>> = match &plot.ticks {
+                Some(Ticks::Values(values)) => Some(values.iter().map(|v| v.key()).collect()),
+                _ => None,
+            };
+            let tick_keys = explicit.unwrap_or_else(|| domain.clone());
+            let (scale, ticks) = if kind == ScaleKind::Band {
+                let mut band = crate::scale::BandScale::new(domain.clone(), range)
+                    .padding_inner(padding_inner)
+                    .padding_outer(padding_outer);
+                if let Some(align) = plot.align {
+                    band = band.align(align);
+                }
+                let ticks = band_ticks(&tick_keys, &band, values, is_x, tick_count);
+                (PositionScale::Band(band), ticks)
+            } else {
+                let mut point_scale = crate::scale::PointScale::new(domain.clone(), range);
+                if let Some(padding) = plot.padding {
+                    point_scale = point_scale.padding(padding);
+                }
+                if let Some(align) = plot.align {
+                    point_scale = point_scale.align(align);
+                }
+                let ticks = point_ticks(&tick_keys, &point_scale, values, is_x, tick_count);
+                (PositionScale::Point(point_scale), ticks)
+            };
+            let ticks = ticks
+                .into_iter()
+                .map(|tick| AxisTick {
+                    label: label(&tick.value, tick.label.clone()),
+                    ..tick
+                })
+                .collect();
             Axis {
-                scale: PositionScale::Band(scale),
-                kind: inferred,
-                ticks,
-                temporal: false,
-                categories,
-            }
-        }
-        ScaleKind::Point => {
-            let domain: Vec<_> = crate::scale::dedup(values.iter().map(|v| v.key()));
-            let categories = domain.len();
-            let scale = crate::scale::PointScale::new(domain.clone(), range);
-            let ticks = point_ticks(&domain, &scale, values, is_x, tick_count);
-            Axis {
-                scale: PositionScale::Point(scale),
+                scale,
                 kind: inferred,
                 ticks,
                 temporal: false,
@@ -452,13 +626,45 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
     }
 }
 
-/// The step the linear ticks will use, for label precision.
-fn tick_step(domain: [f64; 2], count: usize) -> f64 {
-    let ticks = crate::ticks::linear_ticks(domain, count, Transform::Linear);
-    match ticks.windows(2).next() {
-        Some(pair) => (pair[1] - pair[0]).abs(),
-        None => 1.,
+/// `+1` for an ascending range, `-1` for a descending one, so an inset moves
+/// inward either way.
+fn range_sign(range: [f32; 2]) -> f32 {
+    if range[1] >= range[0] { 1. } else { -1. }
+}
+
+/// The ticks at every step of `interval` across `domain`.
+pub(crate) fn interval_ticks(
+    interval: crate::mark::Interval,
+    domain: [f64; 2],
+    temporal: bool,
+) -> Vec<f64> {
+    let (lo, hi) = (domain[0].min(domain[1]), domain[0].max(domain[1]));
+    let mut ticks = Vec::new();
+    let value = |n: f64| {
+        if temporal {
+            crate::value::Value::date_from_millis(n as i64)
+        } else {
+            crate::value::Value::Number(n)
+        }
+    };
+    let Some((mut start, _)) = interval.extent(&value(lo)) else {
+        return ticks;
+    };
+    if start < lo {
+        start = interval
+            .extent(&value(lo))
+            .map(|(_, end)| end)
+            .unwrap_or(hi);
     }
+    let mut current = start;
+    while current <= hi + 1e-9 && ticks.len() < 1000 {
+        ticks.push(current);
+        match interval.extent(&value(current)) {
+            Some((_, next)) if next > current => current = next,
+            _ => break,
+        }
+    }
+    ticks
 }
 
 fn band_ticks(
@@ -526,17 +732,17 @@ fn category_label(
     value.label()
 }
 
-/// Paint the grid lines across the plot, under the marks.
+/// Paint the grid lines across the plot, under the marks: Plot's `grid`,
+/// one line per tick in `currentColor` at a tenth of its opacity.
 ///
 /// A faceted figure draws its grid inside each facet's marks area, the same
-/// way its axes repeat there. Vertical lines appear only for a continuous x
-/// scale: a band scale's categories are already clear from their labels.
+/// way its axes repeat there.
 pub(crate) fn paint_grid(
     frame: &Frame,
     theme: &PlotTheme,
     window: &mut Window,
-    x_axis: bool,
-    y_axis: bool,
+    x_grid: bool,
+    y_grid: bool,
     grid: &Grid,
 ) {
     let areas: Vec<Bounds<Pixels>> = if grid.is_faceted() {
@@ -549,7 +755,7 @@ pub(crate) fn paint_grid(
     };
     let width = theme.line_width;
     for plot in areas {
-        if y_axis {
+        if y_grid {
             for tick in frame.y.ticks.iter() {
                 let y = plot.origin.y + px(tick.position);
                 let start = point(plot.origin.x, y);
@@ -557,11 +763,11 @@ pub(crate) fn paint_grid(
                 if theme.grid_dash.is_empty() {
                     paint::paint_stroke(&[start, end], width.as_f32(), theme.grid, window);
                 } else {
-                    paint_dashed(start, end, &theme.grid_dash, width, theme.grid, window);
+                    paint_dashed_frame(start, end, &theme.grid_dash, width, theme.grid, window);
                 }
             }
         }
-        if x_axis && !frame.x.scale.is_discrete() {
+        if x_grid {
             for tick in frame.x.ticks.iter() {
                 let x = plot.origin.x + px(tick.position);
                 let start = point(x, plot.origin.y);
@@ -569,78 +775,175 @@ pub(crate) fn paint_grid(
                 if theme.grid_dash.is_empty() {
                     paint::paint_stroke(&[start, end], width.as_f32(), theme.grid, window);
                 } else {
-                    paint_dashed(start, end, &theme.grid_dash, width, theme.grid, window);
+                    paint_dashed_frame(start, end, &theme.grid_dash, width, theme.grid, window);
                 }
             }
         }
     }
 }
 
-/// Paint the axis lines and their tick labels.
+/// How one axis draws, Plot's axis options.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AxisStyle {
+    pub(crate) anchor: crate::options::AxisAnchor,
+    pub(crate) tick_size: f32,
+    pub(crate) tick_padding: f32,
+    pub(crate) line: bool,
+}
+
+impl AxisStyle {
+    /// The style `options` ask for at `anchor`, with Plot's defaults: six-pixel
+    /// ticks, labels three pixels past them, no domain line.
+    pub(crate) fn new(
+        anchor: crate::options::AxisAnchor,
+        options: &crate::options::ScaleOptions,
+    ) -> Self {
+        Self {
+            anchor,
+            tick_size: options.tick_size.unwrap_or(6.),
+            tick_padding: options.tick_padding.unwrap_or(3.),
+            line: options.line.unwrap_or(false),
+        }
+    }
+}
+
+/// Paint the axes of one plot area: tick marks and tick labels, the way
+/// Plot's `axisX` and `axisY` draw them.
 pub(crate) fn paint_axes(
     frame: &Frame,
     theme: &PlotTheme,
     window: &mut Window,
     cx: &mut App,
-    x_axis: bool,
-    y_axis: bool,
+    x: Option<AxisStyle>,
+    y: Option<AxisStyle>,
     edges: &AxisEdges,
 ) {
+    use crate::options::AxisAnchor;
     let plot = frame.plot;
-    let mut axis = PlotAxis::new().stroke(theme.axis);
-
-    if x_axis && edges.bottom {
-        let labels: Vec<AxisText> = frame
-            .x
-            .ticks
-            .iter()
-            .map(|tick| {
-                AxisText::new(tick.label.clone(), px(tick.position), theme.label)
-                    .font_size(theme.label_size)
-                    .align(TextAlign::Center)
-            })
-            .collect();
-        axis = axis.x(plot.size.height).x_axis(false).x_label(labels);
-    }
-    if y_axis && edges.left {
-        let labels: Vec<AxisText> = frame
-            .y
-            .ticks
-            .iter()
-            .map(|tick| {
-                // `PlotAxis` centers a y label by subtracting `TEXT_SIZE / 2`
-                // from its tick, which assumes the default 10px labels. A plot
-                // with a larger font would sit its labels high, so the tick is
-                // nudged by the difference.
-                let shift = (theme.label_size.as_f32() - TEXT_SIZE) / 2.;
-                AxisText::new(tick.label.clone(), px(tick.position - shift), theme.label)
-                    .font_size(theme.label_size)
-                    .align(TextAlign::Right)
-            })
-            .collect();
-        // The labels belong in the gutter the frame reserved for them, left
-        // of the line; the default `End` side would draw them inside the plot,
-        // where the line cuts through them.
-        axis = axis
-            .y(px(0.))
-            .y_axis(false)
-            .y_label_side(AxisLabelSide::Start)
-            .y_label(labels);
-    }
-    axis.paint(&plot, window, cx);
-    if y_axis && edges.left {
-        // `PlotAxis` draws the y line only where it was told to, and it
-        // right-aligns its labels against that line, so the line is drawn
-        // here rather than duplicated there.
-        paint::paint_stroke(
-            &[
-                point(plot.origin.x, plot.origin.y),
-                point(plot.origin.x, plot.origin.y + plot.size.height),
-            ],
-            theme.line_width.as_f32(),
-            theme.axis,
+    let font = font(theme.font_family.clone());
+    let color = theme.label;
+    let size = theme.label_size;
+    let line_width = theme.line_width.as_f32();
+    let text = |label: &gpui::SharedString, window: &mut Window| {
+        Label::new(
+            label.clone(),
+            size,
+            color,
+            FontWeight::NORMAL,
+            font.clone(),
             window,
-        );
+        )
+    };
+
+    if let Some(style) = x {
+        let sides: &[bool] = match style.anchor {
+            AxisAnchor::Top => &[true],
+            AxisAnchor::Both => &[true, false],
+            _ => &[false],
+        };
+        for &top in sides {
+            if !top && !edges.bottom || top && !edges.top {
+                continue;
+            }
+            let edge = if top {
+                plot.origin.y
+            } else {
+                plot.origin.y + plot.size.height
+            };
+            let direction = if top { -1. } else { 1. };
+            if style.line {
+                paint::paint_stroke(
+                    &[
+                        point(plot.origin.x, edge),
+                        point(plot.origin.x + plot.size.width, edge),
+                    ],
+                    line_width,
+                    color,
+                    window,
+                );
+            }
+            for tick in &frame.x.ticks {
+                let tx = plot.origin.x + px(tick.position);
+                if style.tick_size > 0. {
+                    paint::paint_stroke(
+                        &[
+                            point(tx, edge),
+                            point(tx, edge + px(style.tick_size * direction)),
+                        ],
+                        line_width,
+                        color,
+                        window,
+                    );
+                }
+                if tick.label.is_empty() {
+                    continue;
+                }
+                let label = text(&tick.label, window);
+                let offset = style.tick_size.max(0.) + style.tick_padding;
+                let ty = if top {
+                    edge - px(offset) - label.height
+                } else {
+                    edge + px(offset)
+                };
+                label.paint_at(point(tx, ty), TextAlign::Center, None, window, cx);
+            }
+        }
+    }
+
+    if let Some(style) = y {
+        let sides: &[bool] = match style.anchor {
+            AxisAnchor::Right => &[true],
+            AxisAnchor::Both => &[false, true],
+            _ => &[false],
+        };
+        for &right in sides {
+            if !right && !edges.left || right && !edges.right {
+                continue;
+            }
+            let edge = if right {
+                plot.origin.x + plot.size.width
+            } else {
+                plot.origin.x
+            };
+            let direction = if right { 1. } else { -1. };
+            if style.line {
+                paint::paint_stroke(
+                    &[
+                        point(edge, plot.origin.y),
+                        point(edge, plot.origin.y + plot.size.height),
+                    ],
+                    line_width,
+                    color,
+                    window,
+                );
+            }
+            for tick in &frame.y.ticks {
+                let ty = plot.origin.y + px(tick.position);
+                if style.tick_size > 0. {
+                    paint::paint_stroke(
+                        &[
+                            point(edge, ty),
+                            point(edge + px(style.tick_size * direction), ty),
+                        ],
+                        line_width,
+                        color,
+                        window,
+                    );
+                }
+                if tick.label.is_empty() {
+                    continue;
+                }
+                let label = text(&tick.label, window);
+                let offset = style.tick_size.max(0.) + style.tick_padding;
+                let origin = point(edge + px(offset * direction), ty - label.height / 2.);
+                let align = if right {
+                    TextAlign::Left
+                } else {
+                    TextAlign::Right
+                };
+                label.paint_at(origin, align, None, window, cx);
+            }
+        }
     }
 }
 
@@ -736,6 +1039,8 @@ pub(crate) fn facet_marks(band: Bounds<Pixels>, frame: &Frame) -> Bounds<Pixels>
 pub(crate) struct AxisEdges {
     pub(crate) left: bool,
     pub(crate) bottom: bool,
+    pub(crate) top: bool,
+    pub(crate) right: bool,
 }
 
 impl Default for AxisEdges {
@@ -743,6 +1048,8 @@ impl Default for AxisEdges {
         Self {
             left: true,
             bottom: true,
+            top: true,
+            right: true,
         }
     }
 }
@@ -760,12 +1067,19 @@ impl AxisEdges {
         let left = column == 0 || grid.is_empty(cell - 1);
         let below = cell + grid.columns();
         let bottom = row == grid.rows() - 1 || below >= grid.cells.len() || grid.is_empty(below);
-        Self { left, bottom }
+        let top = row == 0 || grid.is_empty(cell - grid.columns());
+        let right = column == grid.columns() - 1 || grid.is_empty(cell + 1);
+        Self {
+            left,
+            bottom,
+            top,
+            right,
+        }
     }
 }
 
 /// Paint a dashed line from `start` to `end`.
-fn paint_dashed(
+pub(crate) fn paint_dashed_frame(
     start: Point<Pixels>,
     end: Point<Pixels>,
     dash: &[Pixels],
@@ -843,8 +1157,9 @@ mod tests {
         );
         let a = frame.x.scale.position(&Value::text("a")).unwrap();
         let c = frame.x.scale.position(&Value::text("c")).unwrap();
-        assert_eq!(a, 0.);
-        assert_eq!(c, 300.);
+        // Half a step of padding at each end, Plot's point scale.
+        assert_eq!(a, 50.);
+        assert_eq!(c, 250.);
     }
 
     #[test]

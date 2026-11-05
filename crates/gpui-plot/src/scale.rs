@@ -9,7 +9,7 @@
 use std::rc::Rc;
 
 use gpui::{Hsla, SharedString};
-use gpui_kit::base::plot::scale::{Scale, ScaleBand, ScaleLinear, ScaleOrdinal, ScalePoint};
+use gpui_kit::base::plot::scale::{ScaleLinear, ScaleOrdinal};
 
 use crate::value::{Value, ValueKey};
 
@@ -248,7 +248,7 @@ impl ContinuousScale {
                 (10f64.powf(lo), 10f64.powf(hi))
             }
             _ => {
-                let step = crate::ticks::nice_step((hi - lo) / (count.max(2) - 1) as f64);
+                let step = crate::ticks::nice_step((hi - lo) / count.max(1) as f64);
                 if step <= 0. || !step.is_finite() {
                     (lo, hi)
                 } else {
@@ -278,11 +278,12 @@ impl ContinuousScale {
 /// centered on its category spans [`Self::center`] minus half its width.
 #[derive(Clone)]
 pub struct BandScale {
-    inner: ScaleBand<ValueKey>,
     domain: Vec<ValueKey>,
     range: [f32; 2],
     padding_inner: f32,
     padding_outer: f32,
+    align: f32,
+    max_band_width: Option<f32>,
 }
 
 impl std::fmt::Debug for BandScale {
@@ -294,47 +295,83 @@ impl std::fmt::Debug for BandScale {
     }
 }
 
+/// d3's band layout: where the first band starts, the step between bands,
+/// and a band's width, for `n` bands across `range`.
+fn band_layout(n: usize, range: [f32; 2], inner: f32, outer: f32, align: f32) -> (f32, f32, f32) {
+    let reverse = range[1] < range[0];
+    let (lo, hi) = if reverse {
+        (range[1], range[0])
+    } else {
+        (range[0], range[1])
+    };
+    let n = n as f32;
+    let step = (hi - lo) / (n - inner + outer * 2.).max(1.);
+    let start = lo + (hi - lo - step * (n - inner)) * align;
+    let width = step * (1. - inner);
+    (start, step, width)
+}
+
 impl BandScale {
     /// Lay the distinct values of `domain` out across `range`.
     pub fn new(domain: impl IntoIterator<Item = ValueKey>, range: [f32; 2]) -> Self {
-        let domain: Vec<ValueKey> = dedup(domain);
-        let inner = ScaleBand::new(domain.iter().cloned(), range);
         Self {
-            inner,
-            domain,
+            domain: dedup(domain),
             range,
             padding_inner: 0.,
             padding_outer: 0.,
+            align: 0.5,
+            max_band_width: None,
         }
     }
 
     /// Set the inner padding between bands, as a fraction of a step.
     pub fn padding_inner(mut self, padding: f32) -> Self {
-        self.padding_inner = padding;
-        self.inner = self.inner.clone().padding_inner(padding);
+        self.padding_inner = padding.clamp(0., 1.);
         self
     }
 
     /// Set the outer padding at the ends of the range, as a fraction of a step.
     pub fn padding_outer(mut self, padding: f32) -> Self {
-        self.padding_outer = padding;
-        self.inner = self.inner.clone().padding_outer(padding);
+        self.padding_outer = padding.max(0.);
+        self
+    }
+
+    /// Where the bands sit in the range's slack, `0` at its start to `1` at
+    /// its end, Plot's `align`.
+    pub fn align(mut self, align: f32) -> Self {
+        self.align = align.clamp(0., 1.);
         self
     }
 
     /// Cap the width of a band, as Plot's `maxBandwidth` does.
     pub fn max_band_width(mut self, width: f32) -> Self {
-        self.inner = self.inner.clone().max_band_width(width);
+        self.max_band_width = Some(width);
         self
+    }
+
+    fn layout(&self) -> (f32, f32, f32) {
+        band_layout(
+            self.domain.len(),
+            self.range,
+            self.padding_inner,
+            self.padding_outer,
+            self.align,
+        )
     }
 
     /// The band's left edge (or top edge for a vertical band scale).
     pub fn start(&self, key: &ValueKey) -> Option<f32> {
-        // A band capped by `max_band_width` is narrower than the slot it
-        // sits in, so it is centred in that slot, as Plot centres it.
-        let natural = self.inner.step() * (1. - self.padding_inner);
+        let index = self.domain.iter().position(|k| k == key)?;
+        let (start, step, natural) = self.layout();
+        let index = if self.range[1] < self.range[0] {
+            self.domain.len() - 1 - index
+        } else {
+            index
+        };
+        // A band capped by `max_band_width` is narrower than its slot, so it
+        // is centred there, as Plot centres it.
         let offset = ((natural - self.band_width()) / 2.).max(0.);
-        self.inner.tick(key).map(|start| start + offset)
+        Some(start + step * index as f32 + offset)
     }
 
     /// The band's center.
@@ -344,12 +381,13 @@ impl BandScale {
 
     /// The width of one band.
     pub fn band_width(&self) -> f32 {
-        self.inner.band_width()
+        let width = self.layout().2;
+        self.max_band_width.map_or(width, |cap| width.min(cap))
     }
 
     /// The distance between two adjacent bands' starts.
     pub fn step(&self) -> f32 {
-        self.inner.step()
+        self.layout().1
     }
 
     pub fn domain(&self) -> &[ValueKey] {
@@ -362,13 +400,13 @@ impl BandScale {
 }
 
 /// A point scale: Plot's `point` scale, where each category owns a single
-/// position with a fixed step.
+/// position with a fixed step: d3's band scale with no width.
 #[derive(Clone)]
 pub struct PointScale {
-    inner: ScalePoint<ValueKey>,
     domain: Vec<ValueKey>,
     range: [f32; 2],
     padding: f32,
+    align: f32,
 }
 
 impl std::fmt::Debug for PointScale {
@@ -383,38 +421,43 @@ impl std::fmt::Debug for PointScale {
 
 impl PointScale {
     pub fn new(domain: impl IntoIterator<Item = ValueKey>, range: [f32; 2]) -> Self {
-        let domain: Vec<ValueKey> = dedup(domain);
-        let inner = ScalePoint::new(domain.iter().cloned(), inset(range, 0.));
         Self {
-            inner,
-            domain,
+            domain: dedup(domain),
             range,
-            padding: 0.,
+            padding: 0.5,
+            align: 0.5,
         }
     }
 
-    /// Inset the range by `padding`, as a fraction of the range's length, so
-    /// the first and last points sit inside the frame rather than on its edge.
+    /// The padding at the range's ends, in steps (Plot's default is `0.5`),
+    /// so the first and last points sit inside the frame.
     pub fn padding(mut self, padding: f32) -> Self {
-        self.padding = padding;
-        let inset_range = inset(self.range, padding);
-        self.inner = ScalePoint::new(self.domain.iter().cloned(), inset_range);
+        self.padding = padding.max(0.);
+        self
+    }
+
+    /// Where the points sit in the range's slack, Plot's `align`.
+    pub fn align(mut self, align: f32) -> Self {
+        self.align = align.clamp(0., 1.);
         self
     }
 
     /// The position of a category.
     pub fn position(&self, key: &ValueKey) -> Option<f32> {
-        self.inner.tick(key)
+        let index = self.domain.iter().position(|k| k == key)?;
+        let (start, step, _) =
+            band_layout(self.domain.len(), self.range, 1., self.padding, self.align);
+        let index = if self.range[1] < self.range[0] {
+            self.domain.len() - 1 - index
+        } else {
+            index
+        };
+        Some(start + step * index as f32)
     }
 
     /// The distance between two adjacent categories' positions.
     pub fn step(&self) -> f32 {
-        if self.domain.len() <= 1 {
-            0.
-        } else {
-            (self.range[1] - self.range[0]) * (1. - 2. * self.padding)
-                / (self.domain.len() - 1) as f32
-        }
+        band_layout(self.domain.len(), self.range, 1., self.padding, self.align).1
     }
 
     pub fn domain(&self) -> &[ValueKey] {
@@ -522,16 +565,16 @@ impl ColorRange {
     pub fn observable10() -> Self {
         ColorRange::Ordinal(
             [
-                0x1f77b4u32,
-                0xff7f0e,
-                0x2ca02c,
-                0xd62728,
-                0x9467bd,
-                0x8c564b,
-                0xe377c2,
-                0x7f7f7f,
-                0xbcbd22,
-                0x17becf,
+                0x4269d0u32,
+                0xefb118,
+                0xff725c,
+                0x6cc5b0,
+                0x3ca951,
+                0xff8ab7,
+                0xa463f2,
+                0x97bbf5,
+                0x9c6b4e,
+                0x9498a0,
             ]
             .into_iter()
             .map(hsla_from_hex)
@@ -565,6 +608,17 @@ pub struct ColorScale {
     domain: Vec<ValueKey>,
     extent: [f64; 2],
     range: ColorRange,
+    /// A diverging scale's pivot: the extent's low end maps to 0, the pivot
+    /// to ½ and the high end to 1, Plot's `diverging` type.
+    pivot: Option<f64>,
+    /// The transform a continuous scale applies before interpolating, for
+    /// Plot's `log`, `sqrt`, `pow` and `symlog` color types.
+    transform: Transform,
+    /// The thresholds of a `threshold`, `quantize` or `quantile` scale:
+    /// values below the first take the first color, and so on.
+    thresholds: Option<Vec<f64>>,
+    /// Plot's `unknown`: the color of a value the scale cannot place.
+    unknown: Option<Hsla>,
 }
 
 impl ColorScale {
@@ -576,6 +630,10 @@ impl ColorScale {
             domain,
             extent: [0., 1.],
             range: ColorRange::Ordinal(range),
+            pivot: None,
+            transform: Transform::Linear,
+            thresholds: None,
+            unknown: None,
         }
     }
 
@@ -585,7 +643,50 @@ impl ColorScale {
             domain: Vec::new(),
             extent,
             range,
+            pivot: None,
+            transform: Transform::Linear,
+            thresholds: None,
+            unknown: None,
         }
+    }
+
+    /// Center the scale on `pivot`, Plot's diverging scales.
+    pub fn with_pivot(mut self, pivot: f64) -> Self {
+        self.pivot = Some(pivot);
+        self
+    }
+
+    /// Interpolate after a transform, Plot's `log` or `sqrt` color types.
+    pub fn with_transform(mut self, transform: Transform) -> Self {
+        self.transform = transform;
+        self
+    }
+
+    /// Cut the scale at `thresholds` into `thresholds.len() + 1` colors.
+    pub fn with_thresholds(mut self, thresholds: Vec<f64>) -> Self {
+        self.thresholds = Some(thresholds);
+        self
+    }
+
+    /// The color for a value outside the scale, Plot's `unknown`.
+    pub fn with_unknown(mut self, unknown: Option<Hsla>) -> Self {
+        self.unknown = unknown;
+        self
+    }
+
+    /// Whether the scale is ordinal: categories, not a numeric ramp.
+    pub fn is_ordinal(&self) -> bool {
+        matches!(self.range, ColorRange::Ordinal(_)) && self.thresholds.is_none()
+    }
+
+    /// The numeric extent a continuous scale spans.
+    pub fn extent(&self) -> [f64; 2] {
+        self.extent
+    }
+
+    /// The thresholds of a threshold-type scale.
+    pub fn thresholds(&self) -> Option<&[f64]> {
+        self.thresholds.as_deref()
     }
 
     pub fn domain(&self) -> &[ValueKey] {
@@ -599,18 +700,27 @@ impl ColorScale {
     /// The color for a value, or `None` for a null.
     pub fn color(&self, value: &Value) -> Option<Hsla> {
         if value.is_null() {
-            return None;
+            return self.unknown;
+        }
+        if let (Some(thresholds), ColorRange::Ordinal(colors)) = (&self.thresholds, &self.range) {
+            let number = value.as_number()?;
+            let index = thresholds.iter().take_while(|t| number >= **t).count();
+            return colors
+                .get(index.min(colors.len().saturating_sub(1)))
+                .copied();
         }
         match &self.range {
             ColorRange::Ordinal(colors) => {
                 if colors.is_empty() {
                     return None;
                 }
-                let index = self
-                    .domain
-                    .iter()
-                    .position(|key| *key == value.key())
-                    .unwrap_or(self.domain.len());
+                let Some(index) = self.domain.iter().position(|key| *key == value.key()) else {
+                    // Plot's ordinal scale extends its domain with a new
+                    // value; with an explicit `unknown` it uses that.
+                    return self
+                        .unknown
+                        .or(Some(colors[self.domain.len() % colors.len()]));
+                };
                 Some(colors[index % colors.len()])
             }
             ColorRange::Continuous(colors) => {
@@ -629,12 +739,35 @@ impl ColorScale {
         }
     }
 
-    fn ratio(&self, number: f64) -> f32 {
-        let [lo, hi] = self.extent;
+    /// Where `number` sits along the ramp, from 0 to 1.
+    pub fn ratio(&self, number: f64) -> f32 {
+        let t = |v: f64| match self.transform {
+            Transform::Log => v.abs().max(f64::MIN_POSITIVE).ln() * v.signum(),
+            Transform::Sqrt => v.signum() * v.abs().sqrt(),
+            Transform::Symlog => v.signum() * (1. + v.abs()).ln(),
+            _ => v,
+        };
+        let [lo, hi] = [t(self.extent[0]), t(self.extent[1])];
+        let x = t(number);
+        if let Some(pivot) = self.pivot {
+            let p = t(pivot);
+            let r = if x < p {
+                if p == lo {
+                    0.5
+                } else {
+                    0.5 * (x - lo) / (p - lo)
+                }
+            } else if hi == p {
+                0.5
+            } else {
+                0.5 + 0.5 * (x - p) / (hi - p)
+            };
+            return (r as f32).clamp(0., 1.);
+        }
         if hi == lo {
             return 0.5;
         }
-        (((number - lo) / (hi - lo)) as f32).clamp(0., 1.)
+        (((x - lo) / (hi - lo)) as f32).clamp(0., 1.)
     }
 }
 
@@ -649,12 +782,6 @@ pub fn dedup(values: impl IntoIterator<Item = ValueKey>) -> Vec<ValueKey> {
         }
     }
     out
-}
-
-fn inset(range: [f32; 2], padding: f32) -> [f32; 2] {
-    let padding = padding.clamp(0., 0.5);
-    let span = range[1] - range[0];
-    [range[0] + span * padding, range[1] - span * padding]
 }
 
 /// A color from a 24-bit sRGB hex value.
@@ -689,7 +816,9 @@ pub fn rgb_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {
 }
 
 /// Interpolate a color ramp at `ratio` in `0..=1`.
-fn interpolate_stops(colors: &[Hsla], ratio: f32) -> Hsla {
+/// The color `ratio` of the way along evenly spaced `colors`, interpolated in
+/// RGB as d3's schemes are.
+pub fn interpolate_stops(colors: &[Hsla], ratio: f32) -> Hsla {
     if colors.is_empty() {
         return Hsla::default();
     }
@@ -699,7 +828,15 @@ fn interpolate_stops(colors: &[Hsla], ratio: f32) -> Hsla {
     let position = ratio.clamp(0., 1.) * (colors.len() - 1) as f32;
     let index = (position.floor() as usize).min(colors.len() - 2);
     let local = position - index as f32;
-    lerp_hsla(colors[index], colors[index + 1], local)
+    lerp_rgb(colors[index], colors[index + 1], local)
+}
+
+/// Interpolate two colors in RGB, d3's `interpolateRgb`.
+fn lerp_rgb(from: Hsla, to: Hsla, ratio: f32) -> Hsla {
+    let a = gpui::Rgba::from(from);
+    let b = gpui::Rgba::from(to);
+    let mix = |x: f32, y: f32| x + (y - x) * ratio;
+    rgb_to_hsla(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b), mix(a.a, b.a))
 }
 
 /// Interpolate two colors in HSLA space, taking the shorter way around the hue
@@ -825,14 +962,20 @@ mod tests {
     }
 
     #[test]
-    fn point_scale_pins_first_and_last() {
+    fn point_scale_pads_half_a_step() {
         let keys: Vec<ValueKey> = [1., 2., 3.]
             .into_iter()
             .map(|v| Value::Number(v).key())
             .collect();
-        let scale = PointScale::new(keys, [0., 100.]);
-        assert_eq!(scale.position(&Value::Number(1.).key()), Some(0.));
+        // Plot's point scale pads half a step at each end: three points
+        // across 0..120 sit at 20, 60, 100.
+        let scale = PointScale::new(keys.clone(), [0., 120.]);
+        assert_eq!(scale.position(&Value::Number(1.).key()), Some(20.));
         assert_eq!(scale.position(&Value::Number(3.).key()), Some(100.));
+        // With no padding they pin the ends, d3's default.
+        let flush = PointScale::new(keys, [0., 100.]).padding(0.);
+        assert_eq!(flush.position(&Value::Number(1.).key()), Some(0.));
+        assert_eq!(flush.position(&Value::Number(3.).key()), Some(100.));
     }
 
     #[test]

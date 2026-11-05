@@ -4,57 +4,222 @@
 //! tooltip — reads it from [`PlotColors`], built once per frame from every
 //! facet's marks. Deriving the color separately in each place let the legend
 //! swatch and the tooltip dot drift from the color a mark actually paints.
+//!
+//! The color scale follows Plot's: it spans every value the marks' color
+//! channels read (`fill: "sex"`, `stroke: "Anomaly"`), its type is inferred
+//! from those values — quantitative data a continuous ramp (Plot's default
+//! `turbo`), anything else an ordinal palette (`observable10`) — and the
+//! plot's `color: {…}` options override any of it. A mark without a color
+//! channel paints in `currentColor`, however it groups its rows by `z`.
 
 use gpui::{Hsla, SharedString};
 
+use crate::options::{ScaleOptions, ScaleType};
 use crate::render::{PreparedMark, PreparedRow};
-use crate::scale::{ColorRange, ColorScale};
+use crate::scale::{ColorRange, ColorScale, Transform};
 use crate::style::ColorChannel;
 use crate::table::Table;
 use crate::theme::PlotTheme;
+use crate::value::{PlotKind, Value};
 
 /// The plot-wide color scales and the theme's defaults.
 #[derive(Clone)]
 pub struct PlotColors {
-    /// The ordinal scale over every `z` series, one for the whole plot so a
-    /// series keeps its color across marks and facets.
+    /// Plot's color scale, over every value a color channel reads.
+    pub scale: Option<ColorScale>,
+    /// The ordinal half of [`Self::scale`], for the swatch legend: empty when
+    /// the scale is continuous.
     pub ordinal: ColorScale,
-    /// The continuous scale [`crate::Plot::color`] sets, over the field it
+    /// The continuous scale [`crate::Plot::color_by`] sets, over the field it
     /// names, with a domain spanning every facet's rows.
     pub continuous: Option<(SharedString, ColorScale)>,
     mark_color: Hsla,
-    palette: Vec<Hsla>,
+}
+
+/// The values a color channel reads across every facet's marks.
+fn color_values(facets: &[Vec<PreparedMark>]) -> Vec<Value> {
+    let mut values = Vec::new();
+    for mark in facets.iter().flatten() {
+        let channels = &mark.mark.channels;
+        for channel in [&channels.fill, &channels.stroke].into_iter().flatten() {
+            values.extend(
+                mark.rows
+                    .iter()
+                    .filter_map(|row| channel.scaled_value(&row.row))
+                    .filter(|value| {
+                        value
+                            .as_text()
+                            .is_none_or(|t| crate::css::parse(t).is_none())
+                    }),
+            );
+        }
+    }
+    values.retain(|value| !value.is_null());
+    values
+}
+
+/// Build Plot's color scale from the channels' values and the options.
+pub fn color_scale(
+    theme: &PlotTheme,
+    values: &[Value],
+    options: &ScaleOptions,
+) -> Option<ColorScale> {
+    let explicit: Option<Vec<Value>> = options.domain.clone();
+    let sample = explicit.as_ref().map_or(values, |domain| domain.as_slice());
+    if sample.is_empty() && options.r#type.is_none() {
+        return None;
+    }
+    let quantitative = sample
+        .iter()
+        .all(|value| matches!(value.kind(), PlotKind::Number | PlotKind::Date));
+    let scheme_diverging = options
+        .scheme
+        .as_deref()
+        .is_some_and(crate::css::is_diverging);
+    let kind = options.r#type.unwrap_or(if !quantitative {
+        ScaleType::Categorical
+    } else if scheme_diverging || options.pivot.is_some() {
+        ScaleType::Diverging
+    } else {
+        ScaleType::Linear
+    });
+    let unknown = options.unknown;
+
+    match kind {
+        ScaleType::Ordinal | ScaleType::Categorical | ScaleType::Band | ScaleType::Point => {
+            let domain: Vec<_> = match &explicit {
+                Some(domain) => domain.iter().map(Value::key).collect(),
+                None => {
+                    let mut keys = crate::scale::dedup(values.iter().map(Value::key));
+                    keys.sort();
+                    keys
+                }
+            };
+            let k = domain.len().max(1);
+            let colors = match (&options.colors, &options.scheme) {
+                (Some(colors), _) => colors.clone(),
+                (None, Some(scheme)) => {
+                    crate::css::discrete(scheme, k).unwrap_or_else(|| theme.palette.clone())
+                }
+                // Ordered data (numbers forced ordinal) takes Plot's turbo,
+                // categories its categorical palette.
+                (None, None) if kind == ScaleType::Ordinal && quantitative => {
+                    crate::css::discrete("turbo", k).unwrap_or_else(|| theme.palette.clone())
+                }
+                (None, None) => theme.palette.clone(),
+            };
+            let colors = if options.reverse == Some(true) {
+                colors.into_iter().rev().collect()
+            } else {
+                colors
+            };
+            Some(ColorScale::ordinal(domain, colors).with_unknown(unknown))
+        }
+        ScaleType::Threshold | ScaleType::Quantize | ScaleType::Quantile => {
+            let numbers: Vec<f64> = values.iter().filter_map(Value::as_number).collect();
+            let thresholds: Vec<f64> = match kind {
+                // Plot's threshold scale defaults to a single threshold at 0.
+                ScaleType::Threshold => explicit
+                    .as_ref()
+                    .map(|d| d.iter().filter_map(Value::as_number).collect())
+                    .unwrap_or_else(|| vec![0.]),
+                ScaleType::Quantile => {
+                    let n = options.n.unwrap_or(5);
+                    let mut sorted = numbers.clone();
+                    sorted.sort_by(f64::total_cmp);
+                    (1..n)
+                        .filter_map(|i| quantile(&sorted, i as f64 / n as f64))
+                        .collect()
+                }
+                _ => {
+                    let n = options.n.unwrap_or(5);
+                    let [lo, hi] = options
+                        .numeric_domain()
+                        .or_else(|| crate::scale::extent(values.iter().cloned()))?;
+                    (1..n)
+                        .map(|i| lo + (hi - lo) * i as f64 / n as f64)
+                        .collect()
+                }
+            };
+            let k = thresholds.len() + 1;
+            let scheme = options.scheme.as_deref().unwrap_or("rdylbu");
+            let colors = options
+                .colors
+                .clone()
+                .or_else(|| crate::css::discrete(scheme, k))
+                .unwrap_or_else(|| theme.palette.clone());
+            Some(
+                ColorScale::ordinal(Vec::new(), colors)
+                    .with_thresholds(thresholds)
+                    .with_unknown(unknown),
+            )
+        }
+        _ => {
+            let mut extent = options
+                .numeric_domain()
+                .or_else(|| crate::scale::extent(values.iter().cloned()))
+                .unwrap_or([0., 1.]);
+            if options.zero == Some(true) {
+                extent = [extent[0].min(0.), extent[1].max(0.)];
+            }
+            let diverging = kind == ScaleType::Diverging;
+            let default_scheme = if diverging { "rdbu" } else { "turbo" };
+            let mut range = match &options.colors {
+                Some(colors) => ColorRange::Continuous(colors.clone()),
+                None => crate::css::scheme(options.scheme.as_deref().unwrap_or(default_scheme))
+                    .unwrap_or_else(|| theme.sequential_range()),
+            };
+            // A categorical scheme over quantitative data interpolates its
+            // colors, as d3's piecewise interpolator would.
+            if let ColorRange::Ordinal(colors) = range {
+                range = ColorRange::Continuous(colors);
+            }
+            if options.reverse == Some(true)
+                && let ColorRange::Continuous(stops) = &mut range
+            {
+                stops.reverse();
+            }
+            let transform = match kind {
+                ScaleType::Log => Transform::Log,
+                ScaleType::Sqrt => Transform::Sqrt,
+                ScaleType::Symlog => Transform::Symlog,
+                _ => Transform::Linear,
+            };
+            let mut scale = ColorScale::continuous(extent, range)
+                .with_transform(transform)
+                .with_unknown(unknown);
+            if diverging {
+                scale = scale.with_pivot(options.pivot.unwrap_or(0.));
+            }
+            Some(scale)
+        }
+    }
+}
+
+/// The `p`-quantile of sorted numbers, d3's R-7 method.
+fn quantile(sorted: &[f64], p: f64) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let h = (sorted.len() - 1) as f64 * p;
+    let (lo, hi) = (h.floor() as usize, h.ceil() as usize);
+    Some(sorted[lo] + (sorted[hi] - sorted[lo]) * (h - h.floor()))
 }
 
 impl PlotColors {
-    /// Build the scales from the resolved marks.
+    /// Build the scales from the resolved marks and the plot's `color`
+    /// options.
     pub fn new(
         theme: &PlotTheme,
         facets: &[Vec<PreparedMark>],
         color: Option<(&SharedString, &ColorRange)>,
+        options: &ScaleOptions,
     ) -> Self {
-        // The ordinal domain: every series a mark colors by. A field-named
-        // fill or stroke (`fill: "sex"`) colors by that field; otherwise an
-        // unfilled mark colors by its `z`.
-        // Plot sorts an ordinal domain ascending, so a series' color does not
-        // depend on which row happens to come first.
-        let mut domain = crate::scale::dedup(facets.iter().flatten().flat_map(|mark| {
-            let channels = &mark.mark.channels;
-            let field = channels
-                .fill
-                .as_ref()
-                .and_then(|c| c.field())
-                .or_else(|| channels.stroke.as_ref().and_then(|c| c.field()))
-                .cloned();
-            let by_z = field.is_none() && channels.fill.is_none();
-            mark.rows.iter().filter_map(move |row| match &field {
-                Some(field) => row.row.get(field).map(|value| value.key()),
-                None if by_z => row.z.as_ref().map(|z| z.key()),
-                None => None,
-            })
-        }));
-        domain.sort();
-        let ordinal = ColorScale::ordinal(domain, theme.palette.clone());
+        let scale = color_scale(theme, &color_values(facets), options);
+        let ordinal = match &scale {
+            Some(scale) if scale.is_ordinal() => scale.clone(),
+            _ => ColorScale::ordinal(Vec::new(), theme.palette.clone()),
+        };
         let continuous = color.and_then(|(field, range)| {
             let values = facets
                 .iter()
@@ -66,62 +231,64 @@ impl PlotColors {
             Some((field.clone(), ColorScale::continuous(extent, range.clone())))
         });
         Self {
+            scale,
             ordinal,
             continuous,
             mark_color: theme.mark_color,
-            palette: theme.palette.clone(),
         }
     }
 
     /// The color a mark's color channel gives a row: a constant, an
-    /// accessor's result, or a field's value through the ordinal scale.
+    /// accessor's result, `currentColor`, or a field's value through the
+    /// plot's color scale.
     pub fn channel(&self, channel: &ColorChannel, row: &Table) -> Hsla {
         match channel {
-            ColorChannel::Field(field) => row
-                .get(field)
-                .and_then(|value| self.ordinal.color(value))
-                .unwrap_or(self.mark_color),
+            ColorChannel::Field(_) | ColorChannel::Value(_) => {
+                let Some(value) = channel.scaled_value(row) else {
+                    return Hsla::transparent_black();
+                };
+                // A value that is itself a CSS color paints as that color,
+                // Plot's identity color scale.
+                if let Some(color) = value.as_text().and_then(|t| crate::css::parse(t)) {
+                    return color;
+                }
+                self.scale
+                    .as_ref()
+                    .and_then(|scale| scale.color(&value))
+                    .unwrap_or(Hsla::transparent_black())
+            }
+            ColorChannel::Current => self.mark_color,
             _ => channel.read(row),
         }
     }
 
-    fn palette_color(&self, index: usize) -> Hsla {
-        if self.palette.is_empty() {
-            return self.mark_color;
-        }
-        self.palette[index % self.palette.len()]
+    /// The theme's `currentColor`.
+    pub fn default_fill_color(&self) -> Hsla {
+        self.mark_color
     }
 
-    /// The fill a mark paints when no channel or scale colors a row.
-    ///
-    /// A mark that draws series takes a palette color; a plain mark uses the
-    /// theme's one mark color, the way Plot paints every uncolored mark in
-    /// `currentColor`, so a line and a dot over the same data match.
-    pub fn default_fill(&self, prepared: &PreparedMark, mark_index: usize) -> Hsla {
-        if prepared.mark.channels.fill.is_some() {
-            return prepared.mark.style.fill;
+    /// The fill a mark paints when no channel colors a row: its style's fill
+    /// when it set one, else `currentColor`, the way Plot paints every
+    /// uncolored mark.
+    pub fn default_fill(&self, prepared: &PreparedMark, _mark_index: usize) -> Hsla {
+        let style = prepared.mark.style.fill;
+        if style != crate::mark::MarkStyle::default().fill {
+            return style;
         }
-        if has_series(prepared) {
-            self.palette_color(mark_index)
-        } else {
-            self.mark_color
-        }
+        self.mark_color
     }
 
-    /// The stroke a mark paints by default, matching its fill.
-    pub fn default_stroke(&self, prepared: &PreparedMark, mark_index: usize) -> Hsla {
-        if prepared.mark.channels.stroke.is_some() {
-            return prepared.mark.style.stroke;
+    /// The stroke a mark paints by default.
+    pub fn default_stroke(&self, prepared: &PreparedMark, _mark_index: usize) -> Hsla {
+        let style = prepared.mark.style.stroke;
+        if style != crate::mark::MarkStyle::default().stroke {
+            return style;
         }
-        if has_series(prepared) {
-            self.palette_color(mark_index)
-        } else {
-            self.mark_color
-        }
+        self.mark_color
     }
 
     /// The color a scale gives this row's fill, when one does: the mark's
-    /// fill channel, then the plot's continuous color, then its `z` series.
+    /// fill channel, then the plot's [`crate::Plot::color_by`] field.
     pub fn scaled_fill(&self, prepared: &PreparedMark, row: &PreparedRow) -> Option<Hsla> {
         if let Some(channel) = &prepared.mark.channels.fill {
             return Some(self.channel(channel, &row.row));
@@ -131,7 +298,7 @@ impl PlotColors {
         {
             return Some(color);
         }
-        row.z.as_ref().and_then(|z| self.ordinal.color(z))
+        None
     }
 
     /// The fill one row paints in.
@@ -141,8 +308,8 @@ impl PlotColors {
     }
 
     /// The color of one row's series, for a mark that paints per group rather
-    /// than per row: a line's stroke follows its stroke channel, else its `z`
-    /// value through the shared ordinal scale.
+    /// than per row: a line's stroke channel, else its fill channel (an
+    /// area's), else `currentColor`.
     pub fn series_color(
         &self,
         prepared: &PreparedMark,
@@ -152,10 +319,10 @@ impl PlotColors {
         if let Some(channel) = &prepared.mark.channels.stroke {
             return self.channel(channel, &row.row);
         }
-        row.z
-            .as_ref()
-            .and_then(|z| self.ordinal.color(z))
-            .unwrap_or_else(|| self.default_stroke(prepared, mark_index))
+        if let Some(channel) = &prepared.mark.channels.fill {
+            return self.channel(channel, &row.row);
+        }
+        self.default_stroke(prepared, mark_index)
     }
 
     /// The color that identifies a row in the legend and the tooltip: the

@@ -1,510 +1,224 @@
-//! The demo's sample datasets: the shapes Plot's own examples use.
+//! The datasets Plot's documentation draws, read from `demo/data/` the way
+//! the docs load them: `d3.csv(url, d3.autoType)`.
+//!
+//! The files are copied from Observable Plot's repository
+//! (`docs/public/data/`). Each loader parses its file once per thread and
+//! hands out a cheap clone.
 
-use chrono::{Duration, NaiveDate, TimeZone, Utc};
-use gpui_plot::{Table, Value};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
-/// A deterministic pseudo-random generator, so every run shows the same data.
-pub struct Rng(u64);
+use gpui_plot::{Dataset, Table, Value, io};
 
-impl Rng {
-    pub fn new(seed: u64) -> Self {
-        Self(seed)
+/// The text of a file in `demo/data/`.
+pub fn text(file: &str) -> String {
+    let path = format!("{}/data/{file}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+}
+
+thread_local! {
+    static CACHE: RefCell<HashMap<&'static str, Dataset>> = RefCell::new(HashMap::new());
+}
+
+/// A dataset parsed once and kept for the thread.
+fn cached(key: &'static str, load: impl FnOnce() -> Dataset) -> Dataset {
+    if let Some(data) = CACHE.with(|cache| cache.borrow().get(key).cloned()) {
+        return data;
     }
+    let data = load();
+    CACHE.with(|cache| cache.borrow_mut().insert(key, data.clone()));
+    data
+}
 
-    pub fn next_f64(&mut self) -> f64 {
-        // xorshift64*, which is small, fast and good enough for a demo.
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        ((x.wrapping_mul(0x2545F4914F6CDD1D)) >> 11) as f64 / (1u64 << 53) as f64
-    }
+macro_rules! csv_datasets {
+    ($($(#[$doc:meta])* $name:ident => $file:literal),* $(,)?) => {
+        $(
+            $(#[$doc])*
+            pub fn $name() -> Dataset {
+                cached($file, || {
+                    if $file.ends_with(".tsv") {
+                        io::tsv(&text($file))
+                    } else {
+                        io::csv(&text($file))
+                    }
+                })
+            }
+        )*
+    };
+}
 
-    pub fn next_in(&mut self, min: f64, max: f64) -> f64 {
-        min + self.next_f64() * (max - min)
-    }
+csv_datasets! {
+    /// Apple's daily stock price, 2013–2018.
+    aapl => "aapl.csv",
+    /// The relative frequency of English letters.
+    alphabet => "alphabet.csv",
+    /// Amazon's daily stock price.
+    amzn => "amzn.csv",
+    /// Anscombe's quartet.
+    anscombe => "anscombe.csv",
+    /// Athletes of the 2016 Summer Olympics, the docs' `olympians`.
+    olympians => "athletes.csv",
+    /// Barley yields in Minnesota, 1931–32.
+    barley => "barley.csv",
+    /// Unemployment by industry.
+    bls_industry_unemployment => "bls-industry-unemployment.csv",
+    /// Unemployment by metro division.
+    bls_metro_unemployment => "bls-metro-unemployment.csv",
+    /// An aeromagnetic survey off Caledonia.
+    ca55 => "ca55-south.csv",
+    /// Caltrain departures.
+    caltrain => "caltrain.csv",
+    /// Cars of the 1970s and early 80s.
+    cars => "cars.csv",
+    /// Civilizations' spans.
+    civilizations => "civilizations.csv",
+    /// Diamonds: carat, cut, color, clarity and price.
+    diamonds => "diamonds.csv",
+    /// The Dow Jones Industrial Average.
+    dji => "dji.csv",
+    /// Miles driven and the price of gas, 1956–2010.
+    driving => "driving.csv",
+    /// The Flare software package's classes, by path.
+    flare => "flare.csv",
+    /// NASA's global temperature anomaly, monthly.
+    gistemp => "gistemp.csv",
+    /// Google's daily stock price.
+    goog => "goog.csv",
+    /// IBM's daily stock price.
+    ibm => "ibm.csv",
+    /// Income by gender and age.
+    income_gender => "income-gender.csv",
+    /// IPOs' market value and returns.
+    ipos => "ipos.csv",
+    /// Metro areas' population and inequality, 1980 and 2015.
+    metros => "metros.csv",
+    /// Michelson–Morley's speed-of-light measurements.
+    morley => "morley.csv",
+    /// Palmer penguins.
+    penguins => "penguins.csv",
+    /// World Bank poverty headcounts.
+    povcalnet => "povcalnet.csv",
+    /// RIAA's US music revenue by format.
+    riaa => "riaa-us-revenue.csv",
+    /// Seattle's daily weather.
+    seattle => "seattle-weather.csv",
+    /// San Francisco and San Jose daily temperatures.
+    sf_sj_temperatures => "sf-sj-temperatures.csv",
+    /// San Francisco's daily high and low temperatures.
+    sftemp => "sf-temperatures.csv",
+    /// The Simpsons' episodes and ratings.
+    simpsons => "simpsons.csv",
+    /// Likert survey responses.
+    survey => "survey.csv",
+    /// The Tour de France 2017, stage 8's elevation.
+    tdf => "tdf-stage-8-2017.csv",
+    /// Traffic counts by location and hour.
+    traffic => "traffic.csv",
+    /// TSA checkpoint travelers.
+    travelers => "travelers.csv",
+    /// TSA throughput by year.
+    tsa => "tsa.csv",
+    /// The 118th US Congress's members.
+    congress => "us-congress-2023.csv",
+    /// US county populations.
+    us_county_population => "us-county-population.csv",
+    /// US county unemployment rates.
+    us_county_unemployment => "us-county-unemployment.csv",
+    /// US presidential favorability ratings.
+    us_president_favorability => "us-president-favorability.csv",
+    /// US presidential election results by county, 2020.
+    us_presidential_election_2020 => "us-presidential-election-2020.csv",
+    /// US state populations, 2010 and 2019.
+    us_state_population => "us-state-population-2010-2019.csv",
+    /// Wind speed and direction off the coast of Europe.
+    wind => "wind.csv",
+    /// Old Faithful's eruptions.
+    faithful => "faithful.tsv",
+    /// Walmart store openings.
+    walmarts => "walmarts.tsv",
+    /// A beagle's GPS track, as longitude/latitude pairs.
+    beagle_raw => "beagle.csv",
+}
 
-    /// A value from the standard normal distribution, by Box–Muller.
-    pub fn gaussian(&mut self) -> f64 {
-        let u1 = self.next_f64().max(f64::MIN_POSITIVE);
-        let u2 = self.next_f64();
+/// Deaths in the Crimean War by cause, as the docs reshape it: one row per
+/// date and cause (`disease`, `wounds`, `other`).
+pub fn crimea() -> Dataset {
+    cached("crimea", || {
+        let text = text("crimean-war.csv");
+        let columns = io::columns(&text, b',');
+        let wide = io::csv(&text);
+        Dataset::new(columns[2..].iter().flat_map(|cause| {
+            wide.rows().iter().map(move |row| {
+                Table::empty()
+                    .with("date", row.value("date"))
+                    .with("cause", Value::text(cause.clone()))
+                    .with("deaths", row.value(cause))
+            })
+        }))
+    })
+}
+
+/// HadCRUT's annual global temperature anomaly: `year` and `anomaly`.
+pub fn hadcrut() -> Dataset {
+    cached("hadcrut", || {
+        Dataset::new(text("hadcrut-annual.txt").lines().filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let year = fields.next()?.parse::<f64>().ok()?;
+            let anomaly = fields.next()?.parse::<f64>().ok()?;
+            Some(
+                Table::empty()
+                    .with("year", Value::Number(year))
+                    .with("anomaly", Value::Number(anomaly)),
+            )
+        }))
+    })
+}
+
+/// The population of each state by age group, reshaped tidy as the docs do:
+/// `state`, `age` and `population`, the ages in the file's column order.
+pub fn stateage() -> (Dataset, Vec<String>) {
+    let text = text("us-population-state-age.csv");
+    let ages: Vec<String> = io::columns(&text, b',')[1..].to_vec();
+    let wide = io::csv(&text);
+    let data = Dataset::new(ages.iter().flat_map(|age| {
+        wide.rows().iter().map(move |row| {
+            Table::empty()
+                .with("state", row.value("name"))
+                .with("age", Value::text(age.clone()))
+                .with("population", row.value(age))
+        })
+    }));
+    (data, ages)
+}
+
+/// The JSON text of a file in `demo/data/`, parsed.
+pub fn json(file: &str) -> serde_json::Value {
+    serde_json::from_str(&text(file))
+        .unwrap_or_else(|error| panic!("invalid JSON in {file}: {error}"))
+}
+
+/// A seeded standard-normal generator, standing in for the docs'
+/// `d3.randomNormal()`: Plot's examples draw fresh samples on every render,
+/// and a seed keeps the port's output stable.
+pub fn random_normal(seed: u64) -> impl FnMut() -> f64 {
+    let mut state = seed.max(1);
+    let mut uniform = move || {
+        // xorshift64*.
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+    };
+    move || {
+        let u1 = uniform().max(f64::MIN_POSITIVE);
+        let u2 = uniform();
         (-2. * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     }
 }
 
-/// Monthly observations of a few economic series, the shape of Plot's
-/// "Monthly economic indicators" example.
-pub fn economics() -> Vec<Table> {
-    let start = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
-    let mut rng = Rng::new(7);
-    let mut unemployment = 3.6;
-    let mut inflation = 2.0;
-
-    (0..60)
-        .map(|month| {
-            let date = start + Duration::days(30 * month);
-            unemployment = (unemployment + rng.next_in(-0.25, 0.3)).clamp(2.5, 14.);
-            inflation = (inflation + rng.next_in(-0.2, 0.22)).clamp(-1., 9.);
-            Table::empty()
-                .with("date", Value::date(date))
-                .with("unemployment", Value::Number(round1(unemployment)))
-                .with("inflation", Value::Number(round1(inflation)))
-                .with(
-                    "gdp",
-                    Value::Number(round1(1800. + month as f64 * 8. + rng.next_in(-40., 40.))),
-                )
-        })
-        .collect()
-}
-
-/// Daily temperature readings with a seasonal cycle, the shape of Plot's
-/// "Line chart" example.
-pub fn temperature() -> Vec<Table> {
-    let start = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
-    let mut rng = Rng::new(11);
-
-    (0..365)
-        .map(|day| {
-            let date = start + Duration::days(day);
-            let season = ((day as f64 / 365.) * std::f64::consts::TAU - 1.9).sin();
-            let base = 12. + season * 11.;
-            let noise = rng.gaussian() * 2.5;
-            Table::empty()
-                .with("date", Value::date(date))
-                .with("temperature", Value::Number(round1(base + noise)))
-                .with(
-                    "humidity",
-                    Value::Number(round1(60. + season * 15. + rng.gaussian() * 4.)),
-                )
-        })
-        .collect()
-}
-
-/// Categorical counts, the shape of Plot's bar chart examples.
-pub fn sales() -> Vec<Table> {
-    const REGIONS: [&str; 5] = ["North", "South", "East", "West", "Central"];
-    let mut rng = Rng::new(3);
-
-    REGIONS
-        .iter()
-        .map(|region| {
-            Table::empty()
-                .with("region", Value::text(*region))
-                .with("sales", Value::Number((rng.next_in(40., 180.)).round()))
-        })
-        .collect()
-}
-
-/// Stacked series over months, the shape of Plot's stacked area example.
-pub fn stacked() -> Vec<Table> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let mut rng = Rng::new(5);
-
-    MONTHS
-        .iter()
-        .map(|month| {
-            Table::empty()
-                .with("month", Value::text(*month))
-                .with("desktop", Value::Number((rng.next_in(20., 60.)).round()))
-                .with("mobile", Value::Number((rng.next_in(30., 90.)).round()))
-                .with("tablet", Value::Number((rng.next_in(5., 25.)).round()))
-        })
-        .collect()
-}
-
-/// Long-form stacked data: one row per (month, platform).
-pub fn long_stacked() -> Vec<Table> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    const PLATFORMS: [&str; 3] = ["Desktop", "Mobile", "Tablet"];
-    let mut rng = Rng::new(9);
-    let mut rows = Vec::with_capacity(MONTHS.len() * PLATFORMS.len());
-
-    for month in MONTHS {
-        for platform in PLATFORMS {
-            rows.push(
-                Table::empty()
-                    .with("month", Value::text(month))
-                    .with("platform", Value::text(platform))
-                    .with("visits", Value::Number((rng.next_in(10., 80.)).round())),
-            );
-        }
-    }
-
-    rows
-}
-
-/// Two well-separated clouds, for the Delaunay and Voronoi marks: enough
-/// points that the triangulation has structure to show.
-pub fn clusters() -> Vec<Table> {
-    let mut rng = Rng::new(31);
-    let centres = [(3.0, 3.0), (8.0, 7.0)];
-    let mut rows = Vec::with_capacity(60);
-
-    for (index, (cx, cy)) in centres.into_iter().enumerate() {
-        for _ in 0..30 {
-            rows.push(
-                Table::empty()
-                    .with("x", Value::Number(round2(cx + rng.gaussian() * 1.4)))
-                    .with("y", Value::Number(round2(cy + rng.gaussian() * 1.4)))
-                    .with(
-                        "group",
-                        Value::text(if index == 0 { "left" } else { "right" }),
-                    ),
-            );
-        }
-    }
-
-    rows
-}
-
-/// Monthly readings from an uneven set of sensors, for the grouping transforms:
-/// several rows per month that a group reduces to one range and one count.
-pub fn readings() -> Vec<Table> {
-    const MONTHS: [&str; 8] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"];
-    let mut rng = Rng::new(37);
-    let mut rows = Vec::new();
-
-    for (month, name) in MONTHS.into_iter().enumerate() {
-        let drift = 40. + month as f64 * 4.;
-        // Sensors report in uneven numbers, so a count per month has a shape.
-        let sensors = 4 + (month * 2) % 5;
-        for sensor in 0..sensors {
-            rows.push(
-                Table::empty()
-                    .with("month", Value::text(name))
-                    .with("sensor", Value::Number(sensor as f64))
-                    .with(
-                        "reading",
-                        Value::Number(round1(drift + rng.next_in(-14., 14.))),
-                    ),
-            );
-        }
-    }
-
-    rows
-}
-
-/// Quarterly sales by region and channel, for the facet grid: two categorical
-/// fields to split the figure by, and a quantitative one to draw.
-pub fn faceted_sales() -> Vec<Table> {
-    const REGIONS: [&str; 3] = ["North", "South", "East"];
-    const CHANNELS: [&str; 2] = ["Retail", "Online"];
-    const QUARTERS: [&str; 4] = ["Q1", "Q2", "Q3", "Q4"];
-    let mut rng = Rng::new(29);
-    let mut rows = Vec::with_capacity(REGIONS.len() * CHANNELS.len() * QUARTERS.len());
-
-    for region in REGIONS {
-        for channel in CHANNELS {
-            for quarter in QUARTERS {
-                rows.push(
-                    Table::empty()
-                        .with("region", Value::text(region))
-                        .with("channel", Value::text(channel))
-                        .with("quarter", Value::text(quarter))
-                        .with("sales", Value::Number((rng.next_in(20., 90.)).round())),
-                );
-            }
-        }
-    }
-
-    rows
-}
-
-/// A wide grid of values over two categorical fields, for a heatmap cell mark.
-pub fn heatmap() -> Vec<Table> {
-    const COLUMNS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    const ROWS: [&str; 8] = ["00", "03", "06", "09", "12", "15", "18", "21"];
-    let mut rng = Rng::new(13);
-    let mut rows = Vec::with_capacity(ROWS.len() * COLUMNS.len());
-
-    for row in ROWS {
-        for column in COLUMNS {
-            // A workload curve: busy at midday, quiet at night.
-            let hour = row.parse::<f64>().unwrap_or(0.);
-            let busy = 1. - ((hour - 13.) / 8.).abs();
-            let value = (busy * 40. + rng.next_in(0., 18.)).round();
-            rows.push(
-                Table::empty()
-                    .with("hour", Value::text(row))
-                    .with("day", Value::text(column))
-                    .with("activity", Value::Number(value)),
-            );
-        }
-    }
-
-    rows
-}
-
-/// A two-dimensional cloud with two clusters, for hexbin and density marks.
-pub fn cloud() -> Vec<Table> {
-    let mut rng = Rng::new(17);
-    let mut rows = Vec::with_capacity(400);
-
-    for index in 0..400 {
-        let (cx, cy, spread, group) = if index % 3 == 0 {
-            (2.0, 6.0, 0.8, "alpha")
-        } else {
-            (6.0, 2.0, 1.2, "beta")
-        };
-        rows.push(
-            Table::empty()
-                .with("x", Value::Number(round2(cx + rng.gaussian() * spread)))
-                .with("y", Value::Number(round2(cy + rng.gaussian() * spread)))
-                .with("group", Value::text(group)),
-        );
-    }
-    rows
-}
-
-/// Grouped distributions, for box and violin marks.
-pub fn distributions() -> Vec<Table> {
-    const GROUPS: [(&str, f64, f64); 4] = [
-        ("control", 50., 6.),
-        ("treatment-a", 56., 9.),
-        ("treatment-b", 62., 4.),
-        ("placebo", 52., 12.),
-    ];
-    let mut rng = Rng::new(19);
-    let mut rows = Vec::with_capacity(GROUPS.len() * 60);
-
-    for (group, mean, spread) in GROUPS {
-        for _ in 0..60 {
-            rows.push(Table::empty().with("group", Value::text(group)).with(
-                "score",
-                Value::Number(round1(mean + rng.gaussian() * spread)),
-            ));
-        }
-    }
-
-    rows
-}
-
-/// Market shares, for pie, arc and waffle marks.
-pub fn market_share() -> Vec<Table> {
-    [
-        ("Search", 46.),
-        ("Social", 24.),
-        ("Direct", 18.),
-        ("Referral", 8.),
-        ("Email", 4.),
-    ]
-    .into_iter()
-    .map(|(channel, share)| {
-        Table::empty()
-            .with("channel", Value::text(channel))
-            .with("share", Value::Number(share))
-    })
-    .collect()
-}
-
-/// A bipartite flow, for the link mark.
-pub fn flows() -> Vec<Table> {
-    [
-        ("Solar", "Homes", 32.),
-        ("Solar", "Industry", 18.),
-        ("Wind", "Homes", 24.),
-        ("Wind", "Industry", 14.),
-        ("Hydro", "Homes", 8.),
-        ("Hydro", "Industry", 4.),
-    ]
-    .into_iter()
-    .map(|(source, target, value)| {
-        Table::empty()
-            .with("source", Value::text(source))
-            .with("target", Value::text(target))
-            .with("value", Value::Number(value))
-            .with("source_x", Value::Number(source_index(source)))
-            .with("target_x", Value::Number(target_index(target)))
-            .with("row", Value::Number(flow_row(source, target)))
-    })
-    .collect()
-}
-
-fn source_index(source: &str) -> f64 {
-    match source {
-        "Solar" => 0.,
-        "Wind" => 1.,
-        _ => 2.,
-    }
-}
-
-fn target_index(target: &str) -> f64 {
-    match target {
-        "Homes" => 0.,
-        _ => 1.,
-    }
-}
-
-fn flow_row(source: &str, target: &str) -> f64 {
-    let source = source_index(source);
-    let target = target_index(target);
-    source * 2. + target
-}
-
-/// A family tree as slash-separated paths, for the `tree` mark: one row per
-/// descendant path, so shared prefixes make the hierarchy.
-pub fn genealogy() -> Vec<Table> {
-    const PATHS: [&str; 13] = [
-        "Root",
-        "Root/Athena",
-        "Root/Athena/Pallas",
-        "Root/Athena/Nike",
-        "Root/Ares",
-        "Root/Ares/Deimos",
-        "Root/Ares/Phobos",
-        "Root/Hermes",
-        "Root/Hermes/Pan",
-        "Root/Hermes/Daphnis",
-        "Root/Apollo",
-        "Root/Apollo/Asclepius",
-        "Root/Apollo/Python",
-    ];
-    PATHS
-        .into_iter()
-        .map(|path| {
-            Table::empty()
-                .with("path", Value::text(path))
-                .with("node", Value::text(path.rsplit('/').next().unwrap_or(path)))
-        })
-        .collect()
-}
-
-/// A short, irregular series for comparing curve interpolations: a dozen
-/// points that make a spline's overshoot visible.
-pub fn curve_points() -> Vec<Table> {
-    const VALUES: [f64; 12] = [12., 34., 28., 58., 46., 72., 40., 66., 54., 80., 62., 88.];
-    VALUES
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            Table::empty()
-                .with("step", Value::Number(index as f64))
-                .with("value", Value::Number(value))
-        })
-        .collect()
-}
-
-/// A time series with a moving average, for the window transform.
-pub fn noisy_series() -> Vec<Table> {
-    let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let mut rng = Rng::new(23);
-    let mut value = 100.;
-
-    (0..120)
-        .map(|day| {
-            value += rng.gaussian() * 4. + 0.3;
-            Table::empty()
-                .with(
-                    "date",
-                    Value::date((start + Duration::days(day)).date_naive()),
-                )
-                .with("value", Value::Number(round1(value)))
-        })
-        .collect()
-}
-
-fn round1(value: f64) -> f64 {
-    (value * 10.).round() / 10.
-}
-
-fn round2(value: f64) -> f64 {
-    (value * 100.).round() / 100.
-}
-
-/// A small deterministic RGBA image for the `image` mark: a blue-to-yellow
-/// horizontal gradient, so its pixels render visibly and its extent can be
-/// checked at a glance. The bytes are stable across runs.
-pub fn gradient_image() -> std::sync::Arc<gpui_kit::RenderImage> {
-    let (width, height) = (24u32, 24u32);
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-    for _y in 0..height {
-        for x in 0..width {
-            let t = x as f32 / (width - 1) as f32;
-            rgba.extend_from_slice(&[
-                (t * 255.) as u8, // red rises left→right
-                (t * 255.) as u8, // green blends blue→yellow
-                0,                // blue falls as red rises
-                255,              // opaque
-            ]);
-        }
-    }
-    gpui_plot::image_from_rgba(width, height, rgba)
-}
-
-/// A lon/lat route across a sea, for the `geo` mark: a few points a projected
-/// path connects — the equirectangular view keeps them a flat ship's track.
-pub fn route() -> Vec<Table> {
-    // (lon, lat) across the Bay of Biscay, roughly west→east then north.
-    [
-        (-9.0, 43.5),
-        (-6.0, 44.0),
-        (-3.0, 45.5),
-        (0.0, 46.0),
-        (2.0, 48.0),
-    ]
-    .into_iter()
-    .map(|(lon, lat)| {
-        Table::empty()
-            .with("lon", Value::Number(lon))
-            .with("lat", Value::Number(lat))
-    })
-    .collect()
-}
-
-/// A small GeoJSON source — two square islands — for the `geo` mark's
-/// GeoJSON loading: a FeatureCollection of Polygons a caller has read from a
-/// file or URL. This stands in for a real world-coast dataset.
-pub fn geojson_archipelago() -> &'static str {
-    r#"{
-        "type": "FeatureCollection",
-        "features": [
-            {"type": "Feature", "properties": {"name": "main"}, "geometry": {
-                "type": "Polygon",
-                "coordinates": [[[-9.5, 42.0], [-8.5, 42.0], [-8.5, 43.0], [-9.5, 43.0], [-9.5, 42.0]]]
-            }},
-            {"type": "Feature", "properties": {"name": "isle"}, "geometry": {
-                "type": "Polygon",
-                "coordinates": [[[-8.0, 42.4], [-7.4, 42.4], [-7.4, 43.0], [-8.0, 43.0], [-8.0, 42.4]]]
-            }}
-        ]
-    }"#
-}
-
-/// Athletes of the 2016 Summer Olympics, the shape of Plot's `olympians`
-/// dataset: one row per athlete with `sex`, `weight` (kg) and `height` (m).
-///
-/// The real table has 11,538 athletes. This one is drawn deterministically
-/// from the same marginals — men taller and heavier, weight following height
-/// through a body-mass index — so the "What is Plot?" examples show the same
-/// shapes without shipping the CSV.
-pub fn olympians() -> Vec<Table> {
-    let mut rng = Rng::new(2016);
-    (0..11_538)
-        .map(|_| {
-            let female = rng.next_f64() < 0.45;
-            let (height_mean, height_sd, bmi_mean, bmi_sd) = if female {
-                (1.70, 0.085, 21.3, 2.2)
-            } else {
-                (1.81, 0.095, 23.4, 2.9)
-            };
-            let height = (height_mean + rng.gaussian() * height_sd).clamp(1.21, 2.21);
-            // A long right tail: weightlifters, throwers and judoka.
-            let tail = if rng.next_f64() < 0.04 {
-                rng.next_in(4., 14.)
-            } else {
-                0.
-            };
-            let bmi = (bmi_mean + rng.gaussian() * bmi_sd + tail).max(15.);
-            let weight = (bmi * height * height).clamp(31., 170.);
-            Table::empty()
-                .with("sex", Value::text(if female { "female" } else { "male" }))
-                .with("weight", Value::Number(weight.round()))
-                .with("height", Value::Number((height * 100.).round() / 100.))
-        })
-        .collect()
+/// `n` records holding `field`, each a draw from [`random_normal`]: the
+/// docs' `{length: n}` data with `x: d3.randomNormal()`.
+pub fn normal_samples(n: usize, field: &str, seed: u64) -> Dataset {
+    let mut normal = random_normal(seed);
+    Dataset::new((0..n).map(|_| Table::empty().with(field.to_string(), Value::Number(normal()))))
 }

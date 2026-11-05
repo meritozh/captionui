@@ -7,7 +7,7 @@
 //! only draw while hovering) are exercised.
 
 use gpui_kit::{IntoElement, ParentElement, Render, Styled, TestAppContext, div, px};
-use gpui_plot_demo::gallery;
+use gpui_plot_demo::examples;
 
 /// A window holding one plot, sized like the gallery.
 struct Host {
@@ -34,7 +34,7 @@ fn context() -> TestAppContext {
 #[test]
 fn sweeping_the_pointer_across_every_example_does_not_error() {
     let mut cx = context();
-    let examples = gallery::examples();
+    let examples = examples::examples();
     let mut failures = Vec::new();
 
     // gpui-kit's init installs the Theme global the plots read; replicate what
@@ -62,7 +62,7 @@ fn sweeping_the_pointer_across_every_example_does_not_error() {
                     window.run_until_parked();
                 }));
                 if result.is_err() {
-                    failures.push(format!("{}: panicked at ({x:.0},{y:.0})", example.title));
+                    failures.push(format!("{}: panicked at ({x:.0},{y:.0})", example.id()));
                     break;
                 }
             }

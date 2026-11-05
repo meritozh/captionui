@@ -35,16 +35,22 @@
 extern crate gpui_kit as gpui;
 
 pub mod auto;
+pub mod css;
 pub mod delaunay;
 pub mod density;
 pub mod facet;
+pub mod format;
 pub mod frame;
+pub mod io;
 pub mod mark;
+pub mod marks;
+pub mod options;
 pub mod paint;
 pub mod plot;
 pub mod projection;
 pub mod render;
 pub mod scale;
+pub mod schemes;
 pub mod style;
 pub mod table;
 pub mod theme;
@@ -69,6 +75,7 @@ pub use transform::{
 pub use value::{PlotKind, Value};
 
 pub use frame::{FrameOptions, ScaleKind};
+pub use options::{AxisAnchor, LabelAnchor, ScaleOptions, ScaleType, TickFormat, Ticks};
 pub use plot::{Interaction, LegendPosition, Plot, PlotTitle};
 pub use projection::{Equirectangular, Mercator, Projection, centroid, geojson_rings};
 
@@ -88,3 +95,4 @@ pub fn image_from_rgba(
     let render = gpui::RenderImage::new(smallvec::smallvec![frame]);
     std::sync::Arc::new(render)
 }
+pub use render::stack::{NormalizeBasis, Offset, StackAnchor, StackOrder};

@@ -12,13 +12,11 @@ use gpui::{
     AnyElement, App, Bounds, ElementId, FontWeight, Hsla, IntoElement, ParentElement, Pixels,
     Point, SharedString, TextAlign, Window, point, px,
 };
-use gpui_kit::base::plot::{
-    Plot as PlotTrait, PlotAppear, PlotElement, PlotHover, TooltipState, axis_gutter,
-};
+use gpui_kit::base::plot::{Plot as PlotTrait, PlotAppear, PlotElement, PlotHover, TooltipState};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::plot::tooltip::{CrossLine, Dot, Tooltip};
 
-use crate::facet::{FACET_LABEL_GAP, Grid};
+use crate::facet::Grid;
 use crate::frame::{Frame, FrameOptions, Insets, ScaleKind};
 use crate::mark::{Mark, MarkKind};
 use crate::paint::{self, Label};
@@ -39,6 +37,9 @@ const LEGEND_SWATCH_GAP: f32 = 14.;
 const LEGEND_ENTRY_GAP: f32 = 14.;
 /// The margin between the figure's edge and a legend's first swatch.
 const LEGEND_MARGIN: f32 = 8.;
+/// Plot's ramp legend: 240 pixels wide, 50 tall.
+const RAMP_WIDTH: f32 = 240.;
+const RAMP_HEIGHT: f32 = 50.;
 /// The gap between a y-axis label's right edge and the axis line, matching
 /// GPUI Base's `TEXT_GAP` for the axis labels it draws.
 const AXIS_LABEL_GAP: f32 = 4.;
@@ -46,8 +47,7 @@ const AXIS_LABEL_GAP: f32 = 4.;
 /// How a legend lays its entries out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LegendPosition {
-    /// Above the plot, as Plot's default legend. (Default.)
-    #[default]
+    /// Above the plot, where Plot puts its legends.
     Top,
     /// Below the plot.
     Bottom,
@@ -55,7 +55,9 @@ pub enum LegendPosition {
     Left,
     /// Right of the plot.
     Right,
-    /// No legend.
+    /// No legend, Plot's default unless a scale asks for one with
+    /// `legend: true`.
+    #[default]
     None,
 }
 
@@ -129,6 +131,20 @@ pub struct Plot {
     grid: bool,
     x_axis: bool,
     y_axis: bool,
+    /// Plot's per-scale options: `x: {…}`, `color: {…}` and so on.
+    scales: Scales,
+    /// Plot's `marginTop`, `marginRight`, `marginBottom` and `marginLeft`;
+    /// `None` takes the default the axes imply.
+    margins: [Option<f32>; 4],
+    /// Plot's `axis: null`, which hides every axis.
+    no_axes: bool,
+    /// Plot's `label: null`, which hides every axis label.
+    no_labels: bool,
+    /// Plot's `aspectRatio`: the plot's height follows from its width so a
+    /// unit of x is this many units of y.
+    aspect_ratio: Option<f32>,
+    /// Plot's `caption`.
+    caption: Option<SharedString>,
     /// The x axis label, Plot's `x.label`: `None` derives it from the marks'
     /// x field; an empty label hides it.
     x_label: Option<SharedString>,
@@ -166,8 +182,20 @@ pub struct Plot {
     appear_progress: f32,
 }
 
-/// The band an axis label takes beyond its own text height, in pixels.
-const AXIS_LABEL_BAND: f32 = 6.;
+/// Every scale's options, Plot's `x`, `y`, `fx`, `fy`, `color`, `r`,
+/// `opacity`, `symbol` and `length` objects.
+#[derive(Clone, Debug, Default)]
+pub struct Scales {
+    pub x: crate::options::ScaleOptions,
+    pub y: crate::options::ScaleOptions,
+    pub fx: crate::options::ScaleOptions,
+    pub fy: crate::options::ScaleOptions,
+    pub color: crate::options::ScaleOptions,
+    pub r: crate::options::ScaleOptions,
+    pub opacity: crate::options::ScaleOptions,
+    pub symbol: crate::options::ScaleOptions,
+    pub length: crate::options::ScaleOptions,
+}
 
 impl Plot {
     /// A plot of `data` with no marks yet.
@@ -180,9 +208,16 @@ impl Plot {
             title: PlotTitle::default(),
             legend: LegendPosition::default(),
             legend_title: None,
-            grid: true,
+            // Plot draws no grid unless asked.
+            grid: false,
             x_axis: true,
             y_axis: true,
+            scales: Scales::default(),
+            margins: [None; 4],
+            no_axes: false,
+            no_labels: false,
+            aspect_ratio: None,
+            caption: None,
             x_label: None,
             y_label: None,
             interaction: Interaction::default(),
@@ -201,6 +236,258 @@ impl Plot {
             frame_cache: None,
             appear_progress: 1.,
         }
+    }
+
+    /// An empty plot whose marks bring their own data, Plot's
+    /// `Plot.plot({marks: […]})`.
+    #[track_caller]
+    #[allow(clippy::self_named_constructors)]
+    pub fn plot() -> Self {
+        Self::new(std::iter::empty())
+    }
+
+    /// Plot's `x: {…}` scale options.
+    pub fn x(
+        mut self,
+        f: impl FnOnce(crate::options::ScaleOptions) -> crate::options::ScaleOptions,
+    ) -> Self {
+        self.scales.x = f(std::mem::take(&mut self.scales.x));
+        self
+    }
+
+    /// Plot's `y: {…}` scale options.
+    pub fn y(
+        mut self,
+        f: impl FnOnce(crate::options::ScaleOptions) -> crate::options::ScaleOptions,
+    ) -> Self {
+        self.scales.y = f(std::mem::take(&mut self.scales.y));
+        self
+    }
+
+    /// Plot's `fx: {…}` scale options.
+    pub fn fx_scale(
+        mut self,
+        f: impl FnOnce(crate::options::ScaleOptions) -> crate::options::ScaleOptions,
+    ) -> Self {
+        self.scales.fx = f(std::mem::take(&mut self.scales.fx));
+        self
+    }
+
+    /// Plot's `fy: {…}` scale options.
+    pub fn fy_scale(
+        mut self,
+        f: impl FnOnce(crate::options::ScaleOptions) -> crate::options::ScaleOptions,
+    ) -> Self {
+        self.scales.fy = f(std::mem::take(&mut self.scales.fy));
+        self
+    }
+
+    /// Plot's `color: {…}` scale options.
+    pub fn color(
+        mut self,
+        f: impl FnOnce(crate::options::ScaleOptions) -> crate::options::ScaleOptions,
+    ) -> Self {
+        self.scales.color = f(std::mem::take(&mut self.scales.color));
+        self
+    }
+
+    /// Plot's `r: {…}` scale options.
+    pub fn r(
+        mut self,
+        f: impl FnOnce(crate::options::ScaleOptions) -> crate::options::ScaleOptions,
+    ) -> Self {
+        self.scales.r = f(std::mem::take(&mut self.scales.r));
+        self
+    }
+
+    /// Plot's `opacity: {…}` scale options.
+    pub fn opacity(
+        mut self,
+        f: impl FnOnce(crate::options::ScaleOptions) -> crate::options::ScaleOptions,
+    ) -> Self {
+        self.scales.opacity = f(std::mem::take(&mut self.scales.opacity));
+        self
+    }
+
+    /// Plot's `symbol: {…}` scale options.
+    pub fn symbol(
+        mut self,
+        f: impl FnOnce(crate::options::ScaleOptions) -> crate::options::ScaleOptions,
+    ) -> Self {
+        self.scales.symbol = f(std::mem::take(&mut self.scales.symbol));
+        self
+    }
+
+    /// Plot's `length: {…}` scale options.
+    pub fn length(
+        mut self,
+        f: impl FnOnce(crate::options::ScaleOptions) -> crate::options::ScaleOptions,
+    ) -> Self {
+        self.scales.length = f(std::mem::take(&mut self.scales.length));
+        self
+    }
+
+    /// The scale options set so far.
+    pub fn scales(&self) -> &Scales {
+        &self.scales
+    }
+
+    /// Plot's `margin`: every side.
+    pub fn margin(mut self, margin: f32) -> Self {
+        self.margins = [Some(margin); 4];
+        self
+    }
+
+    /// Plot's `marginTop`.
+    pub fn margin_top(mut self, margin: f32) -> Self {
+        self.margins[0] = Some(margin);
+        self
+    }
+
+    /// Plot's `marginRight`.
+    pub fn margin_right(mut self, margin: f32) -> Self {
+        self.margins[1] = Some(margin);
+        self
+    }
+
+    /// Plot's `marginBottom`.
+    pub fn margin_bottom(mut self, margin: f32) -> Self {
+        self.margins[2] = Some(margin);
+        self
+    }
+
+    /// Plot's `marginLeft`.
+    pub fn margin_left(mut self, margin: f32) -> Self {
+        self.margins[3] = Some(margin);
+        self
+    }
+
+    /// Plot's `axis: null`: no axes at all.
+    pub fn no_axes(mut self) -> Self {
+        self.no_axes = true;
+        self
+    }
+
+    /// Plot's `aspectRatio`.
+    pub fn aspect_ratio(mut self, ratio: f32) -> Self {
+        self.aspect_ratio = Some(ratio);
+        self
+    }
+
+    /// Plot's `caption`, below the plot.
+    pub fn caption(mut self, caption: impl Into<SharedString>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+
+    /// The height the figure takes at `width`: the chart's height (its
+    /// [`Plot::height`], or Plot's `autoHeight` — 400-odd pixels for a
+    /// continuous y, twenty per value for an ordinal one, sixty for a plot
+    /// with no y at all, or what `aspectRatio` asks for) plus the title,
+    /// legend and caption above and below it.
+    pub fn natural_height(&self, width: f32) -> f32 {
+        let grid = self.facet_grid();
+        let (facets, _) = render::prepare_facets(
+            &self.data,
+            &self.marks,
+            &grid,
+            self.fx.as_deref(),
+            self.fy.as_deref(),
+        );
+        let [mt, mr, mb, ml] = self.plot_margins(&grid);
+        let y_values = self.y_domain_values(&facets);
+        let x_values = self.x_domain_values(&facets);
+        let nfy = grid.fy.as_ref().map_or(1, |d| d.len().max(1)) as f32;
+        let nfx = grid.fx.as_ref().map_or(1, |d| d.len().max(1)) as f32;
+        let ordinal = |values: &[Value], options: &crate::options::ScaleOptions| {
+            options.r#type.is_some_and(|t| t.is_discrete())
+                || (options.r#type.is_none()
+                    && values
+                        .iter()
+                        .find(|v| !v.is_null())
+                        .is_some_and(|v| !v.kind().is_quantitative()))
+        };
+        // Plot's autoHeight counts a y scale whether or not its axis draws.
+        let has_y = !y_values.is_empty() || grid.fy.is_some();
+        let chart = match (self.height, self.aspect_ratio) {
+            (Some(height), _) => height,
+            (None, Some(ratio)) => {
+                let length = |values: &[Value], options: &crate::options::ScaleOptions| -> f32 {
+                    if ordinal(values, options) {
+                        let n = crate::scale::dedup(values.iter().map(Value::key))
+                            .len()
+                            .max(1);
+                        return n as f32;
+                    }
+                    let [lo, hi] = options
+                        .numeric_domain()
+                        .or_else(|| crate::scale::extent(values.iter().cloned()))
+                        .unwrap_or([0., 1.]);
+                    let t = |v: f64| match options.r#type {
+                        Some(crate::options::ScaleType::Log) => v.max(f64::MIN_POSITIVE).log10(),
+                        Some(crate::options::ScaleType::Sqrt) => v.sqrt(),
+                        _ => v,
+                    };
+                    (t(hi) - t(lo)).abs().max(f64::MIN_POSITIVE) as f32
+                };
+                let ratio =
+                    length(&y_values, &self.scales.y) / (length(&x_values, &self.scales.x) * ratio);
+                let w = (width - ml - mr) / (1.1 * nfx - 0.1).max(1.);
+                ratio * w * (1.1 * nfy - 0.1).max(1.) + mt + mb
+            }
+            (None, None) => {
+                let ny = if !has_y {
+                    1.
+                } else if ordinal(&y_values, &self.scales.y) {
+                    crate::scale::dedup(y_values.iter().map(Value::key))
+                        .len()
+                        .max(1) as f32
+                } else {
+                    (17. / nfy).max(7.)
+                };
+                let base = if has_y {
+                    (ny * nfy).clamp(1., 60.) * 20.
+                } else {
+                    0.
+                };
+                base + if grid.fx.is_some() { 30. } else { 0. } + 60.
+            }
+        };
+        // The figure's extras: the title, legend and caption bands.
+        let mut extras = 0.;
+        if self.title.text.is_some() {
+            extras += 13. + 6.;
+            if self.title.subtitle.is_some() {
+                extras += 14.;
+            }
+        }
+        if self.legend_position() != LegendPosition::None {
+            extras += if self.color_is_continuous(&facets) {
+                50.
+            } else {
+                LEGEND_BAND + 13.
+            };
+        }
+        if self.caption.is_some() {
+            extras += 18.;
+        }
+        chart + extras
+    }
+
+    /// Whether the plot's color scale is a continuous ramp.
+    fn color_is_continuous(&self, facets: &[Vec<PreparedMark>]) -> bool {
+        let theme = PlotTheme {
+            palette: ColorRange::observable10_colors(),
+            ..PlotTheme::from_theme(&gpui_kit::component::Theme::default())
+        };
+        self.plot_colors(&theme, facets)
+            .scale
+            .is_some_and(|scale| !scale.is_ordinal())
+    }
+
+    /// The height the plot asked for with [`Plot::height`], if any.
+    pub fn requested_height(&self) -> Option<f32> {
+        self.height
     }
 
     /// A plot over an existing [`Dataset`].
@@ -1096,9 +1383,8 @@ impl Plot {
         self
     }
 
-    /// Color the marks by a quantitative field, Plot's `fill` with a
-    /// continuous range.
-    pub fn color(mut self, field: impl Into<SharedString>, range: ColorRange) -> Self {
+    /// Color the marks by a quantitative field through `range`.
+    pub fn color_by(mut self, field: impl Into<SharedString>, range: ColorRange) -> Self {
         self.color_field = Some(field.into());
         self.color_range = Some(range);
         self
@@ -1155,16 +1441,28 @@ impl Plot {
     /// value a mark could draw there — the same values Plot's facet band
     /// scales read.
     fn facet_grid(&self) -> Grid {
-        let domain = |field: Option<&SharedString>| match field {
-            Some(field) => self
-                .data
-                .values(field)
-                .into_iter()
-                .filter(|value| !value.is_null())
-                .collect(),
-            None => Vec::new(),
-        };
-        Grid::from_values(domain(self.fx.as_ref()), domain(self.fy.as_ref()))
+        // The domains are every facet value a mark could draw: the plot's
+        // `fx`/`fy` over its data, and each mark's own facet channels over
+        // the mark's data.
+        let mut fx: Vec<Value> = Vec::new();
+        let mut fy: Vec<Value> = Vec::new();
+        if let Some(field) = &self.fx {
+            fx.extend(self.data.values(field));
+        }
+        if let Some(field) = &self.fy {
+            fy.extend(self.data.values(field));
+        }
+        for mark in &self.marks {
+            let data = mark.data.as_ref().unwrap_or(&self.data);
+            for (channel, values) in [(&mark.fx, &mut fx), (&mark.fy, &mut fy)] {
+                if let Some(channel) = channel {
+                    values.extend(data.rows().iter().map(|row| channel.read(row)));
+                }
+            }
+        }
+        fx.retain(|value| !value.is_null());
+        fy.retain(|value| !value.is_null());
+        Grid::from_values(fx, fy)
     }
 
     /// The resolved layout: the insets the frame reserves.
@@ -1181,73 +1479,20 @@ impl Plot {
         grid: &Grid,
         width: f32,
     ) -> (Insets, Insets) {
+        let margins = self.plot_margins(grid);
+        let _ = AXIS_LABEL_GAP;
         let mut insets = Insets {
-            top: 8.,
-            right: 12.,
-            bottom: 8.,
-            left: 12.,
+            top: margins[0],
+            right: margins[1],
+            bottom: margins[2],
+            left: margins[3],
         };
-        let mut facet_insets = Insets::default();
-
-        if self.x_axis {
-            facet_insets.bottom += axis_gutter(theme.label_size);
-        }
-        if self.y_axis {
-            // The axis line sits at the plot's left edge and its labels
-            // right-align against it, one `TEXT_GAP` to its left.
-            let widest = self
-                .y_tick_labels(facets)
-                .into_iter()
-                .map(|label| {
-                    paint::measure(&label, theme.label_size, window)
-                        .width
-                        .as_f32()
-                })
-                .fold(0.0_f32, f32::max);
-            facet_insets.left += widest + AXIS_LABEL_GAP;
-        }
-        // A faceted figure draws each facet's axes inside that facet's band,
-        // so its own margins need only hold the facet labels; an unfaceted
-        // one puts its axes in the figure's margins.
-        if grid.is_faceted() {
-            // The bands sit against the grid's edges, so the figure needs a
-            // gutter there for the outermost facet's axis labels to fit in.
-            if self.x_axis {
-                insets.bottom += facet_insets.bottom;
-            }
-            if self.y_axis {
-                insets.left += facet_insets.left;
-            }
-        } else {
-            insets.bottom += facet_insets.bottom;
-            insets.left += facet_insets.left;
-        }
-
-        // Plot's axis labels: the y label above the frame's top-left corner,
-        // the x label below the x axis's tick labels.
-        if self.y_axis && self.axis_label(false).is_some() {
-            insets.top += theme.label_size.as_f32() + AXIS_LABEL_BAND;
-        }
-        if self.x_axis && self.axis_label(true).is_some() {
-            insets.bottom += theme.label_size.as_f32() + AXIS_LABEL_BAND;
-        }
-
-        // A facet axis labels its facets outside the plot: the `fx` values
-        // above each column, the `fy` values to the right of each row.
-        if grid.fx.is_some() {
-            insets.top += theme.label_size.as_f32() + FACET_LABEL_GAP;
-        }
-        if grid.fy.is_some() {
-            let widest = grid
-                .fy_labels()
-                .iter()
-                .map(|label| {
-                    paint::measure(label, theme.label_size, window)
-                        .width
-                        .as_f32()
-                })
-                .fold(0.0_f32, f32::max);
-            insets.right += widest + FACET_LABEL_GAP;
+        // Plot draws a facet's axes at the grid's edges, in the margins, so a
+        // facet's own band holds only its marks.
+        let facet_insets = Insets::default();
+        if let Some(caption) = &self.caption {
+            let _ = caption;
+            insets.bottom += theme.label_size.as_f32() + 8.;
         }
 
         if self.title.text.is_some() {
@@ -1259,11 +1504,11 @@ impl Plot {
 
         let colors = self.plot_colors(theme, facets);
         let legend_entries = self.legend_entries(&colors, facets);
-        if self.legend != LegendPosition::None && !legend_entries.is_empty() {
+        if self.legend_position() != LegendPosition::None && !legend_entries.is_empty() {
             // The band is the height the legend's own layout takes at this
             // width: a heading, wrapped rows and quantity rows all count.
             let (_, band) = self.legend_layout(theme, window, &legend_entries, width);
-            match self.legend {
+            match self.legend_position() {
                 LegendPosition::Top => insets.top += band,
                 LegendPosition::Bottom => insets.bottom += band,
                 LegendPosition::Left => {
@@ -1277,6 +1522,288 @@ impl Plot {
         }
 
         (insets, facet_insets)
+    }
+
+    /// Plot's margins, `[top, right, bottom, left]`: the space the axes ask
+    /// for around the plot, or the explicit `margin*` options.
+    fn plot_margins(&self, grid: &Grid) -> [f32; 4] {
+        // Plot's margins come from its axes: a bottom x axis wants 30 pixels
+        // below and 20 at either side; a left y axis 40 to the left and 20
+        // above and below. A top x axis or a right y axis move theirs, and the
+        // facet axes (fx on top, fy on the right) add theirs. An explicit
+        // `margin*` option wins.
+        let (x_axis, y_axis) = (self.x_axis_anchor(), self.y_axis_anchor());
+        let mut margins = [0.0_f32; 4];
+        let mut want = |side: usize, value: f32| margins[side] = margins[side].max(value);
+        use crate::options::AxisAnchor;
+        if let Some(anchor) = x_axis {
+            want(1, 20.);
+            want(3, 20.);
+            match anchor {
+                AxisAnchor::Top => want(0, 30.),
+                AxisAnchor::Both => {
+                    want(0, 30.);
+                    want(2, 30.);
+                }
+                _ => want(2, 30.),
+            }
+        }
+        if let Some(anchor) = y_axis {
+            want(0, 20.);
+            want(2, 20.);
+            match anchor {
+                AxisAnchor::Right => want(1, 40.),
+                AxisAnchor::Both => {
+                    want(1, 40.);
+                    want(3, 40.);
+                }
+                _ => want(3, 40.),
+            }
+        }
+        if grid.fx.is_some() && self.scales.fx.axis != Some(None) {
+            want(0, 30.);
+        }
+        if grid.fy.is_some() && self.scales.fy.axis != Some(None) {
+            want(1, 40.);
+        }
+        for (side, explicit) in self.margins.iter().enumerate() {
+            if let Some(margin) = explicit {
+                margins[side] = *margin;
+            }
+        }
+        margins
+    }
+
+    /// The entries of the legends the scales ask for: a swatch per value of an
+    /// ordinal color scale (a symbol per value of a symbol scale, colored when
+    /// the two share their domain), or a ramp for a continuous one.
+    fn scale_legend_entries(
+        &self,
+        colors: &render::color::PlotColors,
+        facets: &[Vec<PreparedMark>],
+    ) -> Vec<LegendEntry> {
+        let mut entries = Vec::new();
+        let symbol_values: Vec<Value> = {
+            let mut values: Vec<Value> = Vec::new();
+            for mark in facets.iter().flatten() {
+                if let Some(channel) = &mark.mark.channels.symbol
+                    && render::constant_symbol(channel).is_none()
+                {
+                    for row in &mark.rows {
+                        let value = channel.read(&row.row);
+                        if !value.is_null() && !values.iter().any(|v| v.key() == value.key()) {
+                            values.push(value);
+                        }
+                    }
+                }
+            }
+            values.sort();
+            values
+        };
+        if self.scales.symbol.legend == Some(true) && !symbol_values.is_empty() {
+            let filled = facets.iter().flatten().any(|mark| {
+                mark.mark.channels.symbol.is_some() && mark.mark.channels.fill.is_some()
+            });
+            let range = if filled {
+                crate::style::SYMBOLS_FILL
+            } else {
+                crate::style::SYMBOLS_STROKE
+            };
+            for (i, value) in symbol_values.iter().enumerate() {
+                let color = colors
+                    .scale
+                    .as_ref()
+                    .filter(|scale| scale.is_ordinal())
+                    .and_then(|scale| scale.color(value))
+                    .unwrap_or(colors.default_fill_color());
+                entries.push(LegendEntry {
+                    label: value.label(),
+                    swatch: LegendSwatch::Symbol(range[i % range.len()], color, filled),
+                    shape: LegendShape::Circle,
+                });
+            }
+            return entries;
+        }
+        if self.scales.color.legend == Some(true)
+            && let Some(scale) = &colors.scale
+        {
+            if scale.is_ordinal() && scale.thresholds().is_none() {
+                for key in scale.domain() {
+                    let value = key.to_value();
+                    let color = scale.color(&value).unwrap_or_default();
+                    let label = match &self.scales.color.tick_format {
+                        Some(format) => format.format(&value).into(),
+                        None => value.label(),
+                    };
+                    entries.push(LegendEntry {
+                        label,
+                        swatch: LegendSwatch::Color(color),
+                        shape: LegendShape::Square,
+                    });
+                }
+            } else {
+                entries.push(LegendEntry {
+                    label: self
+                        .scales
+                        .color
+                        .label
+                        .clone()
+                        .flatten()
+                        .or_else(|| self.color_field_label(facets))
+                        .unwrap_or_default(),
+                    swatch: LegendSwatch::Ramp,
+                    shape: LegendShape::Square,
+                });
+            }
+        }
+        entries
+    }
+
+    /// The field a color channel reads, for a ramp legend's label.
+    fn color_field_label(&self, facets: &[Vec<PreparedMark>]) -> Option<SharedString> {
+        facets.iter().flatten().find_map(|mark| {
+            let c = &mark.mark.channels;
+            c.fill
+                .as_ref()
+                .and_then(|f| f.field())
+                .or_else(|| c.stroke.as_ref().and_then(|f| f.field()))
+                .cloned()
+        })
+    }
+
+    /// Where the legend goes: where [`Plot::legend`] put it, else above the
+    /// plot when a scale asks for one, Plot's `color: {legend: true}`.
+    fn legend_position(&self) -> LegendPosition {
+        if self.legend != LegendPosition::None {
+            return self.legend;
+        }
+        let wants = |options: &crate::options::ScaleOptions| options.legend == Some(true);
+        if wants(&self.scales.color)
+            || wants(&self.scales.symbol)
+            || wants(&self.scales.r)
+            || wants(&self.scales.opacity)
+        {
+            LegendPosition::Top
+        } else {
+            LegendPosition::None
+        }
+    }
+
+    /// Where the x axis sits, or `None` when the plot draws none: Plot's
+    /// `x.axis`, the plot's `axis: null`, and whether any mark reads x.
+    pub(crate) fn x_axis_anchor(&self) -> Option<crate::options::AxisAnchor> {
+        if let Some(mark) = self.axis_mark(true) {
+            return Some(
+                mark.axis
+                    .axis
+                    .flatten()
+                    .unwrap_or(crate::options::AxisAnchor::Bottom),
+            );
+        }
+        if !self.x_axis {
+            return None;
+        }
+        match self.scales.x.axis {
+            Some(anchor) => anchor,
+            None if self.no_axes => None,
+            None => self
+                .reads_axis(true)
+                .then_some(crate::options::AxisAnchor::Bottom),
+        }
+    }
+
+    /// Where the y axis sits, or `None` when the plot draws none.
+    pub(crate) fn y_axis_anchor(&self) -> Option<crate::options::AxisAnchor> {
+        if let Some(mark) = self.axis_mark(false) {
+            return Some(
+                mark.axis
+                    .axis
+                    .flatten()
+                    .unwrap_or(crate::options::AxisAnchor::Left),
+            );
+        }
+        if !self.y_axis {
+            return None;
+        }
+        match self.scales.y.axis {
+            Some(anchor) => anchor,
+            None if self.no_axes => None,
+            None => self
+                .reads_axis(false)
+                .then_some(crate::options::AxisAnchor::Left),
+        }
+    }
+
+    /// The first axis mark for x (or y), Plot's `axisX`: when a plot has one,
+    /// it draws no implicit axis of its own for that scale.
+    fn axis_mark(&self, x: bool) -> Option<&Mark> {
+        let kind = if x { MarkKind::AxisX } else { MarkKind::AxisY };
+        self.marks.iter().find(|mark| mark.kind == kind)
+    }
+
+    /// Plot's `label: null`: no axis labels at all.
+    pub fn no_labels(mut self) -> Self {
+        self.no_labels = true;
+        self
+    }
+
+    /// Whether any data mark reads a position on the axis, which is when Plot
+    /// draws it: a plot of `dotX` has no y axis. A radial mark lays its rows
+    /// out on its own and reads neither.
+    fn reads_axis(&self, x: bool) -> bool {
+        // A scale given a type or domain exists, and Plot draws its axis.
+        let options = if x { &self.scales.x } else { &self.scales.y };
+        if options.r#type.is_some() || options.domain.is_some() {
+            return true;
+        }
+        let grid_kind = if x { MarkKind::GridX } else { MarkKind::GridY };
+        if self.marks.iter().any(|mark| mark.kind == grid_kind) {
+            return true;
+        }
+        self.marks.iter().any(|mark| {
+            if mark.kind.is_furniture()
+                || matches!(mark.kind, MarkKind::Pie | MarkKind::Arc | MarkKind::Waffle)
+            {
+                return false;
+            }
+            let c = &mark.channels;
+            let named = if x {
+                c.x.is_some() || c.x1.is_some() || c.x2.is_some()
+            } else {
+                c.y.is_some() || c.y1.is_some() || c.y2.is_some()
+            };
+            // A mark over plain values reads its single axis by default, and a
+            // one-dimensional mark spreads along the other by index.
+            let single = mark.kind.category().single_axis;
+            let by_value = mark
+                .data
+                .as_ref()
+                .is_some_and(|data| data.is_values() || data.is_tuples());
+            let indexed = mark.kind.cross_axis() == crate::mark::CrossAxis::Index
+                && single
+                    == Some(if x {
+                        crate::mark::Axis::Y
+                    } else {
+                        crate::mark::Axis::X
+                    });
+            let cross_rule = matches!(
+                (mark.kind, x),
+                (MarkKind::RuleX | MarkKind::TickX | MarkKind::BarX, true)
+                    | (MarkKind::RuleY | MarkKind::TickY | MarkKind::BarY, false)
+            );
+            named
+                || indexed
+                || (by_value
+                    && (single
+                        == Some(if x {
+                            crate::mark::Axis::X
+                        } else {
+                            crate::mark::Axis::Y
+                        })
+                        || cross_rule
+                        || mark.data.as_ref().is_some_and(Dataset::is_tuples)))
+                || mark.geo_geometry.is_some()
+        })
     }
 
     /// Where each legend entry sits, relative to the legend's own top-left,
@@ -1293,7 +1820,10 @@ impl Plot {
         entries: &[LegendEntry],
         width: f32,
     ) -> (Vec<(f32, f32)>, f32) {
-        let vertical = matches!(self.legend, LegendPosition::Left | LegendPosition::Right);
+        let vertical = matches!(
+            self.legend_position(),
+            LegendPosition::Left | LegendPosition::Right
+        );
         let available = (width - LEGEND_MARGIN * 2.).max(1.);
         let mut positions = Vec::with_capacity(entries.len());
         let (mut x, mut y) = (0.0_f32, 0.0_f32);
@@ -1301,6 +1831,16 @@ impl Plot {
             y += LEGEND_BAND;
         }
         for (index, entry) in entries.iter().enumerate() {
+            // A ramp is Plot's 240 × 50 continuous legend, on its own row.
+            if entry.swatch == LegendSwatch::Ramp {
+                if x > 0. {
+                    y += LEGEND_BAND;
+                    x = 0.;
+                }
+                positions.push((0., y));
+                y += RAMP_HEIGHT - LEGEND_BAND;
+                continue;
+            }
             if vertical {
                 positions.push((0., y));
                 y += LEGEND_BAND;
@@ -1361,26 +1901,6 @@ impl Plot {
         y
     }
 
-    /// The labels the y axis will draw, for measuring its gutter.
-    fn y_tick_labels(&self, facets: &[Vec<PreparedMark>]) -> Vec<SharedString> {
-        let values = self.y_domain_values(facets);
-        let frame = Frame::resolve(
-            Bounds::new(point(px(0.), px(0.)), gpui::size(px(400.), px(200.))),
-            &FrameOptions {
-                insets: Insets::default(),
-                ..self.frame_options.clone()
-            },
-            &self.x_domain_values(facets),
-            &values,
-        );
-        frame
-            .y
-            .ticks
-            .iter()
-            .map(|tick| tick.label.clone())
-            .collect()
-    }
-
     fn x_domain_values(&self, facets: &[Vec<PreparedMark>]) -> Vec<Value> {
         facets
             .iter()
@@ -1407,6 +1927,11 @@ impl Plot {
         colors: &render::color::PlotColors,
         facets: &[Vec<PreparedMark>],
     ) -> Vec<LegendEntry> {
+        // A legend a scale asks for (`color: {legend: true}`) lists that
+        // scale's domain, as Plot's do.
+        if self.legend == LegendPosition::None {
+            return self.scale_legend_entries(colors, facets);
+        }
         let mut entries: Vec<LegendEntry> = Vec::new();
         // Every facet holds the same marks in the same order, so a mark's
         // place in its facet's list is its place in the plot's.
@@ -1652,6 +2177,11 @@ enum LegendSwatch {
     Size(f32),
     /// An opacity, for an `opacity` channel: the swatch is a faded circle.
     Opacity(f32),
+    /// A symbol, for a symbol legend: the symbol, its color, and whether it
+    /// is filled.
+    Symbol(crate::style::Symbol, Hsla, bool),
+    /// A continuous color ramp, Plot's `legendRamp`.
+    Ramp,
 }
 
 impl LegendSwatch {
@@ -1659,15 +2189,18 @@ impl LegendSwatch {
     /// opacity swatch draws in the theme's label color instead.
     fn color(&self) -> Option<Hsla> {
         match self {
-            LegendSwatch::Color(color) => Some(*color),
-            LegendSwatch::Size(_) | LegendSwatch::Opacity(_) => None,
+            LegendSwatch::Color(color) | LegendSwatch::Symbol(_, color, _) => Some(*color),
+            LegendSwatch::Size(_) | LegendSwatch::Opacity(_) | LegendSwatch::Ramp => None,
         }
     }
 
     /// Whether the swatch stands for a size or an opacity rather than a
     /// color, which decides where its list of entries starts.
     fn is_quantity(&self) -> bool {
-        !matches!(self, LegendSwatch::Color(_))
+        !matches!(
+            self,
+            LegendSwatch::Color(_) | LegendSwatch::Symbol(..) | LegendSwatch::Ramp
+        )
     }
 }
 
@@ -1699,6 +2232,15 @@ impl Plot {
         grid: &Grid,
     ) -> Frame {
         let mut options = self.frame_options.clone();
+        options.x_options = self.scales.x.clone();
+        options.y_options = self.scales.y.clone();
+        // A mark's `sort` option orders an ordinal domain the scale left open.
+        if options.x_options.domain.is_none() {
+            options.x_options.domain = sorted_domain(facets, "x");
+        }
+        if options.y_options.domain.is_none() {
+            options.y_options.domain = sorted_domain(facets, "y");
+        }
         let (insets, facet_insets) =
             self.insets(theme, window, facets, grid, bounds.size.width.as_f32());
         options.insets = insets;
@@ -1714,12 +2256,18 @@ impl Plot {
         if options.y_kind.is_none() && marks_use_band(facets, false) {
             options.y_kind = Some(ScaleKind::Band);
         }
-        // A plot may ask for its own height, Plot's `height`. The element fills
-        // its container, so the request shrinks the figure to that height
-        // rather than growing it: a barcode or a swarm wants a short frame.
+        // A plot may ask for its own height, Plot's `height`: the height of
+        // its chart, below whatever title and legend the figure adds. The
+        // element fills its container, so the request shrinks the figure
+        // to that rather than growing it.
+        let margins = self.plot_margins(grid);
+        let extras = (options.insets.top - margins[0]) + (options.insets.bottom - margins[2]);
         let bounds = match self.height {
             Some(height) if height > 0. => Bounds {
-                size: gpui::size(bounds.size.width, px(height)),
+                size: gpui::size(
+                    bounds.size.width,
+                    px(height + extras).min(bounds.size.height.max(px(height + extras))),
+                ),
                 ..bounds
             },
             _ => bounds,
@@ -1748,6 +2296,103 @@ impl Plot {
     }
 }
 
+/// The domain a mark's `sort: {scale: by}` option orders, Plot's
+/// `sort` channel option: each of the scale's values is ranked by the `by`
+/// channel's values on its rows, reduced (by `max` unless said otherwise).
+pub(crate) fn sorted_domain(facets: &[Vec<PreparedMark>], scale: &str) -> Option<Vec<Value>> {
+    let mut ranked: Vec<(Value, Vec<Value>)> = Vec::new();
+    let mut sort: Option<crate::mark::DomainSort> = None;
+    for prepared in facets.iter().flatten() {
+        let Some(spec) = prepared.mark.domain_sort.iter().find(|s| s.scale == scale) else {
+            continue;
+        };
+        sort.get_or_insert_with(|| spec.clone());
+        for (index, row) in prepared.rows.iter().enumerate() {
+            let key = match scale {
+                "x" => row.x_value().clone(),
+                "y" => row.y_value().clone(),
+                "color" => match prepared.mark.channels.fill.as_ref().or(prepared
+                    .mark
+                    .channels
+                    .stroke
+                    .as_ref())
+                {
+                    Some(channel) => channel
+                        .field()
+                        .map(|f| row.row.value(f))
+                        .unwrap_or(Value::Null),
+                    None => Value::Null,
+                },
+                _ => Value::Null,
+            };
+            if key.is_null() {
+                continue;
+            }
+            let by = match spec.by.as_ref() {
+                "x" => row.x_value().clone(),
+                "x1" => row.x1.clone().unwrap_or_else(|| row.x_value().clone()),
+                "x2" => row.x2.clone().unwrap_or_else(|| row.x_value().clone()),
+                "y" => row.y_value().clone(),
+                "y1" => row.y1.clone().unwrap_or_else(|| row.y_value().clone()),
+                "y2" => row.y2.clone().unwrap_or_else(|| row.y_value().clone()),
+                "r" => row.r_value.map(Value::Number).unwrap_or(Value::Null),
+                // A bar's extent along its value axis, Plot's `width` and
+                // `height` sort channels.
+                "width" | "height" => {
+                    let (a, b) = if spec.by.as_ref() == "width" {
+                        (&row.x1, &row.x2)
+                    } else {
+                        (&row.y1, &row.y2)
+                    };
+                    match (
+                        a.as_ref().and_then(Value::as_number),
+                        b.as_ref().and_then(Value::as_number),
+                    ) {
+                        (Some(a), Some(b)) => Value::Number((b - a).abs()),
+                        _ => Value::Null,
+                    }
+                }
+                "data" => Value::Number(index as f64),
+                // Plot sorts `x` by `-y` as `{x: "y", reverse: true}`; any
+                // other name reads the record's field.
+                field => row.row.value(field),
+            };
+            match ranked.iter_mut().find(|(k, _)| k.key() == key.key()) {
+                Some((_, values)) => values.push(by),
+                None => ranked.push((key, vec![by])),
+            }
+        }
+    }
+    let sort = sort?;
+    let mut scored: Vec<(Value, Value)> = ranked
+        .into_iter()
+        .map(|(key, values)| {
+            let records: Vec<&Table> = Vec::new();
+            let reduced = sort.reduce.reduce(&values, &records);
+            (key, reduced)
+        })
+        .collect();
+    // Plot's `ascendingDefined`: missing values last, whichever the order.
+    scored.sort_by(|(_, a), (_, b)| match (a.is_null(), b.is_null()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        _ => {
+            let ordering = a.cmp(b);
+            if sort.reverse {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        }
+    });
+    let mut domain: Vec<Value> = scored.into_iter().map(|(key, _)| key).collect();
+    if let Some(limit) = sort.limit {
+        domain.truncate(limit);
+    }
+    Some(domain)
+}
+
 /// Whether any mark draws a band along the x axis (`along_x`) or the y axis.
 ///
 /// Only matters for a discrete axis: a continuous scale has no bands.
@@ -1766,6 +2411,20 @@ fn marks_use_band(facets: &[Vec<PreparedMark>], along_x: bool) -> bool {
                 .find(|row| !row.y_value().is_null())
                 .is_some_and(|row| !row.y_value().kind().is_quantitative())
         };
+        // Plot's bar and cell marks read their band axis as ordinal whatever
+        // its values, so a bar per year takes a band per year.
+        let forced = match prepared.mark.kind {
+            MarkKind::BarY | MarkKind::Cell | MarkKind::CellX if along_x => {
+                prepared.mark.channels.x.is_some() && prepared.mark.interval.is_none()
+            }
+            MarkKind::BarX | MarkKind::Cell | MarkKind::CellY if !along_x => {
+                prepared.mark.channels.y.is_some() && prepared.mark.interval.is_none()
+            }
+            _ => false,
+        };
+        if forced {
+            return true;
+        }
         if !discrete {
             return false;
         }
@@ -1798,6 +2457,8 @@ impl PlotTrait for Plot {
             self.fy.as_deref(),
         );
         grid.set_empty(&populated);
+        render::apply_quantity_scales(&mut facets, &self.scales.r, &self.scales.opacity);
+        render::apply_symbol_scale(&mut facets, &self.scales.symbol);
         let frame = self.resolve_frame(bounds, &theme, window, &facets, &grid);
         // A dodge works in pixels, so it needs the frame resolved first. Every
         // facet is the same size, so one facet's frame packs the same way.
@@ -1832,8 +2493,14 @@ impl PlotTrait for Plot {
         // figure's bounds (already shrunk to the plot's `height`).
         self.paint_legend(frame.bounds, &theme, window, cx, &facets, &colors);
         // The grid goes under the marks.
-        if self.grid {
-            crate::frame::paint_grid(&frame, &theme, window, self.x_axis, self.y_axis, &grid);
+        // Plot's grid belongs to its axis: an axis drawn with `grid` (its own
+        // or the plot's) draws its lines; `axis: null` takes both away.
+        let (x_grid, y_grid) = (
+            self.scales.x.grid.unwrap_or(self.grid) && self.x_axis_anchor().is_some(),
+            self.scales.y.grid.unwrap_or(self.grid) && self.y_axis_anchor().is_some(),
+        );
+        if x_grid || y_grid {
+            crate::frame::paint_grid(&frame, &theme, window, x_grid, y_grid, &grid);
         }
         // The marks. Every mark shares one set of color scales, so a series
         // keeps its color across marks, and across facets.
@@ -1860,6 +2527,7 @@ impl PlotTrait for Plot {
                     hovered: self.hover,
                     row_offset: offset,
                     colors: &colors,
+                    clip: mark.mark.style.clip,
                     window,
                     cx,
                 };
@@ -1875,9 +2543,16 @@ impl PlotTrait for Plot {
                 }
             }
         }
-        // The axes sit on top of the marks' clipping edge. A faceted figure
-        // draws each facet's axes inside its band; an unfaceted one draws a
-        // single pair at the figure's edges.
+        // The axes sit on top of the marks. A faceted figure draws each
+        // facet's axes at the grid's outer edges, Plot's facet anchors.
+        let x_style = self
+            .x_axis_anchor()
+            .filter(|_| self.axis_mark(true).is_none())
+            .map(|anchor| crate::frame::AxisStyle::new(anchor, &self.scales.x));
+        let y_style = self
+            .y_axis_anchor()
+            .filter(|_| self.axis_mark(false).is_none())
+            .map(|anchor| crate::frame::AxisStyle::new(anchor, &self.scales.y));
         if grid.is_faceted() {
             for cell in 0..grid.cells.len() {
                 if grid.is_empty(cell) {
@@ -1888,12 +2563,11 @@ impl PlotTrait for Plot {
                     &theme,
                     window,
                     cx,
-                    self.x_axis,
-                    self.y_axis,
+                    x_style,
+                    y_style,
                     &crate::frame::AxisEdges::from_cell(cell, &grid),
                 );
             }
-            // The facet axis labels the grid outside the facets.
             crate::frame::paint_facet_labels(&frame, &theme, window, cx, &grid);
         } else {
             crate::frame::paint_axes(
@@ -1901,8 +2575,8 @@ impl PlotTrait for Plot {
                 &theme,
                 window,
                 cx,
-                self.x_axis,
-                self.y_axis,
+                x_style,
+                y_style,
                 &crate::frame::AxisEdges::default(),
             );
         }
@@ -2172,21 +2846,52 @@ impl Plot {
         facets: &[Vec<PreparedMark>],
     ) -> render::color::PlotColors {
         let color = self.color_field.as_ref().zip(self.color_range.as_ref());
-        render::color::PlotColors::new(theme, facets, color)
+        render::color::PlotColors::new(theme, facets, color, &self.scales.color)
     }
 
     /// The label an axis shows, Plot's default scale label: the first data
     /// mark's field on that axis, or `Frequency` for the count a bin grows
     /// along it. An explicit label overrides it, and an empty one hides it.
     fn axis_label(&self, x: bool) -> Option<SharedString> {
+        let scale = if x { &self.scales.x } else { &self.scales.y };
+        if let Some(label) = &scale.label {
+            return label.clone();
+        }
+        if let Some(mark) = self.axis_mark(x)
+            && let Some(label) = &mark.axis.label
+        {
+            return label.clone();
+        }
+        if self.no_labels {
+            return None;
+        }
+        let label = self.derived_axis_label(x)?;
+        // Plot's `percent` marks a derived label as a percentage.
+        if scale.percent == Some(true) {
+            return Some(format!("{label} (%)").into());
+        }
+        Some(label)
+    }
+
+    /// The label an axis derives from its channels, before scale options.
+    fn derived_axis_label(&self, x: bool) -> Option<SharedString> {
         let explicit = if x { &self.x_label } else { &self.y_label };
         if let Some(label) = explicit {
             return (!label.is_empty()).then(|| label.clone());
         }
-        let field = |channel: Option<&crate::table::Channel>| match channel {
-            Some(crate::table::Channel::Field(name)) => Some(name.clone()),
-            _ => None,
+        // Plot's `inferScaleLabel`: every channel bound to the scale offers a
+        // label (its field's name; an accessor or constant offers none), and
+        // the scale takes it only when all agree. A bin's count is
+        // "Frequency".
+        let field = |channel: Option<&crate::table::Channel>| -> Option<SharedString> {
+            match channel {
+                Some(crate::table::Channel::Field(name)) if !name.starts_with('$') => {
+                    Some(name.clone())
+                }
+                _ => None,
+            }
         };
+        let mut labels: Vec<Option<SharedString>> = Vec::new();
         for mark in &self.marks {
             if mark.kind.is_furniture() {
                 continue;
@@ -2194,27 +2899,52 @@ impl Plot {
             let channels = &mark.channels;
             if let Some(bin) = &mark.bin {
                 let (bin_x, bin_y) = render::bin_axes(mark);
-                // The axis a one-dimensional bin grows its output along.
                 let length = if x { bin_y && !bin_x } else { bin_x && !bin_y };
                 if length {
                     let name = if x { "x" } else { "y" };
-                    return match bin.outputs.iter().find(|output| output.name == name) {
-                        Some(output)
-                            if !matches!(output.reducer, crate::transform::GroupReducer::Count) =>
-                        {
-                            output.input.clone()
-                        }
-                        _ => Some("Frequency".into()),
-                    };
+                    labels.push(
+                        match bin.outputs.iter().find(|output| output.name == name) {
+                            Some(output)
+                                if !matches!(
+                                    output.reducer,
+                                    crate::transform::GroupReducer::Count
+                                ) =>
+                            {
+                                output.input.clone()
+                            }
+                            _ => Some("Frequency".into()),
+                        },
+                    );
+                    continue;
                 }
-                // The axis it bins reads the binned field, wherever it was
-                // named.
                 if (x && bin_x && !bin_y) || (!x && bin_y && !bin_x) {
-                    return field(channels.x.as_ref()).or_else(|| field(channels.y.as_ref()));
+                    labels.push(field(channels.x.as_ref()).or_else(|| field(channels.y.as_ref())));
+                    continue;
                 }
             }
-            // A wide stack's value channel names one of its series, not the
-            // axis.
+            // A group's count output is "Frequency" too.
+            if let Some(group) = &mark.group {
+                let names: &[&str] = if x {
+                    &["x", "x1", "x2"]
+                } else {
+                    &["y", "y1", "y2"]
+                };
+                if let Some(output) = group
+                    .outputs
+                    .iter()
+                    .find(|o| names.contains(&o.name.as_ref()))
+                {
+                    labels.push(match output.reducer {
+                        crate::transform::GroupReducer::Count => Some("Frequency".into()),
+                        _ => field(if x {
+                            channels.x.as_ref()
+                        } else {
+                            channels.y.as_ref()
+                        }),
+                    });
+                    continue;
+                }
+            }
             if !x
                 && mark
                     .stack
@@ -2223,29 +2953,35 @@ impl Plot {
             {
                 return None;
             }
-            let channel = if x {
-                channels
-                    .x
-                    .as_ref()
-                    .or(channels.x1.as_ref())
-                    .or(channels.x2.as_ref())
+            let bound: [Option<&crate::table::Channel>; 3] = if x {
+                [
+                    channels.x.as_ref(),
+                    channels.x1.as_ref(),
+                    channels.x2.as_ref(),
+                ]
             } else {
-                channels
-                    .y
-                    .as_ref()
-                    .or(channels.y1.as_ref())
-                    .or(channels.y2.as_ref())
+                [
+                    channels.y.as_ref(),
+                    channels.y1.as_ref(),
+                    channels.y2.as_ref(),
+                ]
             };
-            if let Some(name) = field(channel) {
-                return Some(name);
+            for channel in bound.into_iter().flatten() {
+                labels.push(field(Some(channel)));
             }
         }
-        None
+        let mut named = labels.iter().flatten();
+        let first = named.next()?.clone();
+        if named.any(|label| *label != first) {
+            return None;
+        }
+        Some(first)
     }
 
-    /// Paint the axis labels: Plot puts the y label above the frame's
-    /// top-left as `↑ label`, and the x label below the axis, right-aligned
-    /// as `label →`. A categorical axis has no direction, so no arrow.
+    /// Paint the axis labels where Plot puts them: the y label in the top
+    /// margin at the figure's left as `↑ label`, the x label in the bottom
+    /// margin at the plot's right as `label →`. A categorical axis has no
+    /// direction, so no arrow.
     fn paint_axis_labels(
         &self,
         frame: &Frame,
@@ -2253,70 +2989,111 @@ impl Plot {
         window: &mut Window,
         cx: &mut App,
     ) {
+        use crate::options::AxisAnchor;
         let font = gpui::font(theme.font_family.clone());
         let continuous = |scale: &crate::scale::PositionScale| {
             matches!(scale, crate::scale::PositionScale::Continuous(_))
         };
-        if self.y_axis
-            && let Some(label) = self.axis_label(false)
-        {
-            let text = if continuous(&frame.y.scale) {
-                let arrow = if self.frame_options.y_reverse {
-                    "↓"
-                } else {
-                    "↑"
-                };
-                format!("{arrow} {label}")
-            } else {
-                label.to_string()
-            };
-            let text = Label::new(
+        let grid = self
+            .facet_cache
+            .clone()
+            .unwrap_or_else(|| self.facet_grid());
+        let [top, right, bottom, left] = self.plot_margins(&grid);
+        let insets = Insets {
+            top,
+            right,
+            bottom,
+            left,
+        };
+        let plot = frame.plot;
+        let make = |text: String, window: &mut Window| {
+            Label::new(
                 text.into(),
                 theme.label_size,
                 theme.label,
                 FontWeight::NORMAL,
                 font.clone(),
                 window,
-            );
-            let top = frame.plot.origin.y - px(theme.label_size.as_f32() + AXIS_LABEL_BAND);
-            text.paint_at(
-                point(frame.bounds.origin.x + px(12.), top),
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-        }
-        if self.x_axis
-            && let Some(label) = self.axis_label(true)
+            )
+        };
+        if let Some(anchor) = self.y_axis_anchor()
+            && let Some(label) = self.axis_label(false)
         {
-            let text = if continuous(&frame.x.scale) {
-                let arrow = if self.frame_options.x_reverse {
-                    "←"
-                } else {
-                    "→"
-                };
-                format!("{label} {arrow}")
+            let arrow = self.scales.y.label_arrow.unwrap_or(true) && continuous(&frame.y.scale);
+            let up = !self
+                .scales
+                .y
+                .reverse
+                .unwrap_or(self.frame_options.y_reverse);
+            let text = if arrow {
+                format!("{} {label}", if up { "↑" } else { "↓" })
             } else {
                 label.to_string()
             };
-            let text = Label::new(
-                text.into(),
-                theme.label_size,
-                theme.label,
-                FontWeight::NORMAL,
-                font,
-                window,
-            );
-            let bottom = frame.bounds.origin.y + frame.bounds.size.height
-                - px(theme.label_size.as_f32() + 6.);
-            text.paint_at(
-                point(frame.plot.origin.x + frame.plot.size.width, bottom),
-                TextAlign::Right,
-                None,
-                window,
-                cx,
-            );
+            let text = make(text, window);
+            let center = self.scales.y.label_anchor == Some(crate::options::LabelAnchor::Center);
+            let right = anchor == AxisAnchor::Right;
+            let offset = self
+                .scales
+                .y
+                .label_offset
+                .unwrap_or(if right { insets.right } else { insets.left } - 3.);
+            let x = if right {
+                plot.origin.x + plot.size.width + px(offset)
+            } else {
+                plot.origin.x - px(offset)
+            };
+            let y = if center {
+                plot.origin.y + plot.size.height / 2. - text.height / 2.
+            } else {
+                plot.origin.y + px(3. - insets.top)
+            };
+            let align = if right {
+                TextAlign::Right
+            } else {
+                TextAlign::Left
+            };
+            text.paint_at(point(x, y), align, None, window, cx);
+        }
+        if let Some(anchor) = self.x_axis_anchor()
+            && let Some(label) = self.axis_label(true)
+        {
+            let arrow = self.scales.x.label_arrow.unwrap_or(true) && continuous(&frame.x.scale);
+            let forward = !self
+                .scales
+                .x
+                .reverse
+                .unwrap_or(self.frame_options.x_reverse);
+            let text = if arrow {
+                format!("{label} {}", if forward { "→" } else { "←" })
+            } else {
+                label.to_string()
+            };
+            let text = make(text, window);
+            let top = anchor == AxisAnchor::Top;
+            // A band scale centres its label, as Plot does; a continuous one
+            // puts it at the axis's end.
+            let center = self.scales.x.label_anchor == Some(crate::options::LabelAnchor::Center)
+                || (self.scales.x.label_anchor.is_none() && !continuous(&frame.x.scale));
+            let offset = self
+                .scales
+                .x
+                .label_offset
+                .unwrap_or(if top { insets.top } else { insets.bottom } - 3.);
+            let y = if top {
+                plot.origin.y - px(offset)
+            } else {
+                plot.origin.y + plot.size.height + px(offset) - text.height
+            };
+            let (x, align) = if center {
+                (plot.origin.x + plot.size.width / 2., TextAlign::Center)
+            } else {
+                (
+                    plot.origin.x + plot.size.width + px(insets.right - 3.),
+                    TextAlign::Right,
+                )
+            };
+            text.paint_at(point(x, y), align, None, window, cx);
         }
     }
 
@@ -2375,12 +3152,13 @@ impl Plot {
         colors: &render::color::PlotColors,
     ) {
         let entries = self.legend_entries(colors, facets);
-        if self.legend == LegendPosition::None || entries.is_empty() {
+        let position = self.legend_position();
+        if position == LegendPosition::None || entries.is_empty() {
             return;
         }
         let font = gpui::font(theme.font_family.clone());
         let swatch = px(8.);
-        let vertical = matches!(self.legend, LegendPosition::Left | LegendPosition::Right);
+        let vertical = matches!(position, LegendPosition::Left | LegendPosition::Right);
         let side_width = if vertical {
             self.legend_width(theme, window, &entries)
         } else {
@@ -2392,7 +3170,7 @@ impl Plot {
         // A top legend sits under the title, inside the band the frame
         // reserved for it; a bottom one in the band above the figure's bottom
         // margin. `bounds` is the figure's, already shrunk to its `height`.
-        let (left, top) = match self.legend {
+        let (left, top) = match position {
             LegendPosition::Top => (LEGEND_MARGIN, self.legend_top(theme)),
             LegendPosition::Bottom => (
                 LEGEND_MARGIN,
@@ -2428,6 +3206,49 @@ impl Plot {
 
         for (entry, (dx, dy)) in entries.iter().zip(positions) {
             let (x, y) = (left + dx, top + dy);
+            if entry.swatch == LegendSwatch::Ramp {
+                if let Some(scale) = &colors.scale {
+                    self.paint_ramp(
+                        scale,
+                        &entry.label,
+                        point(origin.x + px(x), origin.y + px(y)),
+                        theme,
+                        window,
+                        cx,
+                    );
+                }
+                continue;
+            }
+            if let LegendSwatch::Symbol(symbol, color, filled) = entry.swatch {
+                let centre = point(origin.x + px(x + 4.), origin.y + px(y + 6.));
+                for (points, closed) in symbol.subpaths(centre, 4.5) {
+                    if filled && closed {
+                        paint::paint_fill(&points, color, window);
+                    } else {
+                        let mut outline = points.clone();
+                        if closed && let Some(first) = points.first() {
+                            outline.push(*first);
+                        }
+                        paint::paint_stroke(&outline, 1.5, color, window);
+                    }
+                }
+                let label = Label::new(
+                    entry.label.clone(),
+                    theme.label_size,
+                    theme.label,
+                    FontWeight::NORMAL,
+                    font.clone(),
+                    window,
+                );
+                label.paint_at(
+                    point(origin.x + px(x + LEGEND_SWATCH_GAP), origin.y + px(y)),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+                continue;
+            }
             let centre = point(origin.x + px(x + 4.), origin.y + px(y + 6.));
             // A size or opacity swatch draws in the theme's label color: it
             // shows how big or how faint a mark is, not which series it is.
@@ -2488,6 +3309,128 @@ impl Plot {
     }
 }
 
+impl Plot {
+    /// Paint Plot's ramp legend at `origin`: the label above, a 10-pixel
+    /// gradient bar, and ticks with their values below.
+    fn paint_ramp(
+        &self,
+        scale: &crate::scale::ColorScale,
+        label: &SharedString,
+        origin: Point<Pixels>,
+        theme: &PlotTheme,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let font = gpui::font(theme.font_family.clone());
+        let text = |t: SharedString, window: &mut Window| {
+            Label::new(
+                t,
+                theme.label_size,
+                theme.label,
+                FontWeight::NORMAL,
+                font.clone(),
+                window,
+            )
+        };
+        if !label.is_empty() {
+            text(label.clone(), window).paint_at(origin, TextAlign::Left, None, window, cx);
+        }
+        let bar_top = origin.y + px(16.);
+        let bar_height = 10.;
+        let [lo, hi] = scale.extent();
+        if let Some(thresholds) = scale.thresholds() {
+            // A threshold scale's legend is a row of equal swatches, one per
+            // bin, its thresholds labelled at their joins.
+            let n = thresholds.len() + 1;
+            let w = RAMP_WIDTH / n as f32;
+            for i in 0..n {
+                let value = if i == 0 {
+                    thresholds.first().copied().unwrap_or(0.) - 1.
+                } else {
+                    thresholds[i - 1]
+                };
+                let color = scale.color(&Value::Number(value)).unwrap_or_default();
+                paint::paint_rect(
+                    Bounds::new(
+                        point(origin.x + px(w * i as f32), bar_top),
+                        gpui::size(px(w), px(bar_height)),
+                    ),
+                    0.,
+                    color,
+                    window,
+                );
+            }
+            for (i, t) in thresholds.iter().enumerate() {
+                let x = origin.x + px(w * (i + 1) as f32);
+                let label = match &self.scales.color.tick_format {
+                    Some(format) => format.format(&Value::Number(*t)),
+                    None => crate::format::format_number("", *t),
+                };
+                text(label.into(), window).paint_at(
+                    point(x, bar_top + px(bar_height + 4.)),
+                    TextAlign::Center,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+            return;
+        }
+        let slices = 120;
+        for i in 0..slices {
+            let t = i as f64 / (slices - 1) as f64;
+            let value = lo + (hi - lo) * t;
+            let color = scale.color(&Value::Number(value)).unwrap_or_default();
+            let x = origin.x + px(RAMP_WIDTH * i as f32 / slices as f32);
+            paint::paint_rect(
+                Bounds::new(
+                    point(x, bar_top),
+                    gpui::size(px(RAMP_WIDTH / slices as f32 + 0.5), px(bar_height)),
+                ),
+                0.,
+                color,
+                window,
+            );
+        }
+        // Plot's ramp ticks: about one per 64 pixels, labelled below the bar.
+        let count = (RAMP_WIDTH / 64.).round() as usize;
+        let ticks = crate::ticks::linear_ticks([lo, hi], count, crate::scale::Transform::Linear);
+        let format = crate::format::tick_format(
+            lo,
+            hi,
+            count,
+            match &self.scales.color.tick_format {
+                Some(crate::options::TickFormat::Spec(spec)) => Some(spec.as_ref()),
+                _ => None,
+            },
+        );
+        for tick in ticks {
+            if hi == lo {
+                break;
+            }
+            let ratio = scale.ratio(tick);
+            let x = origin.x + px(RAMP_WIDTH * ratio);
+            paint::paint_stroke(
+                &[point(x, bar_top), point(x, bar_top + px(bar_height + 4.))],
+                1.,
+                theme.label,
+                window,
+            );
+            let label: SharedString = match &self.scales.color.tick_format {
+                Some(crate::options::TickFormat::Fn(f)) => f(&Value::Number(tick)).into(),
+                _ => format.format(tick).into(),
+            };
+            text(label, window).paint_at(
+                point(x, bar_top + px(bar_height + 5.)),
+                TextAlign::Center,
+                None,
+                window,
+                cx,
+            );
+        }
+    }
+}
+
 impl IntoElement for Plot {
     type Element = PlotElement<Self>;
 
@@ -2516,10 +3459,11 @@ mod tests {
             .grid_x(|mark| mark)
             .frame_mark(|mark| mark);
         let prepared = render::prepare(plot.data(), plot.marks());
-        // The tip reads the data; the furniture marks draw no rows.
+        // The tip reads the data; a furniture mark reads one placeholder
+        // record, which its constant channels read.
         assert_eq!(prepared[0].rows.len(), 2);
-        assert!(prepared[1].rows.is_empty());
-        assert!(prepared[2].rows.is_empty());
+        assert_eq!(prepared[1].rows.len(), 1);
+        assert_eq!(prepared[2].rows.len(), 1);
         assert!(prepared[1].mark.kind.is_furniture());
     }
 
@@ -2556,7 +3500,9 @@ mod tests {
                 .with("y", Value::Number(2.))
                 .with("z", Value::text("two")),
         ];
-        let plot = Plot::new(data).line(|mark| mark.x("x").y("y").z("z"));
+        let plot = Plot::new(data)
+            .line(|mark| mark.x("x").y("y").stroke("z"))
+            .legend(LegendPosition::Top);
         let prepared = render::prepare(plot.data(), plot.marks());
         let theme = PlotTheme::from_theme(&gpui_kit::component::Theme::default());
         let facets = [prepared];
@@ -2631,7 +3577,11 @@ mod tests {
                 .with("y", Value::Number(1.))
                 .with("z", Value::text(z))
         });
-        let plot = Plot::new(data).dot(|mark| mark.x("x").y("y").z("z"));
+        // A field-named color is Plot's color channel: it colors the rows
+        // through the ordinal scale, and the legend lists the same colors.
+        let plot = Plot::new(data.clone())
+            .dot(|mark| mark.x("x").y("y").fill("z"))
+            .legend(LegendPosition::Top);
         let facets = vec![render::prepare(plot.data(), plot.marks())];
         let theme = PlotTheme::from_theme(&gpui_kit::component::Theme::default());
         let colors = plot.plot_colors(&theme, &facets);
@@ -2639,6 +3589,15 @@ mod tests {
         for (index, row) in mark.rows.iter().enumerate() {
             assert_eq!(colors.identity(mark, 0, row), theme.palette_color(index));
         }
+        // A `z` alone groups but does not color, as in Plot.
+        let grouped = Plot::new(data).dot(|mark| mark.x("x").y("y").z("z"));
+        let facets_z = vec![render::prepare(grouped.data(), grouped.marks())];
+        let colors_z = grouped.plot_colors(&theme, &facets_z);
+        let mark_z = &facets_z[0][0];
+        assert_eq!(
+            colors_z.identity(mark_z, 0, &mark_z.rows[0]),
+            theme.mark_color
+        );
         let entries = plot.legend_entries(&colors, &facets);
         assert_eq!(
             entries[2].swatch,
@@ -2651,7 +3610,9 @@ mod tests {
         let data = [Table::empty()
             .with("x", Value::Number(1.))
             .with("y", Value::Number(1.))];
-        let plot = Plot::new(data).line(|mark| mark.x("x").y("y").title("Sales"));
+        let plot = Plot::new(data)
+            .line(|mark| mark.x("x").y("y").title("Sales"))
+            .legend(LegendPosition::Top);
         let facets = vec![render::prepare(plot.data(), plot.marks())];
         let theme = PlotTheme::from_theme(&gpui_kit::component::Theme::default());
         let colors = plot.plot_colors(&theme, &facets);
@@ -2670,7 +3631,7 @@ mod tests {
         let ramp = ColorRange::Continuous(vec![gpui::black(), gpui::white()]);
         let plot = Plot::new(data)
             .dot(|mark| mark.x("x").y("y"))
-            .color("v", ramp);
+            .color_by("v", ramp);
         let facets = vec![render::prepare(plot.data(), plot.marks())];
         let theme = PlotTheme::from_theme(&gpui_kit::component::Theme::default());
         let colors = plot.plot_colors(&theme, &facets);

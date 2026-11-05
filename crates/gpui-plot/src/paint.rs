@@ -266,3 +266,55 @@ mod tests {
         assert!(stroke_path(&[point(px(0.), px(0.))], 1., Hsla::default()).is_some());
     }
 }
+
+/// Paint a dashed line from `start` to `end`, Plot's `strokeDasharray`.
+pub fn paint_dashed(
+    start: Point<Pixels>,
+    end: Point<Pixels>,
+    dash: &[f32],
+    width: f32,
+    color: Hsla,
+    window: &mut Window,
+) {
+    let dx = end.x.as_f32() - start.x.as_f32();
+    let dy = end.y.as_f32() - start.y.as_f32();
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= 0. || dash.is_empty() {
+        return;
+    }
+    let (ux, uy) = (dx / length, dy / length);
+    let mut offset = 0.0_f32;
+    let mut on = true;
+    let mut index = 0;
+    while offset < length {
+        let segment = dash[index % dash.len()].max(0.5);
+        let end_offset = (offset + segment).min(length);
+        if on {
+            let from = point(
+                px(start.x.as_f32() + ux * offset),
+                px(start.y.as_f32() + uy * offset),
+            );
+            let to = point(
+                px(start.x.as_f32() + ux * end_offset),
+                px(start.y.as_f32() + uy * end_offset),
+            );
+            paint_stroke(&[from, to], width, color, window);
+        }
+        offset = end_offset;
+        on = !on;
+        index += 1;
+    }
+}
+
+/// Paint a dashed polyline, the dash running on across its vertices.
+pub fn paint_dashed_path(
+    points: &[Point<Pixels>],
+    dash: &[f32],
+    width: f32,
+    color: Hsla,
+    window: &mut Window,
+) {
+    for pair in points.windows(2) {
+        paint_dashed(pair[0], pair[1], dash, width, color, window);
+    }
+}

@@ -10,7 +10,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext, Context, IntoElement, ParentElement, Render, Styled,
     VisualTestAppContext, Window, div, px, size,
 };
-use gpui_plot_demo::gallery;
+use gpui_plot_demo::examples;
 
 struct Host {
     build: fn() -> gpui_plot::Plot,
@@ -51,12 +51,14 @@ fn main() {
     let mut cx = VisualTestAppContext::new(platform);
     cx.update(gpui_kit::init);
 
-    // Stacked bars: the pointer should pick a bar anywhere inside its body,
-    // not just at its top where the anchor point sits.
-    let example = gallery::examples()
+    // A stacked bar chart: the pointer should pick a bar anywhere inside its
+    // body, not just at its top where the anchor point sits. `HOVER_EXAMPLE`
+    // picks another example by id.
+    let id = std::env::var("HOVER_EXAMPLE").unwrap_or_else(|_| "transforms-stack-02".into());
+    let example = examples::examples()
         .into_iter()
-        .find(|e| e.title == "Stacked bars")
-        .expect("stacked bars example");
+        .find(|e| e.id() == id)
+        .unwrap_or_else(|| panic!("no example {id}"));
     let build = example.build;
 
     let window: AnyWindowHandle = cx
