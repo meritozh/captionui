@@ -911,7 +911,10 @@ pub fn apply_dodge(prepared: &mut [PreparedMark], frame: &Frame) {
         // The dodge packs along the axis the mark's data varies on, and writes
         // the offset across it: a `dotX` varies on x and spreads vertically,
         // a `dotY` varies on y and spreads horizontally.
-        let along_x = mark.mark.kind.is_x_only();
+        // A mark with only an x (Plot's `dodgeY` on an image or dot) varies
+        // on x too.
+        let along_x = mark.mark.kind.is_x_only()
+            || (mark.mark.channels.x.is_some() && mark.mark.channels.y.is_none());
         // The positions come from the axis the data varies on; the packed
         // offsets land on the *other* axis, so the extent is that one's.
         let (scale, extent) = if along_x {

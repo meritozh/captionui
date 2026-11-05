@@ -19,16 +19,18 @@ pub fn examples() -> Vec<Example> {
     ]
 }
 
-/// The side of the stand-in portrait, in pixels: the docs' `width: 40`.
-const PORTRAIT: u32 = 40;
+/// The stand-in portrait's size, in pixels: a 3:4 portrait, as most of the
+/// docs' Wikipedia thumbnails are.
+const PORTRAIT: [u32; 2] = [30, 40];
 
-/// `src: "Portrait URL"`: the image mark paints one in-memory image, not a
-/// URL per row, so every president gets the same grey stand-in portrait.
+/// `src: "Portrait URL"`: the portraits are remote URLs with no local copy
+/// in `demo/data`, and the image mark paints one in-memory image rather than
+/// an `src` per row, so every president gets the same grey stand-in, sized,
+/// fit and clipped as Plot would the portrait.
 fn portrait(mark: ImageMark) -> ImageMark {
-    let pixels = (0..PORTRAIT * PORTRAIT)
-        .flat_map(|_| [0xa0, 0xa0, 0xa0, 0xff])
-        .collect();
-    mark.image(gpui_plot::image_from_rgba(PORTRAIT, PORTRAIT, pixels))
+    let [w, h] = PORTRAIT;
+    let pixels = (0..w * h).flat_map(|_| [0xa0, 0xa0, 0xa0, 0xff]).collect();
+    mark.image(gpui_plot::image_from_rgba(w, h, pixels))
 }
 
 /// A column of the favorability table as a number.
@@ -50,14 +52,14 @@ fn e01() -> Plot {
                         - pct(d, "Very Unfavorable %")
                         - pct(d, "Somewhat Unfavorable %")
                 }))
+                .width(40.)
                 .tip_title("Name"),
         ))
 }
 
 fn e02() -> Plot {
-    // The y scale's `insetTop: 4`, and the image's `r: 20` circular clip and
-    // `preserveAspectRatio`, have no port.
     Plot::plot()
+        .inset_top(4.)
         .x(|x| x.inset(20.).label("First inauguration date"))
         .y(|y| y.grid(true).label("Any opinion (%)").tick_format("+f"))
         .mark(rule_y([0.]))
@@ -71,19 +73,19 @@ fn e02() -> Plot {
                         + pct(d, "Somewhat Unfavorable %")
                 }))
                 .r(20.)
+                .preserve_aspect_ratio("xMidYMin slice")
                 .tip_title("Name"),
         ))
 }
 
 fn e03() -> Plot {
-    // Plot.dodgeY with `r: 20`; the circular clip and `preserveAspectRatio`
-    // have no port.
     Plot::plot().inset(20.).height(280.).mark(portrait(
         image(data::us_president_favorability())
             .x("First Inauguration Date")
             .r(20.)
+            .preserve_aspect_ratio("xMidYMin slice")
             .dodge(Dodge {
-                anchor: DodgeAnchor::Start,
+                anchor: DodgeAnchor::End,
                 radius: 20.,
                 padding: 1.,
             })

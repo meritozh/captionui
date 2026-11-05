@@ -841,6 +841,11 @@ pub struct MarkStyle {
     pub text_padding: Option<f32>,
     /// A tip's `pointerSize`, in pixels (12 by default).
     pub pointer_size: Option<f32>,
+    /// An image's `width` and `height`, in pixels (16 by default, each
+    /// defaulting to the other).
+    pub image_size: [Option<f32>; 2],
+    /// An image's `preserveAspectRatio`, SVG's `xMidYMid meet` by default.
+    pub preserve_aspect_ratio: Option<SharedString>,
     /// Plot's `strokeDasharray`, in pixels.
     pub dash: Vec<f32>,
     /// Plot's `rotate` for text, in degrees.
@@ -1012,6 +1017,8 @@ impl Default for MarkStyle {
             tip_anchor: None,
             text_padding: None,
             pointer_size: None,
+            image_size: [None; 2],
+            preserve_aspect_ratio: None,
             dash: Vec::new(),
             text_rotate: 0.,
         }
@@ -2327,6 +2334,25 @@ impl Mark {
         self
     }
 
+    /// An image's `width`, in pixels.
+    pub fn width(mut self, width: f32) -> Self {
+        self.style.image_size[0] = Some(width);
+        self
+    }
+
+    /// An image's `height`, in pixels.
+    pub fn height(mut self, height: f32) -> Self {
+        self.style.image_size[1] = Some(height);
+        self
+    }
+
+    /// An image's `preserveAspectRatio`, as SVG spells it
+    /// (`"xMidYMin slice"`).
+    pub fn preserve_aspect_ratio(mut self, value: &str) -> Self {
+        self.style.preserve_aspect_ratio = Some(value.to_string().into());
+        self
+    }
+
     /// Set the equirectangular projection a `geo` mark maps lon/lat through.
     pub fn projection(mut self, projection: crate::projection::Projection) -> Self {
         self.projection = Some(projection);
@@ -3284,6 +3310,24 @@ macro_rules! mark_builder {
             /// Set the image an `image` mark paints, shared across its rows.
             pub fn image(mut self, image: std::sync::Arc<gpui::RenderImage>) -> Self {
                 self.0 = self.0.image(image);
+                self
+            }
+
+            /// See [`Mark::width`].
+            pub fn width(mut self, width: f32) -> Self {
+                self.0 = self.0.width(width);
+                self
+            }
+
+            /// See [`Mark::height`].
+            pub fn height(mut self, height: f32) -> Self {
+                self.0 = self.0.height(height);
+                self
+            }
+
+            /// See [`Mark::preserve_aspect_ratio`].
+            pub fn preserve_aspect_ratio(mut self, value: &str) -> Self {
+                self.0 = self.0.preserve_aspect_ratio(value);
                 self
             }
 
