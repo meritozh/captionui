@@ -122,6 +122,94 @@ impl Default for Equirectangular {
     }
 }
 
+/// The linear rings of a GeoJSON document, in `(lon, lat)` degree points.
+///
+/// This is the pieces of GeoJSON the `geo` mark can fill: every polygon found
+/// in the document, each as one closed ring. It walks `Feature`s and
+/// `GeometryCollection`s, and a `Polygon` yields its rings, a `MultiPolygon`
+/// all of its polygons' rings. Points, lines and empty geometries yield nothing.
+///
+/// `text` is the GeoJSON source — a file or URL's contents a caller has already
+/// read; nothing here fetches it.
+pub fn geojson_rings(text: &str) -> Result<Vec<Vec<(f64, f64)>>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("invalid GeoJSON: {e}"))?;
+    let mut rings = Vec::new();
+    collect_geometry(&value, &mut rings);
+    Ok(rings)
+}
+
+/// Recurse a GeoJSON value, pushing the rings of any polygon it contains.
+fn collect_geometry(value: &serde_json::Value, rings: &mut Vec<Vec<(f64, f64)>>) {
+    use serde_json::Value as V;
+    // A ring is a "coordinates" array of [lon, lat] pairs, decoded once here.
+    fn ring(coords: &V) -> Option<Vec<(f64, f64)>> {
+        let positions = coords.as_array()?;
+        let mut points = Vec::with_capacity(positions.len());
+        for p in positions {
+            let arr = p.as_array()?;
+            let lon = arr.first()?.as_f64()?;
+            let lat = arr.get(1)?.as_f64()?;
+            points.push((lon, lat));
+        }
+        if points.len() >= 3 {
+            Some(points)
+        } else {
+            None
+        }
+    }
+
+    match value {
+        // A Feature wraps a geometry under "geometry".
+        V::Object(map) if map.get("type").and_then(V::as_str) == Some("Feature") => {
+            if let Some(geometry) = map.get("geometry") {
+                collect_geometry(geometry, rings);
+            }
+        }
+        V::Object(map) if map.get("type").and_then(V::as_str) == Some("GeometryCollection") => {
+            if let Some(arr) = map.get("geometries").and_then(V::as_array) {
+                for geometry in arr {
+                    collect_geometry(geometry, rings);
+                }
+            }
+        }
+        // A FeatureCollection is a list of Features.
+        V::Object(map) if map.get("type").and_then(V::as_str) == Some("FeatureCollection") => {
+            if let Some(arr) = map.get("features").and_then(V::as_array) {
+                for feature in arr {
+                    collect_geometry(feature, rings);
+                }
+            }
+        }
+        V::Object(map) => match map.get("type").and_then(V::as_str) {
+            Some("Polygon") => {
+                if let Some(coords) = map.get("coordinates").and_then(V::as_array) {
+                    for poly in coords {
+                        if let Some(r) = ring(poly) {
+                            rings.push(r);
+                        }
+                    }
+                }
+            }
+            Some("MultiPolygon") => {
+                if let Some(coords) = map.get("coordinates").and_then(V::as_array) {
+                    for poly in coords {
+                        if let Some(coords) = poly.as_array() {
+                            for coordinates in coords {
+                                if let Some(r) = ring(coordinates) {
+                                    rings.push(r);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
 /// The centroid of a list of degree (lon, lat) points, in degree space.
 ///
 /// The simple plane average, correct for a small region on an equirectangular
@@ -167,5 +255,43 @@ mod tests {
     fn averages_for_centroid() {
         assert_eq!(centroid(&[(10., 20.), (30., 40.)]), Some((20., 30.)));
         assert_eq!(centroid(&[]), None);
+    }
+
+    #[test]
+    fn parses_geojson_polygons_into_rings() {
+        // A tiny square polygon.
+        let text = r#"{
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [[-10.0, 40.0], [-5.0, 40.0], [-5.0, 45.0], [-10.0, 45.0], [-10.0, 40.0]]
+                ]
+            }
+        }"#;
+        let rings = geojson_rings(text).unwrap();
+        assert_eq!(rings.len(), 1);
+        let ring = &rings[0];
+        assert_eq!(ring[0], (-10.0, 40.0));
+        assert_eq!(ring[2], (-5.0, 45.0));
+    }
+
+    #[test]
+    fn parses_a_multipolygon_and_feature_collection() {
+        let text = r#"{
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature", "geometry": {
+                    "type": "MultiPolygon",
+                    "coordinates": [
+                        [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]],
+                        [[[2.0, 2.0], [3.0, 2.0], [3.0, 3.0], [2.0, 3.0], [2.0, 2.0]]]
+                    ]
+                }}
+            ]
+        }"#;
+        let rings = geojson_rings(text).unwrap();
+        assert_eq!(rings.len(), 2);
+        assert!(!geojson_rings("not json").is_ok());
     }
 }

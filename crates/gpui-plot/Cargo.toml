@@ -11,3 +11,4 @@ gpui-kit.workspace = true
 chrono.workspace = true
 image = "0.25"
 smallvec = "1"
+serde_json = "1"

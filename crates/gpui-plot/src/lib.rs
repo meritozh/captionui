@@ -69,7 +69,7 @@ pub use transform::{
 pub use value::{PlotKind, Value};
 
 pub use plot::{Interaction, LegendPosition, Plot, PlotTitle};
-pub use projection::{Equirectangular, Mercator, Projection, centroid};
+pub use projection::{Equirectangular, Mercator, Projection, centroid, geojson_rings};
 
 /// Build a [`gpui::RenderImage`] from RGBA pixels, for an `image` mark.
 ///

@@ -1337,6 +1337,17 @@ impl Mark {
         self
     }
 
+    /// Add every polygon in a GeoJSON document to a `geo` mark, Plot's way of
+    /// loading a geography file's shapes. `text` is the GeoJSON source — a
+    /// file or URL's contents a caller has already read.
+    pub fn geojson(mut self, text: &str) -> Self {
+        if let Ok(rings) = crate::projection::geojson_rings(text) {
+            let geometry = self.geo_geometry.get_or_insert_with(Vec::new);
+            geometry.extend(rings);
+        }
+        self
+    }
+
     /// Sort the mark's rows.
     pub fn sort(mut self, field: impl Into<SharedString>, descending: bool) -> Self {
         self.sort = Some(SortConfig {
@@ -1799,6 +1810,12 @@ macro_rules! mark_builder {
             /// Add a GeoJSON-like ring a geo mark fills as a projected shape.
             pub fn ring(mut self, ring: Vec<(f64, f64)>) -> Self {
                 self.0 = self.0.ring(ring);
+                self
+            }
+
+            /// Add every polygon in a GeoJSON document to a geo mark.
+            pub fn geojson(mut self, text: &str) -> Self {
+                self.0 = self.0.geojson(text);
                 self
             }
 

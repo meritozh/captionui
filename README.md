@@ -246,28 +246,25 @@ plot. A mark's `interval` option buckets a date or number into an extent —
 `Day`/`Month`/`Year` on a calendar, a fixed `Step` on a number — so a `rectY`
 over daily dates draws one bar per month, Plot's `interval` transform.
 
-Not implemented yet:
-
-1. **GeoJSON source loading** — the `geo` mark projects and shapes geography,
-   but a caller supplies the lon/lat points, paths and rings; Plot's ability to
-   load a GeoJSON file or URL and parse its polygons is left to the caller's
-   own data, since this desktop library ships no basemap dataset.
-
-`auto` covers the scatter, scatter-by-color, line, histogram, bar and heatmap
-branches (two quantitative fields with a `count` color bin both axes and fill
-each cell by its count, Plot's `bin({fill: "count"}, {x, y})`). The barcode —
-a bare quantitative field as a strip, no reduction — has its own `Plot::barcode`.
+`auto` covers the scatter, scatter-by-color, line, histogram, bar, heatmap
+and barcode branches: two quantitative fields with a `count` color bin both
+axes and fill each cell by its count, an ordinal y with a `count` gives a
+binned `barX` heatmap, and a bare quantitative field — no reduction — is a
+`Plot::barcode` strip.
 
 The `image` mark paints a [`gpui::RenderImage`] at each datum's position —
 a caller supplies pixels synchronously via `gpui_plot::image_from_rgba`
 rather than GPUI's async image cache, so the mark works in the offscreen
 snapshot renderer too.
 
-The `geo` mark ships two projections — a flat **equirectangular** and a
-spherical **Mercator** — plus `projection::centroid`. It reads lon/lat
-channels for paths and points, or takes a GeoJSON-like ring of coastline to
-fill; `Projection::mercator`/`equirectangular` pick the mapping and fit its
-view.
+The `geo` mark ships a flat **equirectangular** and a spherical **Mercator**
+projection, plus `projection::centroid`. It reads lon/lat channels for paths
+and points, fills GeoJSON-like rings of coastline, and loads the polygons of a
+whole GeoJSON document — a Feature, FeatureCollection, Polygon or
+MultiPolygon — through `geojson_rings` and the mark's `geojson` option, which
+a caller feeds the contents of a file or URL it has already read. The one thing
+this desktop library does not do is *fetch* a URL itself; a caller supplies the
+bytes.
 
 ### Adding a mark
 

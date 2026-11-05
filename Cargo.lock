@@ -2206,6 +2206,7 @@ dependencies = [
  "chrono",
  "gpui-kit",
  "image",
+ "serde_json",
  "smallvec",
 ]
 

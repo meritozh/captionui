@@ -89,6 +89,13 @@ pub fn build(data: &[Table], x: Option<&str>, y: Option<&str>, color: Option<&st
                 mark
             }
         }),
+        // x quantitative, y ordinal, with a count color → a `barX` heatmap: bars
+        // along x per category, each bin's length its count.
+        (Some(_), Some(_)) if color.as_deref() == Some("count") => plot.bar_x(|mark| {
+            mark.y(y.unwrap())
+                .x(x.unwrap())
+                .bin(crate::transform::Thresholds::default())
+        }),
         // x quantitative, y ordinal → horizontal bars.
         (Some(_), Some(_)) => plot.bar_x(|mark| {
             let mark = mark.y(y.unwrap()).x(x.unwrap());
@@ -344,5 +351,24 @@ mod tests {
         let first = &plot.data().rows()[0];
         assert!(first.value("count").as_number().is_some());
         assert!(first.value("x0").as_number().is_some());
+    }
+
+    #[test]
+    fn count_color_on_ordinal_y_gives_a_binned_barx() {
+        // x quantitative, y ordinal, color count → a barX heatmap that bins x.
+        let data = [
+            Table::empty()
+                .with("x", Value::Number(1.))
+                .with("y", Value::text("a")),
+            Table::empty()
+                .with("x", Value::Number(2.))
+                .with("y", Value::text("a")),
+            Table::empty()
+                .with("x", Value::Number(9.))
+                .with("y", Value::text("b")),
+        ];
+        let plot = build(&data, Some("x"), Some("y"), Some("count"));
+        assert_eq!(plot.marks()[0].kind, crate::mark::MarkKind::BarX);
+        assert!(plot.marks()[0].bin.is_some(), "barX heatmap bins x");
     }
 }

@@ -456,16 +456,21 @@ pub fn route() -> Vec<Table> {
     .collect()
 }
 
-/// A rough coastline ring for the `geo` mark's GeoJSON shape: a lone islet's
-/// outline, a few (lon, lat) points the projected polygon fills. A real
-/// world-coast dataset would be much larger; this shows the shape path.
-pub fn islet() -> Vec<(f64, f64)> {
-    vec![
-        (-9.0, 42.0),
-        (-8.5, 42.8),
-        (-8.8, 43.4),
-        (-9.6, 43.6),
-        (-10.2, 43.0),
-        (-9.0, 42.0),
-    ]
+/// A small GeoJSON source — two square islands — for the `geo` mark's
+/// GeoJSON loading: a FeatureCollection of Polygons a caller has read from a
+/// file or URL. This stands in for a real world-coast dataset.
+pub fn geojson_archipelago() -> &'static str {
+    r#"{
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "properties": {"name": "main"}, "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[-9.5, 42.0], [-8.5, 42.0], [-8.5, 43.0], [-9.5, 43.0], [-9.5, 42.0]]]
+            }},
+            {"type": "Feature", "properties": {"name": "isle"}, "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[-8.0, 42.4], [-7.4, 42.4], [-7.4, 43.0], [-8.0, 43.0], [-8.0, 42.4]]]
+            }}
+        ]
+    }"#
 }

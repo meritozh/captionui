@@ -384,9 +384,9 @@ pub fn examples() -> Vec<Example> {
             build: geo_plot,
         },
         Example {
-            title: "A projected islet",
+            title: "An archipelago from GeoJSON",
             section: "Marks / geo",
-            description: "A GeoJSON-like ring of coastline, projected and filled as a shape.",
+            description: "A GeoJSON FeatureCollection loaded and projected as filled islands.",
             height: 440.,
             build: geo_shape_plot,
         },
@@ -1389,12 +1389,12 @@ fn geo_plot() -> Plot {
 }
 
 fn geo_shape_plot() -> Plot {
-    let ring = data::islet();
-    let projection = gpui_plot::Projection::mercator(-11., -8., 44., 41.);
+    let source = data::geojson_archipelago();
+    let projection = gpui_plot::Projection::mercator(-10., -7., 43.5, 41.5);
     Plot::new(Vec::<Table>::new())
-        .title("A lone islet, projected")
-        .subtitle("A ring of coastline filled and stroked as a projected shape")
-        .geo(|mark| mark.ring(ring).projection(projection).stroke_width(1.))
+        .title("An archipelago, loaded from GeoJSON")
+        .subtitle("A GeoJSON FeatureCollection parsed into islands and projected")
+        .geo(|mark| mark.geojson(source).projection(projection).stroke_width(1.))
         .grid(false)
 }
 
