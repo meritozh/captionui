@@ -107,18 +107,23 @@ fn e03() -> Plot {
 fn e04() -> Plot {
     let noise = |x: f64, y: f64| perlin::octave2(x, y, 2);
     let points = Dataset::tuples(poisson([0., 0., 2., 2.], 4000.));
-    Plot::plot().inset(6.).width(1024.).aspect_ratio(1.).no_axes().mark(
-        vector(points.clone())
-            .x("0")
-            .y("1")
-            .length(length_scale(
-                &points,
-                move |d| (noise(d.num("0") + 2., d.num("1")) + 0.5) * 24.,
-                12.,
-                false,
-            ))
-            .rotate(move |d: &Table| (noise(d.num("0"), d.num("1")) * 360.) as f32),
-    )
+    Plot::plot()
+        .inset(6.)
+        .width(1024.)
+        .aspect_ratio(1.)
+        .no_axes()
+        .mark(
+            vector(points.clone())
+                .x("0")
+                .y("1")
+                .length(length_scale(
+                    &points,
+                    move |d| (noise(d.num("0") + 2., d.num("1")) + 0.5) * 24.,
+                    12.,
+                    false,
+                ))
+                .rotate(move |d: &Table| (noise(d.num("0"), d.num("1")) * 360.) as f32),
+        )
 }
 
 /// The docs' `poisson([x0, y0, x1, y1], n)`: Bridson's Poisson-disk sampling,
@@ -270,4 +275,3 @@ mod perlin {
         value / total
     }
 }
-

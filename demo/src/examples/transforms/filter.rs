@@ -74,6 +74,12 @@ fn e03() -> Plot {
 /// `Plot.barY(alphabet.filter((d) => /[aeiouy]/i.test(d.letter)), {x: "letter", y: "frequency"})`:
 /// filtering the data, not the mark, drops the consonants from the x domain.
 fn e04() -> Plot {
-    let vowels = Dataset::new(data::alphabet().rows().iter().filter(|d| is_vowel(d)).cloned());
+    let vowels = Dataset::new(
+        data::alphabet()
+            .rows()
+            .iter()
+            .filter(|d| is_vowel(d))
+            .cloned(),
+    );
     Plot::plot().mark(bar_y(vowels).x("letter").y("frequency"))
 }

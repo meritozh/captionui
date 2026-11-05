@@ -640,6 +640,9 @@ pub struct GeoProjection {
     pub inset: f32,
     /// Conic `parallels`, degrees.
     pub parallels: Option<[f64; 2]>,
+    /// d3's `center`, degrees: the (rotated) point the projection places at
+    /// the frame's middle.
+    pub center: [f64; 2],
 }
 
 impl GeoProjection {
@@ -661,6 +664,7 @@ impl GeoProjection {
                 ));
                 p.rotate = [96., 0., 0.];
                 p.parallels = Some([29.5, 45.5]);
+                p.center = [-0.6, 38.7];
                 return Some(p);
             }
             "azimuthal-equal-area" => (Raw::AzimuthalEqualArea, [4., 4.]),
@@ -686,7 +690,18 @@ impl GeoProjection {
             "transverse-mercator" => (Raw::TransverseMercator, [TAU, TAU]),
             _ => return None,
         };
-        Some(Self::new(ProjectionKind::D3(raw, k)))
+        let mut p = Self::new(ProjectionKind::D3(raw, k));
+        // d3's conic defaults centre the projection on a mid-latitude.
+        if matches!(raw, Raw::ConicEqualArea(..)) {
+            p.center = [0., 33.6442];
+        }
+        Some(p)
+    }
+
+    /// d3's `center`, degrees.
+    pub fn center(mut self, center: [f64; 2]) -> Self {
+        self.center = center;
+        self
     }
 
     fn new(kind: ProjectionKind) -> Self {
@@ -696,6 +711,7 @@ impl GeoProjection {
             domain: None,
             inset: 0.,
             parallels: None,
+            center: [0., 0.],
         }
     }
 
@@ -847,14 +863,39 @@ impl Fitted {
     pub fn project(&self, lon: f64, lat: f64) -> Option<[f64; 2]> {
         let [x, y] = self.raw(lon, lat)?;
         match self.projection.kind {
-            ProjectionKind::Identity | ProjectionKind::ReflectY => {
-                Some([x + self.translate[0], y + self.translate[1]])
-            }
-            _ => Some([
-                self.translate[0] + x * self.scale,
-                self.translate[1] - y * self.scale,
+            // Plot's identity and reflect-y take a domain's fit: scale, then
+            // translate.
+            ProjectionKind::Identity | ProjectionKind::ReflectY => Some([
+                x * self.scale + self.translate[0],
+                y * self.scale + self.translate[1],
             ]),
+            _ => Some(self.to_px([x, y])),
         }
+    }
+
+    /// The raw point d3's `center` puts at the translate: the centre
+    /// projected without the rotation, as d3 does.
+    fn center_offset(&self) -> [f64; 2] {
+        match &self.projection.kind {
+            ProjectionKind::D3(raw, _) => {
+                let [cl, cf] = self.projection.center;
+                if cl == 0. && cf == 0. {
+                    return [0., 0.];
+                }
+                raw.forward(cl * RADIANS, cf * RADIANS).unwrap_or([0., 0.])
+            }
+            _ => [0., 0.],
+        }
+    }
+
+    /// A raw (y-up) point in frame pixels, with d3's centre, scale and
+    /// translate.
+    fn to_px(&self, p: [f64; 2]) -> [f64; 2] {
+        let [cx, cy] = self.center_offset();
+        [
+            self.translate[0] + (p[0] - cx) * self.scale,
+            self.translate[1] - (p[1] - cy) * self.scale,
+        ]
     }
 
     /// The projected paths of a geometry: closed rings (for fills) and open
@@ -886,12 +927,7 @@ impl Fitted {
     /// The globe's outline in pixels: the clip circle of an azimuthal
     /// projection, else the boundary of the raw domain.
     pub fn sphere(&self) -> Option<Vec<[f64; 2]>> {
-        let to_px = |p: [f64; 2]| {
-            [
-                self.translate[0] + p[0] * self.scale,
-                self.translate[1] - p[1] * self.scale,
-            ]
-        };
+        let to_px = |p: [f64; 2]| self.to_px(p);
         match &self.projection.kind {
             ProjectionKind::D3(raw, _) => {
                 if let Some(angle) = raw.clip_angle() {
@@ -1085,10 +1121,7 @@ impl Fitted {
                 return None;
             };
             let [x, y] = raw.forward(l, f.clamp(-FRAC_PI_2 + 1e-6, FRAC_PI_2 - 1e-6))?;
-            Some([
-                self.translate[0] + x * self.scale,
-                self.translate[1] - y.clamp(-PI, PI) * self.scale,
-            ])
+            Some(self.to_px([x, y.clamp(-PI, PI)]))
         };
         if polar {
             // One piece spanning every longitude: close it through the pole.
@@ -1142,10 +1175,7 @@ impl Fitted {
         let (s, c) = (angle.sin(), angle.cos());
         let (hx, hy, hz) = (c, s * y / r, s * z / r);
         let [px_, py_] = raw.forward(hy.atan2(hx), hz.clamp(-1., 1.).asin())?;
-        Some([
-            self.translate[0] + px_ * self.scale,
-            self.translate[1] - py_ * self.scale,
-        ])
+        Some(self.to_px([px_, py_]))
     }
 
     /// The projected bounds of a geometry, `[[x0, y0], [x1, y1]]`.

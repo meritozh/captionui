@@ -569,7 +569,7 @@ fn draw_hexbin(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     // Key by the lattice cell, and keep its center in pixels.
     let mut cells: HashMap<(i32, i32), (f32, f32, usize)> = HashMap::new();
     for row in prepared.rows.iter() {
-        let Some(placed) = ctx.frame.point(row.x_value(), row.y_value()) else {
+        let Some(placed) = crate::render::basic::position_in(prepared, ctx.frame, row) else {
             continue;
         };
         let (px, py) = (placed.x.as_f32(), placed.y.as_f32());

@@ -174,11 +174,7 @@ fn e08() -> Plot {
         .margin_bottom(100.)
         .x(sport_axis)
         .y(|y| y.grid(true).label("Frequency"))
-        .color(|c| {
-            c.type_name("categorical")
-                .domain([-1., 1.])
-                .unknown("#aaa")
-        })
+        .color(|c| c.type_name("categorical").domain([-1., 1.]).unknown("#aaa"))
         .mark(rule_y([0.]))
         .mark(
             link(data::olympians())
@@ -230,11 +226,7 @@ fn e10() -> Plot {
         .margin_bottom(80.)
         .x(sport_axis)
         .y(|y| y.no_label())
-        .color(|c| {
-            c.label("Median weight (kg)")
-                .legend(true)
-                .scheme("YlGnBu")
-        })
+        .color(|c| c.label("Median weight (kg)").legend(true).scheme("YlGnBu"))
         .mark(
             cell(data::olympians())
                 .fill("weight")

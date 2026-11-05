@@ -77,7 +77,10 @@ fn e07() -> Plot {
     plot.r(|r| r.range([0., 16.]))
         .color(|c| c.scheme("spectral").label("First year opened").legend(true))
         .mark(crate::examples::pre_projected_lines(&data::statemesh(), &albers).stroke_opacity(0.5))
-        .mark(crate::examples::pre_projected_lines(&data::nation(), &albers))
+        .mark(crate::examples::pre_projected_lines(
+            &data::nation(),
+            &albers,
+        ))
         .mark(hexbin(walmarts).x("x").y("y").fill("date"))
 }
 

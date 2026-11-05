@@ -36,7 +36,7 @@ fn project(prepared: &PreparedMark, ctx: &DrawContext<'_>) -> Vec<(usize, Point2
         .iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            let placed = ctx.frame.point(row.x_value(), row.y_value())?;
+            let placed = crate::render::basic::position_in(prepared, ctx.frame, row)?;
             Some((index, [placed.x.as_f32() as f64, placed.y.as_f32() as f64]))
         })
         .collect()

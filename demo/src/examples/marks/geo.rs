@@ -103,7 +103,11 @@ fn e04() -> Plot {
         .mark(
             geo(radii)
                 .geometry(|d: &Table| {
-                    geo_circle([-175.38, -20.57], d.number(gpui_plot::table::VALUE).unwrap_or(0.)).into_value()
+                    geo_circle(
+                        [-175.38, -20.57],
+                        d.number(gpui_plot::table::VALUE).unwrap_or(0.),
+                    )
+                    .into_value()
                 })
                 .stroke(ColorChannel::number(|d: &Table| {
                     111.2 * d.number(gpui_plot::table::VALUE).unwrap_or(0.)

@@ -1092,6 +1092,22 @@ fn draw_texts(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             TextAnchor::Middle => TextAlign::Center,
             TextAnchor::End => TextAlign::Right,
         };
+        // Plot's `rotate`: the label turns about its anchor point.
+        if style.text_rotate.abs() > 0.5 {
+            let anchor = point(px(origin.x.as_f32() + dx), px(origin.y.as_f32() + dy));
+            paint::paint_rotated_text(
+                &lines.join(" "),
+                size.as_f32(),
+                color,
+                &ctx.theme.font_family,
+                anchor,
+                style.text_rotate,
+                align,
+                ctx.window,
+                ctx.cx,
+            );
+            continue;
+        }
         for (i, line) in lines.into_iter().enumerate() {
             let y_line = top + i as f32 * line_height;
             // Plot's `textStroke`: a halo, painted as the glyphs offset in a

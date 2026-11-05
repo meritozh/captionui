@@ -104,9 +104,7 @@ fn e05() -> Plot {
     // That circle is the parallel half a radian from the south pole.
     let lat = -90. + 0.5_f64.to_degrees();
     let edge = Geometry::Polygon(vec![
-        (0..=72)
-            .map(|i| [-180. + 5. * f64::from(i), lat])
-            .collect(),
+        (0..=72).map(|i| [-180. + 5. * f64::from(i), lat]).collect(),
     ]);
     Plot::plot()
         .width(688.)
@@ -133,7 +131,11 @@ fn e06() -> Plot {
     let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
     for row in westport.rows() {
         let fitted = projection("identity").fit(1., 1.);
-        if let Some([[a, b], [c, d]]) = row.value("geometry").as_geo().and_then(|g| fitted.bounds(g)) {
+        if let Some([[a, b], [c, d]]) = row
+            .value("geometry")
+            .as_geo()
+            .and_then(|g| fitted.bounds(g))
+        {
             // `identity` fits with a one-pixel translate of zero inset.
             (x0, y0, x1, y1) = (x0.min(a), y0.min(b), x1.max(c), y1.max(d));
         }

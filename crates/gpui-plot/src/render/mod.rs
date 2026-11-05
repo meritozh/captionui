@@ -878,6 +878,14 @@ fn derive_intervals(
             *x1 = Some(Value::Number(0.));
             *x2 = Some(x.clone());
         }
+        // Plot's bars and rects given only an end (`{y2: "count"}`) span
+        // from zero to it, unstacked, so the series overlap.
+        MarkKind::BarY | MarkKind::RectY | MarkKind::AreaY if y1.is_none() && y2.is_some() => {
+            *y1 = Some(Value::Number(0.));
+        }
+        MarkKind::BarX | MarkKind::RectX | MarkKind::AreaX if x1.is_none() && x2.is_some() => {
+            *x1 = Some(Value::Number(0.));
+        }
         MarkKind::Cell => {
             if x1.is_none() && !x.is_null() {
                 *x1 = Some(x.clone());

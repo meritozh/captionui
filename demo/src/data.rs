@@ -376,7 +376,9 @@ pub fn countyboxes() -> Dataset {
         match geometry {
             Point(p) => point(*p),
             MultiPoint(ps) | LineString(ps) => ps.iter().copied().for_each(point),
-            MultiLineString(rings) | Polygon(rings) => rings.iter().flatten().copied().for_each(point),
+            MultiLineString(rings) | Polygon(rings) => {
+                rings.iter().flatten().copied().for_each(point)
+            }
             MultiPolygon(polygons) => polygons.iter().flatten().flatten().copied().for_each(point),
             Collection(items) => items.iter().for_each(|g| extend(g, b)),
             Sphere => {}
@@ -384,7 +386,12 @@ pub fn countyboxes() -> Dataset {
     }
     cached("countyboxes", || {
         Dataset::new(us().feature("counties").rows().iter().filter_map(|row| {
-            let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+            let mut b = [
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            ];
             extend(row.value("geometry").as_geo()?, &mut b);
             b[0].is_finite().then(|| {
                 Table::empty()

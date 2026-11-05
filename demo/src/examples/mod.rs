@@ -110,7 +110,8 @@ pub fn albers() -> gpui_plot::GeoProjection {
         // the territories (60 and up) lie outside d3's default view.
         .filter(|state| {
             let id = state.value("id").label();
-            id.parse::<u32>().is_ok_and(|n| n <= 56 && n != 2 && n != 15)
+            id.parse::<u32>()
+                .is_ok_and(|n| n <= 56 && n != 2 && n != 15)
         })
         .filter_map(|state| state.value("geometry").as_geo().cloned())
         .collect();
