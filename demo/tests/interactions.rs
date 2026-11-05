@@ -27,7 +27,7 @@ impl Render for Host {
 /// Build a headless test context on a thread-safe platform, so the sweep can
 /// run from a `#[test]` thread (the native Mac renderer insists on main).
 fn context() -> TestAppContext {
-    let dispatcher = gpui_pre::TestDispatcher::new(0);
+    let dispatcher = gpui_kit::TestDispatcher::new(0);
     TestAppContext::build(dispatcher, Some("interactions"))
 }
 

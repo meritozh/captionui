@@ -20,9 +20,8 @@ gpui-kit.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
-# The headless renderer the snapshot example draws through. GPUI Kit's own
-# `test-support` feature would pull in a second dependency set that conflicts
-# with this workspace's, so the platform crates are depended on directly.
-gpui-pre = { version = "=0.3.10", package = "gpui-pre", features = ["test-support"] }
-gpui-pre-platform = { version = "=0.3.10", package = "gpui-pre-platform", features = ["test-support"] }
+# gpui-kit is the single source of GPUI; its `test-support` feature provides the
+# `TestAppContext`/`TestDispatcher` harness the interaction tests drive. Kept in
+# dev-dependencies so the app binary does not enable it.
+gpui-kit = { version = "0.8.1", features = ["test-support"] }
 image = "0.25"
