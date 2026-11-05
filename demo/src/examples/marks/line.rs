@@ -138,12 +138,6 @@ fn e06() -> Plot {
 }
 
 fn e07() -> Plot {
-    let every_five: Dataset = data::driving()
-        .rows()
-        .iter()
-        .filter(|d| d.num("year") as i64 % 5 == 0)
-        .cloned()
-        .collect();
     Plot::plot()
         .inset(10.)
         .grid(true)
@@ -157,7 +151,8 @@ fn e07() -> Plot {
                 .marker("true"),
         )
         .mark(
-            text(every_five)
+            text(data::driving())
+                .filter(|d| d.num("year") as i64 % 5 == 0)
                 .x("miles")
                 .y("gas")
                 .text(|d: &Table| Value::text(format!("{}", d.num("year"))))
@@ -284,15 +279,15 @@ fn e14() -> Plot {
 }
 
 fn e15() -> Plot {
-    let after_march: Dataset = data::aapl()
-        .rows()
-        .iter()
-        .filter(|d| month(d) >= 3)
-        .cloned()
-        .collect();
     Plot::plot()
         .y(|y| y.grid(true))
-        .mark(line_y(after_march).x("Date").y("Close").stroke_opacity(0.3))
+        .mark(
+            line_y(data::aapl())
+                .filter(|d| month(d) >= 3)
+                .x("Date")
+                .y("Close")
+                .stroke_opacity(0.3),
+        )
         .mark(line_y(data::aapl()).x("Date").y(Channel::number(|d| {
             if month(d) < 3 {
                 f64::NAN
@@ -323,20 +318,17 @@ fn e16() -> Plot {
         )
 }
 
-/// Without `projection: "equirectangular"` or the world's `land`, the
-/// beagle's `[lon, lat]` track is drawn on linear x and y over the globe's
-/// extent.
 fn e17() -> Plot {
     Plot::plot()
-        .x(|x| x.domain([-180., 180.]))
-        .y(|y| y.domain([-90., 90.]))
-        .mark(line(beagle()).stroke("red"))
-        .mark(dot(Dataset::tuples([[-0.13, 51.5]])).fill("red")) // London
+        .projection("equirectangular")
+        .mark(geo(data::land())) // MultiPolygon
+        .mark(line(beagle()).stroke("red")) // [[lon, lat], …]
+        .mark(geo(Geometry::Point([-0.13, 51.5])).fill("red")) // London
 }
 
 fn e18() -> Plot {
     Plot::plot()
-        .x(|x| x.domain([-180., 180.]))
-        .y(|y| y.domain([-90., 90.]))
+        .projection("equirectangular")
+        .mark(geo(data::land()))
         .mark(line(beagle()).stroke(ColorChannel::number(|d| d.num("i"))))
 }

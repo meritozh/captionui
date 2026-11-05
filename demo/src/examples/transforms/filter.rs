@@ -1,8 +1,4 @@
 //! Filter transform: `transforms/filter.md`.
-//!
-//! Gap: marks have no `filter` option, so each port filters the mark's data
-//! up front; the result is the same chart, though Plot's filter keeps the
-//! unfiltered data's index for the scales and channels.
 
 use crate::prelude::*;
 
@@ -15,11 +11,6 @@ pub fn examples() -> Vec<Example> {
     ]
 }
 
-/// The rows of `data` that `test` accepts, standing in for Plot's `filter`.
-fn filtered(data: Dataset, test: impl Fn(&Table) -> bool) -> Dataset {
-    Dataset::new(data.rows().iter().filter(|d| test(d)).cloned())
-}
-
 /// The docs' `/[aeiouy]/i.test(d.letter)`.
 fn is_vowel(d: &Table) -> bool {
     d.value("letter")
@@ -28,20 +19,25 @@ fn is_vowel(d: &Table) -> bool {
         .any(|c| "aeiouy".contains(c.to_ascii_lowercase()))
 }
 
-/// `Plot.text(metros, {filter: "highlight", x: "POP_2015", y: "R90_10_2015", text: "nyt_display", …})`
-fn e01() -> Plot {
-    let highlighted = filtered(data::metros(), |d| match d.value("highlight") {
+/// `filter: "highlight"`: the field's truthiness.
+fn highlight(d: &Table) -> bool {
+    match d.value("highlight") {
         Value::Bool(b) => b,
         Value::Number(n) => n != 0.,
-        Value::Text(t) => !t.is_empty() && &*t != "false",
+        Value::Text(t) => !t.is_empty(),
         _ => false,
-    });
+    }
+}
+
+/// `Plot.text(metros, {filter: "highlight", x: "POP_2015", y: "R90_10_2015", text: "nyt_display", …})`
+fn e01() -> Plot {
     Plot::plot()
         .grid(true)
         .x(|x| x.type_name("log"))
         .mark(dot(data::metros()).x("POP_2015").y("R90_10_2015"))
         .mark(
-            text(highlighted)
+            text(data::metros())
+                .filter(highlight)
                 .x("POP_2015")
                 .y("R90_10_2015")
                 .text("nyt_display")
@@ -55,29 +51,29 @@ fn e02() -> Plot {
     Plot::plot()
         .mark(bar_y(data::alphabet()).x("letter").y("frequency"))
         .mark(
-            bar_y(filtered(data::alphabet(), is_vowel))
+            bar_y(data::alphabet())
+                .filter(is_vowel)
                 .x("letter")
                 .y("frequency")
                 .stroke("red")
                 .stroke_width(3.)
-                .inset(-3.),
+                .inset(-3.), // expand the bars
         )
 }
 
 /// `Plot.barY(alphabet, {filter: (d) => /[aeiouy]/i.test(d.letter), x: "letter", y: "frequency"})`
 fn e03() -> Plot {
     Plot::plot().mark(
-        bar_y(filtered(data::alphabet(), is_vowel))
+        bar_y(data::alphabet())
+            .filter(is_vowel)
             .x("letter")
             .y("frequency"),
     )
 }
 
-/// `Plot.barY(alphabet.filter((d) => /[aeiouy]/i.test(d.letter)), {x: "letter", y: "frequency"})`
+/// `Plot.barY(alphabet.filter((d) => /[aeiouy]/i.test(d.letter)), {x: "letter", y: "frequency"})`:
+/// filtering the data, not the mark, drops the consonants from the x domain.
 fn e04() -> Plot {
-    Plot::plot().mark(
-        bar_y(filtered(data::alphabet(), is_vowel))
-            .x("letter")
-            .y("frequency"),
-    )
+    let vowels = Dataset::new(data::alphabet().rows().iter().filter(|d| is_vowel(d)).cloned());
+    Plot::plot().mark(bar_y(vowels).x("letter").y("frequency"))
 }

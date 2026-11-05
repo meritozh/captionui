@@ -40,7 +40,6 @@ fn e02() -> Plot {
     rect(data::olympians())
         .x("weight")
         .bin_output("fill", GroupReducer::Count)
-        .fill("fill")
         .plot()
         .color(|c| c.scheme("YlGnBu"))
 }
@@ -94,7 +93,6 @@ fn e06() -> Plot {
         .x("weight")
         .y("height")
         .bin_output("fill", GroupReducer::Count)
-        .fill("fill")
         .plot()
         .color(|c| c.scheme("YlGnBu"))
 }
@@ -197,9 +195,6 @@ fn sports_by_median_weight() -> Vec<Value> {
 }
 
 /// `Plot.rect(olympians, Plot.binX({fill: "proportion-facet"}, {x: "weight", fy: "sport", inset: 0.5}))`
-///
-/// Gap: the `proportion-facet` reducer is missing; the fill is each bin's
-/// count, so the color is shared across facets rather than per facet.
 fn e12() -> Plot {
     Plot::plot()
         .margin_left(100.)
@@ -212,8 +207,7 @@ fn e12() -> Plot {
                 .x("weight")
                 .fy("sport")
                 .inset(0.5)
-                .bin_output("fill", GroupReducer::Count)
-                .fill("fill"),
+                .bin_output("fill", GroupReducer::parse("proportion-facet").unwrap()),
         )
 }
 

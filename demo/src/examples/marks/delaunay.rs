@@ -1,6 +1,5 @@
 //! Delaunay marks <VersionBadge version="0.5.1" />: `marks/delaunay.md`.
 
-use super::geo;
 use crate::prelude::*;
 
 pub fn examples() -> Vec<Example> {
@@ -107,11 +106,9 @@ fn e06() -> Plot {
 }
 
 fn e07() -> Plot {
-    let us = geo::us();
-    // `projection: "albers"` is the lower-48 equirectangular stand-in, with
-    // the x and y scales pinned to it so the dots and mesh land on the map.
-    geo::lower_48_scales(Plot::plot())
-        .mark(geo::nation(&us))
+    Plot::plot()
+        .projection(crate::examples::albers())
+        .mark(geo(data::nation()))
         .mark(
             dot(data::walmarts())
                 .x("longitude")

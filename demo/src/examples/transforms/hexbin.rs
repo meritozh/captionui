@@ -7,7 +7,6 @@
 //! `fill: "count"`, the `color.scheme`, and the dot/text/circle mark the
 //! transform feeds are dropped.
 
-use super::centroid::{albers, albers_plot, geo_mesh, outlines, us};
 use crate::prelude::*;
 
 pub fn examples() -> Vec<Example> {
@@ -67,23 +66,18 @@ fn e06() -> Plot {
 
 /// Walmart's openings over the US: `Plot.dot(walmarts, Plot.hexbin({r: "count", fill: "min"}, {x: "longitude", y: "latitude", fill: "date"}))`.
 ///
-/// Gap: as on `centroid`, the map is projected by hand (d3's Albers) and
-/// its meshes drawn as lines.
+/// Gap: the hexbin mark ignores the plot's projection, so the stores are
+/// pre-projected (see [`crate::examples::pre_projected`]), and the state and
+/// nation lines drawn through the same fitted projection as lines.
 fn e07() -> Plot {
-    let us = us();
-    let walmarts = Dataset::new(data::walmarts().rows().iter().filter_map(|d| {
-        let (x, y) = albers(d.number("longitude")?, d.number("latitude")?)?;
-        Some(
-            d.clone()
-                .with("x", Value::Number(x))
-                .with("y", Value::Number(y)),
-        )
-    }));
-    albers_plot()
-        .r(|r| r.range([0., 16.]))
+    let albers = crate::examples::albers();
+    let (walmarts, plot) = crate::examples::pre_projected(data::walmarts(), &albers, |d| {
+        Some([d.number("longitude")?, d.number("latitude")?])
+    });
+    plot.r(|r| r.range([0., 16.]))
         .color(|c| c.scheme("spectral").label("First year opened").legend(true))
-        .mark(geo_mesh(&us.mesh("states", true), albers).stroke_opacity(0.5))
-        .mark(geo_mesh(&outlines(&us.features("nation")), albers))
+        .mark(crate::examples::pre_projected_lines(&data::statemesh(), &albers).stroke_opacity(0.5))
+        .mark(crate::examples::pre_projected_lines(&data::nation(), &albers))
         .mark(hexbin(walmarts).x("x").y("y").fill("date"))
 }
 

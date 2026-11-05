@@ -1,8 +1,4 @@
 //! Vector mark: `marks/vector.md`.
-//!
-//! Plot draws the two maps through its `albers-usa` projection; the library
-//! has no such projection or TopoJSON reader yet, so [`us`] decodes the
-//! atlas and projects it here, and the maps draw on linear x/y scales.
 
 use crate::prelude::*;
 
@@ -60,19 +56,19 @@ fn e01() -> Plot {
         )
 }
 
-/// Plot draws the margin's length through `length: {type: "sqrt",
-/// transform: Math.abs}`; the library has no length scale, so the sqrt scale
-/// is applied here.
+/// Gap: the plot's `length` scale options are not wired to the vector's
+/// length channel, so the `{type: "sqrt", transform: Math.abs}` scale is
+/// applied here.
 fn e02() -> Plot {
-    let counties = us::counties();
+    let counties = data::counties_election();
     let length = |d: &Table| d.num("margin2020") * d.num("votes");
-    us::map(Plot::plot())
-        .mark(us::statemesh().stroke_width(0.5))
-        .mark(us::nation())
+    Plot::plot()
+        .projection("albers-usa")
+        .mark(geo(data::statemesh()).stroke_width(0.5))
+        .mark(geo(data::nation()))
         .mark(
             vector(counties.clone())
-                .x("cx")
-                .y("cy")
+                .centroid()
                 .anchor(VectorAnchor::Start)
                 .length(length_scale(&counties, length, 12., true))
                 .stroke(|d: &Table| {
@@ -86,15 +82,17 @@ fn e02() -> Plot {
         )
 }
 
+/// Gap: as above, `length: {range: [0, 200]}` is applied here.
 fn e03() -> Plot {
-    let counties = us::counties();
-    us::map(Plot::plot())
-        .mark(us::statemesh().stroke_opacity(0.5))
-        .mark(us::nation())
+    let counties = data::counties();
+    Plot::plot()
+        .width(688.)
+        .projection("albers-usa")
+        .mark(geo(data::statemesh()).stroke_opacity(0.5))
+        .mark(geo(data::nation()))
         .mark(
             spike(counties.clone())
-                .x("cx")
-                .y("cy")
+                .geo_centroid()
                 .length(length_scale(
                     &counties,
                     |d| d.num("population"),
@@ -105,12 +103,11 @@ fn e03() -> Plot {
         )
 }
 
-/// The docs' Perlin noise field over a Poisson-disk sample. Plot draws it 1024
-/// pixels wide; the port draws at the default width.
+/// The docs' Perlin noise field over a Poisson-disk sample.
 fn e04() -> Plot {
     let noise = |x: f64, y: f64| perlin::octave2(x, y, 2);
     let points = Dataset::tuples(poisson([0., 0., 2., 2.], 4000.));
-    Plot::plot().inset(6.).aspect_ratio(1.).no_axes().mark(
+    Plot::plot().inset(6.).width(1024.).aspect_ratio(1.).no_axes().mark(
         vector(points.clone())
             .x("0")
             .y("1")
@@ -274,324 +271,3 @@ mod perlin {
     }
 }
 
-/// The US atlas, `us-counties-10m.json`, decoded from TopoJSON and projected
-/// through d3's `geoAlbersUsa` here, since the library has neither.
-///
-/// Projected points come out in d3's pixel space (y down); the maps draw them
-/// on linear x/y scales with y reversed and a 1:1 aspect ratio, which is what
-/// Plot's projection fitting amounts to.
-pub(crate) mod us {
-    use crate::prelude::*;
-    use std::collections::HashMap;
-
-    struct Atlas {
-        /// Every arc, as decoded lon/lat points.
-        arcs: Vec<Vec<(f64, f64)>>,
-        json: serde_json::Value,
-    }
-
-    fn atlas() -> &'static Atlas {
-        static ATLAS: std::sync::OnceLock<Atlas> = std::sync::OnceLock::new();
-        ATLAS.get_or_init(|| {
-            let json = data::json("us-counties-10m.json");
-            let scale = &json["transform"]["scale"];
-            let translate = &json["transform"]["translate"];
-            let (kx, ky) = (scale[0].as_f64().unwrap(), scale[1].as_f64().unwrap());
-            let (dx, dy) = (
-                translate[0].as_f64().unwrap(),
-                translate[1].as_f64().unwrap(),
-            );
-            let arcs = json["arcs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|arc| {
-                    let (mut x, mut y) = (0., 0.);
-                    arc.as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|p| {
-                            x += p[0].as_f64().unwrap();
-                            y += p[1].as_f64().unwrap();
-                            (x * kx + dx, y * ky + dy)
-                        })
-                        .collect()
-                })
-                .collect();
-            Atlas { arcs, json }
-        })
-    }
-
-    /// d3's `geoConicEqualArea` with the given rotation, center, parallels
-    /// and scale, translated to `t`.
-    fn conic(
-        lon: f64,
-        lat: f64,
-        rotate: f64,
-        center: (f64, f64),
-        parallels: (f64, f64),
-        k: f64,
-        t: (f64, f64),
-    ) -> (f64, f64) {
-        let (y0, y1) = (parallels.0.to_radians(), parallels.1.to_radians());
-        let sy0 = y0.sin();
-        let n = (sy0 + y1.sin()) / 2.;
-        let c = 1. + sy0 * (2. * n - sy0);
-        let r0 = c.sqrt() / n;
-        let raw = |x: f64, y: f64| {
-            let r = (c - 2. * n * y.sin()).max(0.).sqrt() / n;
-            (r * (x * n).sin(), r0 - r * (x * n).cos())
-        };
-        let mut l = lon + rotate;
-        while l > 180. {
-            l -= 360.;
-        }
-        while l < -180. {
-            l += 360.;
-        }
-        let (px, py) = raw(l.to_radians(), lat.to_radians());
-        let (cx, cy) = raw(center.0.to_radians(), center.1.to_radians());
-        (t.0 + k * (px - cx), t.1 - k * (py - cy))
-    }
-
-    /// d3's `geoAlbersUsa` at its default scale and translate; `None` outside
-    /// the lower 48, Alaska and Hawaii.
-    pub fn project(lon: f64, lat: f64) -> Option<(f64, f64)> {
-        let (k, x, y) = (1070., 480., 250.);
-        if lat > 50. && (lon < -129. || lon > 170.) {
-            Some(conic(
-                lon,
-                lat,
-                154.,
-                (-2., 58.5),
-                (55., 65.),
-                0.35 * k,
-                (x - 0.307 * k, y + 0.201 * k),
-            ))
-        } else if lat > 18. && lat < 23. && lon < -150. && lon > -179. {
-            Some(conic(
-                lon,
-                lat,
-                157.,
-                (-3., 19.9),
-                (8., 18.),
-                k,
-                (x - 0.205 * k, y + 0.212 * k),
-            ))
-        } else if lat > 23. && lon < -60. && lon > -130. {
-            Some(conic(lon, lat, 96., (-0.6, 38.7), (29.5, 45.5), k, (x, y)))
-        } else {
-            None
-        }
-    }
-
-    fn arc(index: i64) -> Vec<(f64, f64)> {
-        let arcs = &atlas().arcs;
-        if index >= 0 {
-            arcs[index as usize].clone()
-        } else {
-            let mut arc = arcs[!index as usize].clone();
-            arc.reverse();
-            arc
-        }
-    }
-
-    /// The polygons of a geometry, each a list of rings of lon/lat points.
-    fn polygons(geometry: &serde_json::Value) -> Vec<Vec<Vec<(f64, f64)>>> {
-        let ring = |r: &serde_json::Value| -> Vec<(f64, f64)> {
-            r.as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|i| arc(i.as_i64().unwrap()))
-                .collect()
-        };
-        let polygon = |p: &serde_json::Value| p.as_array().unwrap().iter().map(ring).collect();
-        match geometry["type"].as_str() {
-            Some("Polygon") => vec![polygon(&geometry["arcs"])],
-            Some("MultiPolygon") => geometry["arcs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(polygon)
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// The arc indices a geometry cites, unsigned.
-    fn cited_arcs(geometry: &serde_json::Value, out: &mut Vec<usize>) {
-        match geometry {
-            serde_json::Value::Number(n) => {
-                let i = n.as_i64().unwrap();
-                out.push(if i < 0 { !i as usize } else { i as usize });
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    cited_arcs(item, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// `topojson.mesh(us, us.objects[object], filter)` as rows of a line
-    /// series per arc: projected `x`, `y` and the arc's id in `arc`.
-    fn mesh(object: &str, interior_only: bool) -> Dataset {
-        let geometries = atlas().json["objects"][object]["geometries"]
-            .as_array()
-            .unwrap();
-        let mut owners: HashMap<usize, Vec<usize>> = HashMap::new();
-        for (g, geometry) in geometries.iter().enumerate() {
-            let mut cited = Vec::new();
-            cited_arcs(&geometry["arcs"], &mut cited);
-            for a in cited {
-                owners.entry(a).or_default().push(g);
-            }
-        }
-        let mut arcs: Vec<usize> = owners
-            .iter()
-            .filter(|(_, owners)| !interior_only || owners.iter().any(|&g| g != owners[0]))
-            .map(|(&a, _)| a)
-            .collect();
-        arcs.sort();
-        let mut rows = Vec::new();
-        for a in arcs {
-            for &(lon, lat) in &atlas().arcs[a] {
-                let point = project(lon, lat);
-                let (x, y) = point.unwrap_or((f64::NAN, f64::NAN));
-                rows.push(
-                    Table::empty()
-                        .with("arc", Value::Number(a as f64))
-                        .with("x", Value::number(x))
-                        .with("y", Value::number(y)),
-                );
-            }
-        }
-        Dataset::new(rows)
-    }
-
-    fn mesh_line(data: Dataset) -> LineMark {
-        line(data)
-            .x("x")
-            .y("y")
-            .z("arc")
-            .curve(Curve::Linear)
-            .stroke("currentColor")
-            .stroke_width(1.)
-    }
-
-    /// `Plot.geo(statemesh)`: the borders between states.
-    pub fn statemesh() -> LineMark {
-        mesh_line(mesh("states", true))
-    }
-
-    /// `Plot.geo(nation)`: the nation's outline.
-    pub fn nation() -> LineMark {
-        mesh_line(mesh("nation", false))
-    }
-
-    /// The planar centroid of projected polygons, Plot's `centroid`.
-    fn centroid(polygons: &[Vec<Vec<(f64, f64)>>]) -> Option<(f64, f64)> {
-        let (mut area, mut cx, mut cy) = (0., 0., 0.);
-        for polygon in polygons {
-            for ring in polygon {
-                let points: Vec<(f64, f64)> = ring
-                    .iter()
-                    .filter_map(|&(lon, lat)| project(lon, lat))
-                    .collect();
-                for i in 0..points.len() {
-                    let (x0, y0) = points[i];
-                    let (x1, y1) = points[(i + 1) % points.len()];
-                    let cross = x0 * y1 - x1 * y0;
-                    area += cross;
-                    cx += (x0 + x1) * cross;
-                    cy += (y0 + y1) * cross;
-                }
-            }
-        }
-        (area.abs() > 1e-12).then(|| (cx / (3. * area), cy / (3. * area)))
-    }
-
-    /// One row per feature of `object`, with its properties, `id`, and
-    /// projected centroid in `cx`, `cy`.
-    fn features(object: &str) -> Vec<Table> {
-        atlas().json["objects"][object]["geometries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|geometry| {
-                let (cx, cy) = centroid(&polygons(geometry))?;
-                let mut row = Table::empty()
-                    .with("id", Value::text(geometry["id"].as_str().unwrap_or("")))
-                    .with("cx", Value::number(cx))
-                    .with("cy", Value::number(cy));
-                if let Some(name) = geometry["properties"]["name"].as_str() {
-                    row = row.with("name", Value::text(name.to_string()));
-                }
-                Some(row)
-            })
-            .collect()
-    }
-
-    /// `topojson.feature(us, us.objects.states).features`.
-    pub fn states() -> Dataset {
-        Dataset::new(features("states"))
-    }
-
-    /// The docs' counties, joined with each county's 2020 margin and votes
-    /// and its population.
-    pub fn counties() -> Dataset {
-        let population: HashMap<String, f64> =
-            gpui_plot::io::rows(&data::text("us-county-population.csv"), b',')
-                .into_iter()
-                .skip(1)
-                .filter(|r| r.len() >= 3)
-                .map(|r| {
-                    (
-                        format!("{}{}", r[0], r[1]),
-                        r[2].parse().unwrap_or(f64::NAN),
-                    )
-                })
-                .collect();
-        let election_rows =
-            gpui_plot::io::rows(&data::text("us-presidential-election-2020.csv"), b',');
-        let header = &election_rows[0];
-        let column = |name: &str| header.iter().position(|h| h == name).unwrap();
-        let (fips, margin, votes) = (column("fips"), column("margin2020"), column("votes"));
-        let election: HashMap<String, (f64, f64)> = election_rows[1..]
-            .iter()
-            .filter(|r| r.len() > margin.max(votes))
-            .map(|r| {
-                (
-                    r[fips].clone(),
-                    (
-                        r[margin].parse().unwrap_or(f64::NAN),
-                        r[votes].parse().unwrap_or(f64::NAN),
-                    ),
-                )
-            })
-            .collect();
-        Dataset::new(features("counties").into_iter().map(|row| {
-            let id = row.text("id").map(|s| s.to_string()).unwrap_or_default();
-            let mut row = row.with(
-                "population",
-                Value::number(population.get(&id).copied().unwrap_or(f64::NAN)),
-            );
-            if let Some(&(margin, votes)) = election.get(&id) {
-                row = row
-                    .with("margin2020", Value::number(margin))
-                    .with("votes", Value::number(votes));
-            }
-            row
-        }))
-    }
-
-    /// Plot's `projection: "albers-usa"` frame: no axes, y down, one pixel
-    /// per projected unit both ways.
-    pub fn map(plot: Plot) -> Plot {
-        plot.no_axes()
-            .aspect_ratio(1.)
-            .margin(0.)
-            .y(|y| y.reverse(true))
-    }
-}
