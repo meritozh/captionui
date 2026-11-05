@@ -51,12 +51,12 @@ fn main() {
     let mut cx = VisualTestAppContext::new(platform);
     cx.update(gpui_kit::init);
 
-    // A sparse dot plot: a hover shows the crosshair crossing the nearest dot,
-    // which is clearest when the dots are not a dense filled band.
+    // Stacked bars: the pointer should pick a bar anywhere inside its body,
+    // not just at its top where the anchor point sits.
     let example = gallery::examples()
         .into_iter()
-        .find(|e| e.title == "Dot plot")
-        .expect("dot plot example");
+        .find(|e| e.title == "Stacked bars")
+        .expect("stacked bars example");
     let build = example.build;
 
     let window: AnyWindowHandle = cx
@@ -64,15 +64,16 @@ fn main() {
         .expect("open offscreen window")
         .into();
 
-    // Sweep the pointer across the plot's data area to engage the crosshair and
-    // tooltip, then capture the settled frame at a point over the data.
+    // Sweep the pointer across a few bars at *mid-height*, so the pointer lands
+    // inside a bar's body rather than on its top anchor — the case that used to
+    // miss. Captures whether a bar is picked from its body.
     for (x, y) in [
-        (200., 220.),
-        (300., 240.),
-        (400., 220.),
-        (500., 260.),
-        (350., 250.),
-        (450., 280.),
+        (180., 300.),
+        (260., 340.),
+        (340., 360.),
+        (420., 310.),
+        (500., 350.),
+        (600., 290.),
     ] {
         cx.simulate_mouse_move(
             window,
@@ -84,10 +85,10 @@ fn main() {
         cx.advance_clock(std::time::Duration::from_millis(400));
         cx.run_until_parked();
     }
-    // Rest the pointer over the plot's centre so the crosshair and tooltip show.
+    // Rest the pointer inside a bar's body so the tooltip shows that bar.
     cx.simulate_mouse_move(
         window,
-        gpui_kit::point(px(400.), px(320.)),
+        gpui_kit::point(px(400.), px(340.)),
         Option::<gpui_kit::MouseButton>::None,
         Default::default(),
     );

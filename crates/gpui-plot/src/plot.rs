@@ -1527,6 +1527,39 @@ fn hover_targets(facets: &[Vec<PreparedMark>]) -> Vec<(usize, usize, usize)> {
         .collect()
 }
 
+/// The pixel rectangle a row's body spans, so the pointer can hit an interval
+/// mark — a bar, rect or cell — across its whole extent, not just its anchor.
+///
+/// Both ends of each interval are projected; a mark with no x interval uses its
+/// x value, and likewise y, falling back to no rect when a channel does not
+/// scale. The rectangle is in the facet frame's plot-local pixels.
+fn interval_rect(row: &crate::render::PreparedRow, frame: &Frame) -> Option<Bounds<Pixels>> {
+    let x = |v: &crate::value::Value| frame.x.scale.position(v);
+    let y = |v: &crate::value::Value| frame.y.scale.position(v);
+    let x0 = row.x1.as_ref().or(Some(&row.x)).and_then(x);
+    let x1 = row.x2.as_ref().or(Some(&row.x)).and_then(x);
+    let y0 = row.y1.as_ref().or(Some(&row.y)).and_then(y);
+    let y1 = row.y2.as_ref().or(Some(&row.y)).and_then(y);
+    let (Some(x0), Some(x1), Some(y0), Some(y1)) = (x0, x1, y0, y1) else {
+        return None;
+    };
+    let (x0, x1) = (x0.min(x1), x0.max(x1));
+    let (y0, y1) = (y0.min(y1), y0.max(y1));
+    let mut rect = Bounds::new(point(px(x0), px(y0)), gpui::size(px(x1 - x0), px(y1 - y0)));
+    // A length mark on one axis has a zero interval on the other (a vertical
+    // bar spans one x, a horizontal bar one y); pad that degenerate axis so the
+    // body is still hoverable, and so stacked bars do not mis-hit.
+    if rect.size.width.as_f32() <= 1. {
+        rect.origin.x -= px(6.);
+        rect.size.width = px(12.);
+    }
+    if rect.size.height.as_f32() <= 1. {
+        rect.origin.y -= px(6.);
+        rect.size.height = px(12.);
+    }
+    Some(rect)
+}
+
 /// One legend entry.
 #[derive(Clone, Debug)]
 struct LegendEntry {
@@ -1889,10 +1922,12 @@ impl PlotTrait for Plot {
         }
         let local = absolute - frame.plot.origin;
 
-        // The nearest datum across every mark in every facet, measured by
-        // distance to its projected position, which is Plot's `nearest`
-        // pointer. The state's index addresses the flattened row list, so it
-        // identifies the facet, mark and row together.
+        // The datum under the pointer. A mark that draws an interval — a bar,
+        // a rect, a cell — is hoverable across its whole body, so the pointer
+        // selects it when it lies inside that rectangle (Plot's `nearest`)
+        // rather than only near its anchor point. A mark without an interval
+        // (a dot, a line vertex) is picked by distance to its projected point.
+        let mut contained: Option<(usize, Point<Pixels>)> = None;
         let mut best: Option<(usize, Point<Pixels>, f32)> = None;
         for (flat, (cell, mark_index, row_index)) in hover_targets(&facets).into_iter().enumerate()
         {
@@ -1904,20 +1939,31 @@ impl PlotTrait for Plot {
             let Some(row) = mark.rows.get(row_index) else {
                 continue;
             };
+            // The projected point, and the row's interval rectangle when it has
+            // one, both shifted into the whole figure's plot coordinates.
             let Some(point) = facet_frame.point(row.x_value(), row.y_value()) else {
                 continue;
             };
-            // The tooltip positions are relative to the whole figure's plot,
-            // so a facet's point is shifted by where that facet sits.
             let point = point + (facet_frame.plot.origin - frame.plot.origin);
+            // The interval rect is in the facet's plot-local pixels; shift it by
+            // the facet's offset so it is in the whole figure's plot coords,
+            // the same space `local` (the plot-local pointer) lives in.
+            let hit_rect = interval_rect(row, &facet_frame)
+                .map(|r| r + (facet_frame.plot.origin - frame.plot.origin));
+            let inside = hit_rect.is_some_and(|r| r.contains(&local));
             let dx = point.x.as_f32() - local.x.as_f32();
             let dy = point.y.as_f32() - local.y.as_f32();
             let distance = dx * dx + dy * dy;
+            if inside && contained.is_none() {
+                contained = Some((flat, point));
+            }
             if best.as_ref().is_none_or(|(_, _, best)| distance < *best) {
                 best = Some((flat, point, distance));
             }
         }
-        let (flat, hit, _) = best?;
+        // A pointer inside a bar's body picks that bar; otherwise the nearest
+        // point wins, the way Plot's `nearest` falls back to the anchor.
+        let (flat, hit) = contained.or_else(|| best.map(|(flat, point, _)| (flat, point)))?;
         let (cell, mark_index, row_index) = hover_targets(&facets)[flat];
         let facet_frame = frame.facet(crate::frame::facet_marks(
             grid.facet(frame.plot, cell),
