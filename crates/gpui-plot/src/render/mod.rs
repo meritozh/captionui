@@ -9,7 +9,7 @@ pub(crate) mod basic;
 pub mod color;
 pub(crate) mod delaunay;
 pub(crate) mod furniture;
-pub(crate) mod radial;
+pub mod radial;
 pub mod stack;
 pub(crate) mod stat;
 
@@ -27,6 +27,11 @@ use crate::value::Value;
 pub struct PreparedMark {
     pub mark: Mark,
     pub rows: Vec<PreparedRow>,
+    /// A raster or contour mark's grid, resolved from its rows (or sampled
+    /// once the frame is known, for a function).
+    pub raster: Option<std::rc::Rc<crate::raster::RasterGrid>>,
+    /// A density mark's peak, in Plot's density units, for the color scale.
+    pub density_max: Option<f64>,
     /// Whether a dodge packed this mark's rows along x, so its offsets are
     /// vertical; meaningless when the mark does not dodge.
     pub dodge_along_x: bool,
@@ -266,6 +271,14 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // the channels may read. Plot applies them to the mark's data in the same
     // order, and a mark's `shuffle` is only a reordering of what is left.
     let mut source = data.clone();
+    if let Some(channel) = &mark.box_value {
+        source = Dataset::new(source.rows().iter().map(|row| {
+            let value = channel.read(row);
+            row.clone()
+                .with("$box:x", value.clone())
+                .with("$box:y", value)
+        }));
+    }
     if let Some(keep) = &mark.filter {
         source = Dataset::new(source.rows().iter().filter(|row| (keep.0)(row)).cloned());
     }
@@ -352,6 +365,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         source = transform::shuffle(&source, seed);
     }
 
+    let source_rows_for_raster = source.clone();
     let mut rows: Vec<PreparedRow> = source
         .rows()
         .iter()
@@ -378,6 +392,9 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     }
     if let Some((axis, basis)) = mark.normalize_by {
         stack::normalize(&mut rows, axis, basis);
+    }
+    if let Some(axis) = mark.outliers {
+        rows = outlier_rows(rows, axis);
     }
     // A select over an axis (`selectMinX`) reads the mark's resolved channel,
     // after the transforms that rewrite it, per `z` series (or group field).
@@ -417,9 +434,62 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
 
     PreparedMark {
         mark: mark.clone(),
+        raster: dense_raster(mark, &source_rows_for_raster),
+        density_max: None,
         rows,
         dodge_along_x: false,
     }
+}
+
+/// Keep each `z` group's rows beyond its whiskers, Plot's box outliers.
+fn outlier_rows(rows: Vec<PreparedRow>, axis: Axis) -> Vec<PreparedRow> {
+    let read = |row: &PreparedRow| {
+        if axis == Axis::X {
+            row.x_value().clone()
+        } else {
+            row.y_value().clone()
+        }
+    };
+    let mut groups: Vec<(crate::value::ValueKey, Vec<Value>)> = Vec::new();
+    for row in &rows {
+        let key = row
+            .z
+            .as_ref()
+            .map(Value::key)
+            .unwrap_or_else(|| Value::Null.key());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, values)) => values.push(read(row)),
+            None => groups.push((key, vec![read(row)])),
+        }
+    }
+    let bounds: Vec<(crate::value::ValueKey, f64, f64)> = groups
+        .into_iter()
+        .map(|(key, values)| {
+            let lo = crate::mark::whisker_low(&values)
+                .as_number()
+                .unwrap_or(f64::NEG_INFINITY);
+            let hi = crate::mark::whisker_high(&values)
+                .as_number()
+                .unwrap_or(f64::INFINITY);
+            (key, lo, hi)
+        })
+        .collect();
+    rows.into_iter()
+        .filter(|row| {
+            let key = row
+                .z
+                .as_ref()
+                .map(Value::key)
+                .unwrap_or_else(|| Value::Null.key());
+            let Some(v) = read(row).as_number() else {
+                return false;
+            };
+            bounds
+                .iter()
+                .find(|(k, _, _)| *k == key)
+                .is_some_and(|(_, lo, hi)| v < *lo || v > *hi)
+        })
+        .collect()
 }
 
 /// Keep the row of each group with the least or greatest value on the
@@ -1119,6 +1189,116 @@ fn collapse_groups(
             grouped
         })
         .collect()
+}
+
+/// The extent a raster or contour mark covers, `[x1, y1, x2, y2]`, from its
+/// constant `x1`/`y1`/`x2`/`y2` channels, else its grid (`[0, width] ×
+/// [0, height]`, Plot's default for dense values).
+pub fn raster_extent(mark: &Mark) -> Option<[f64; 4]> {
+    let constant = |c: &Option<crate::table::Channel>| match c {
+        Some(crate::table::Channel::Constant(v)) => v.as_number(),
+        _ => None,
+    };
+    let c = &mark.channels;
+    match (
+        constant(&c.x1),
+        constant(&c.y1),
+        constant(&c.x2),
+        constant(&c.y2),
+    ) {
+        (Some(x1), Some(y1), Some(x2), Some(y2)) => Some([x1, y1, x2, y2]),
+        _ => mark
+            .raster
+            .as_ref()?
+            .size
+            .map(|(w, h)| [0., 0., w as f64, h as f64]),
+    }
+}
+
+/// A raster from dense values: the mark's records in order, each its fill
+/// (or its value, for plain-value data), laid out `width` across.
+fn dense_raster(mark: &Mark, source: &Dataset) -> Option<std::rc::Rc<crate::raster::RasterGrid>> {
+    if !matches!(mark.kind, MarkKind::Raster | MarkKind::Contour) {
+        return None;
+    }
+    let spec = mark.raster.as_ref()?;
+    let (w, h) = spec.size?;
+    let extent = raster_extent(mark)?;
+    let read = |row: &Table| -> Value {
+        if let Some(fill) = &mark.channels.fill
+            && let Some(v) = fill.scaled_value(row)
+        {
+            return v;
+        }
+        row.value(crate::table::VALUE)
+    };
+    let values: Vec<Value> = source.rows().iter().map(read).collect();
+    let mut grid = crate::raster::RasterGrid::from_values(values, w, h, extent);
+    grid.blur(spec.blur);
+    Some(std::rc::Rc::new(grid))
+}
+
+/// The grid a raster or contour mark draws once the frame is known: its
+/// dense grid, a function sampled at Plot's `pixelSize` (one cell per two
+/// pixels), or its scattered rows interpolated.
+pub fn resolve_raster(
+    prepared: &PreparedMark,
+    frame: &crate::frame::Frame,
+) -> Option<std::rc::Rc<crate::raster::RasterGrid>> {
+    if let Some(grid) = &prepared.raster {
+        return Some(grid.clone());
+    }
+    let spec = prepared.mark.raster.clone().unwrap_or_default();
+    let (pw, ph) = (
+        frame.plot.size.width.as_f32() as f64,
+        frame.plot.size.height.as_f32() as f64,
+    );
+    let size = spec.size.unwrap_or((
+        (pw / 2.).round().max(1.) as usize,
+        (ph / 2.).round().max(1.) as usize,
+    ));
+    let invert = |scale: &crate::scale::PositionScale, p: f64| match scale {
+        crate::scale::PositionScale::Continuous(s) => s.invert(p as f32),
+        _ => p,
+    };
+    // The data extent: the mark's own, else the frame's.
+    let extent = raster_extent(&prepared.mark).unwrap_or_else(|| {
+        [
+            invert(&frame.x.scale, 0.),
+            invert(&frame.y.scale, ph),
+            invert(&frame.x.scale, pw),
+            invert(&frame.y.scale, 0.),
+        ]
+    });
+    let mut grid = if let Some(f) = &spec.function {
+        crate::raster::RasterGrid::from_function(&|x, y| f(x, y), size.0, size.1, extent)
+    } else {
+        let samples: Vec<(f64, f64, Value)> = prepared
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let value = match &prepared.mark.channels.fill {
+                    Some(fill) => fill.scaled_value(&row.row)?,
+                    None => row.row.value(crate::table::VALUE),
+                };
+                Some((
+                    row.x_value().as_number()?,
+                    row.y_value().as_number()?,
+                    value,
+                ))
+            })
+            .collect();
+        let how = spec
+            .interpolate
+            .unwrap_or(if prepared.mark.kind == MarkKind::Contour {
+                crate::raster::Interpolate::Nearest
+            } else {
+                crate::raster::Interpolate::None
+            });
+        crate::raster::RasterGrid::from_samples(&samples, size.0, size.1, extent, how)
+    };
+    grid.blur(spec.blur);
+    Some(std::rc::Rc::new(grid))
 }
 
 /// The channel names a transform output can read from the mark itself.

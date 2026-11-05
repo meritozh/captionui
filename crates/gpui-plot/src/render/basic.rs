@@ -910,7 +910,12 @@ fn draw_rules_x(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         for (index, row) in prepared.rows.iter().enumerate() {
             // A rule reads its own `x`; an `x1` stands in when only the
             // interval is set.
-            let Some(x) = ctx.frame.x.scale.position(row.x_value()) else {
+            // A rule without an x sits at the frame's middle, as Plot's does.
+            let Some(x) = (if row.x_value().is_null() {
+                Some(ctx.frame.plot.size.width.as_f32() / 2.)
+            } else {
+                ctx.frame.x.scale.position(row.x_value())
+            }) else {
                 continue;
             };
             // Plot's ruleX spans `y1`..`y2` when given them, else the frame.
@@ -960,7 +965,11 @@ fn draw_rules_y(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let stroke_width = prepared.mark.style.stroke_width;
     ctx.clipped(|ctx| {
         for (index, row) in prepared.rows.iter().enumerate() {
-            let Some(y) = ctx.frame.y.scale.position(row.y_value()) else {
+            let Some(y) = (if row.y_value().is_null() {
+                Some(ctx.frame.plot.size.height.as_f32() / 2.)
+            } else {
+                ctx.frame.y.scale.position(row.y_value())
+            }) else {
                 continue;
             };
             let (left, right) = match (&row.x1, &row.x2) {
@@ -2170,6 +2179,11 @@ fn bundle(builder: &mut PathBuilder, points: &[Point<Pixels>]) {
 
 /// The extent a mark contributes to the x domain.
 pub fn x_values(prepared: &PreparedMark) -> Vec<Value> {
+    if let Some([x1, _, x2, _]) = crate::render::raster_extent(&prepared.mark)
+        && matches!(prepared.mark.kind, MarkKind::Raster | MarkKind::Contour)
+    {
+        return vec![Value::Number(x1), Value::Number(x2)];
+    }
     prepared
         .rows
         .iter()
@@ -2189,6 +2203,11 @@ pub fn x_values(prepared: &PreparedMark) -> Vec<Value> {
 
 /// The extent a mark contributes to the y domain.
 pub fn y_values(prepared: &PreparedMark) -> Vec<Value> {
+    if let Some([_, y1, _, y2]) = crate::render::raster_extent(&prepared.mark)
+        && matches!(prepared.mark.kind, MarkKind::Raster | MarkKind::Contour)
+    {
+        return vec![Value::Number(y1), Value::Number(y2)];
+    }
     prepared
         .rows
         .iter()
@@ -2724,59 +2743,137 @@ fn draw_hexgrid(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
 /// its fill. The grid comes from each row's position and the nearest gap
 /// between positions, so a row's rectangle covers the cell around it.
 fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
-    let colors = Colors::resolve(prepared, ctx);
-    if prepared.rows.is_empty() {
+    let Some(grid) = crate::render::resolve_raster(prepared, ctx.frame) else {
         return;
-    }
-
-    // The raster's cells are the gaps between adjacent positions on each
-    // axis; a single row spans the frame.
-    let cell = |values: Vec<Option<f32>>, extent: f32| -> f32 {
-        let mut positions: Vec<f32> = values.into_iter().flatten().collect();
-        positions.sort_by(f32::total_cmp);
-        let gap = positions
-            .windows(2)
-            .map(|pair| pair[1] - pair[0])
-            .filter(|gap| *gap > 0.)
-            .reduce(f32::min)
-            .unwrap_or(extent);
-        gap.max(1.)
     };
-    let width = cell(
-        prepared
-            .rows
-            .iter()
-            .map(|row| ctx.frame.x.scale.position(row.x_value()))
-            .collect(),
-        ctx.frame.plot.size.width.as_f32(),
+    let opacity = prepared.mark.style.opacity * prepared.mark.style.fill_opacity * ctx.appear;
+    let row = crate::table::Table::empty();
+    let place = |x: f64, y: f64, ctx: &DrawContext<'_>| -> Option<Point<Pixels>> {
+        if let Some(projection) = &ctx.frame.projection {
+            let [px_, py_] = projection.project(x, y)?;
+            return Some(point(px(px_ as f32), px(py_ as f32)));
+        }
+        Some(point(
+            px(ctx.frame.x.scale.position(&Value::Number(x))?),
+            px(ctx.frame.y.scale.position(&Value::Number(y))?),
+        ))
+    };
+    let (dx, dy) = (
+        (grid.x2 - grid.x1) / grid.width as f64,
+        (grid.y2 - grid.y1) / grid.height as f64,
     );
-    let height = cell(
-        prepared
-            .rows
-            .iter()
-            .map(|row| ctx.frame.y.scale.position(row.y_value()))
-            .collect(),
-        ctx.frame.plot.size.height.as_f32(),
-    );
-
+    let _ = row;
     ctx.clipped(|ctx| {
-        for (index, row) in prepared.rows.iter().enumerate() {
-            let (Some(x), Some(y)) = (
-                ctx.frame.x.scale.position(row.x_value()),
-                ctx.frame.y.scale.position(row.y_value()),
-            ) else {
-                continue;
-            };
-            let rect = paint::rect_between(
-                ctx.absolute(point(px(x - width / 2.), px(y - height / 2.))),
-                ctx.absolute(point(px(x + width / 2.), px(y + height / 2.))),
-            );
-            paint::paint_rect(
-                rect,
-                0.,
-                paint::alpha(colors.fill(index), ctx.row_fill_opacity(prepared, row)),
-                ctx.window,
-            );
+        for j in 0..grid.height {
+            for i in 0..grid.width {
+                let value = &grid.values[j * grid.width + i];
+                if value.is_null() {
+                    continue;
+                }
+                let color = match value.as_text().and_then(|t| crate::css::parse(t)) {
+                    Some(c) => c,
+                    None => match ctx.colors.scale.as_ref().and_then(|s| s.color(value)) {
+                        Some(c) => c,
+                        None => continue,
+                    },
+                };
+                let x0 = grid.x1 + i as f64 * dx;
+                let y0 = grid.y1 + j as f64 * dy;
+                let corners = [
+                    place(x0, y0, ctx),
+                    place(x0 + dx, y0, ctx),
+                    place(x0 + dx, y0 + dy, ctx),
+                    place(x0, y0 + dy, ctx),
+                ];
+                let Some(corners) = corners.into_iter().collect::<Option<Vec<_>>>() else {
+                    continue;
+                };
+                let color = paint::alpha(color, opacity);
+                if ctx.frame.projection.is_some() {
+                    let points: Vec<Point<Pixels>> =
+                        corners.into_iter().map(|p| ctx.absolute(p)).collect();
+                    paint::paint_fill(&points, color, ctx.window);
+                } else {
+                    // Overlap by a hair so neighbouring cells leave no seam.
+                    let (a, b) = (ctx.absolute(corners[0]), ctx.absolute(corners[2]));
+                    let rect = paint::rect_between(a, b);
+                    let rect = gpui::Bounds::new(
+                        rect.origin - point(px(0.25), px(0.25)),
+                        rect.size + gpui::size(px(0.5), px(0.5)),
+                    );
+                    paint::paint_rect(rect, 0., color, ctx.window);
+                }
+            }
+        }
+    });
+}
+
+/// Plot's `contour`: the grid's isobands, one closed region per threshold
+/// (the area at or above it), filled through the color scale at the
+/// threshold's value and stroked in `currentColor` unless filled.
+pub fn draw_contour_grid(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    let Some(grid) = crate::render::resolve_raster(prepared, ctx.frame) else {
+        return;
+    };
+    let spec = prepared.mark.raster.clone().unwrap_or_default();
+    let thresholds = grid.thresholds(spec.thresholds.as_ref());
+    let style = &prepared.mark.style;
+    let filled = prepared.mark.channels.fill.is_some();
+    let stroke = match &prepared.mark.channels.stroke {
+        Some(channel) => Some(ctx.colors.channel(channel, &crate::table::Table::empty())),
+        None if !filled => Some(ctx.colors.default_stroke(prepared, ctx.mark_index)),
+        None => None,
+    };
+    let place = |p: [f64; 2], ctx: &DrawContext<'_>| -> Option<Point<Pixels>> {
+        if let Some(projection) = &ctx.frame.projection {
+            let [x, y] = projection.project(p[0], p[1])?;
+            return Some(ctx.absolute(point(px(x as f32), px(y as f32))));
+        }
+        Some(ctx.absolute(point(
+            px(ctx.frame.x.scale.position(&Value::Number(p[0]))?),
+            px(ctx.frame.y.scale.position(&Value::Number(p[1]))?),
+        )))
+    };
+    ctx.clipped(|ctx| {
+        for threshold in thresholds {
+            let rings: Vec<Vec<Point<Pixels>>> = grid
+                .contour(threshold)
+                .into_iter()
+                .filter_map(|ring| {
+                    ring.into_iter()
+                        .map(|p| place(p, ctx))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .collect();
+            if filled {
+                // A constant fill paints as itself; a channel fill through
+                // the color scale at the threshold.
+                let color = match &prepared.mark.channels.fill {
+                    Some(crate::style::ColorChannel::Constant(c)) => Some(*c),
+                    _ => ctx
+                        .colors
+                        .scale
+                        .as_ref()
+                        .and_then(|s| s.color(&Value::Number(threshold))),
+                };
+                if let Some(color) = color {
+                    paint::paint_fill_rings(
+                        &rings,
+                        paint::alpha(color, style.opacity * style.fill_opacity),
+                        ctx.window,
+                    );
+                }
+            }
+            if let Some(stroke) = stroke {
+                for ring in &rings {
+                    paint::paint_stroke(
+                        ring,
+                        style.stroke_width,
+                        paint::alpha(stroke, style.opacity * style.stroke_opacity),
+                        ctx.window,
+                    );
+                }
+            }
         }
     });
 }

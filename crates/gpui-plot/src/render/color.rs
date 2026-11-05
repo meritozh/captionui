@@ -40,6 +40,40 @@ pub struct PlotColors {
 fn color_values(facets: &[Vec<PreparedMark>]) -> Vec<Value> {
     let mut values = Vec::new();
     for mark in facets.iter().flatten() {
+        // A density's "density" color reads Plot's density units; zero
+        // anchors the scale as Plot's does.
+        let density_field = |c: &Option<crate::style::ColorChannel>| matches!(c, Some(crate::style::ColorChannel::Field(f)) if f.eq_ignore_ascii_case("density"));
+        if mark.mark.kind == crate::mark::MarkKind::Density
+            && (density_field(&mark.mark.channels.fill)
+                || density_field(&mark.mark.channels.stroke))
+        {
+            values.push(Value::Number(0.));
+            if let Some(max) = mark.density_max {
+                values.push(Value::Number(max));
+            }
+            continue;
+        }
+        // A raster's or contour's grid values feed the color scale.
+        if let Some(grid) = &mark.raster {
+            values.extend(grid.values.iter().filter(|v| !v.is_null()).cloned());
+            continue;
+        }
+        if matches!(
+            mark.mark.kind,
+            crate::mark::MarkKind::Raster | crate::mark::MarkKind::Contour
+        ) && let Some(f) = mark.mark.raster.as_ref().and_then(|r| r.function.clone())
+            && let Some([x1, y1, x2, y2]) = crate::render::raster_extent(&mark.mark)
+        {
+            // A sampled function: its range over a coarse grid.
+            for j in 0..32 {
+                for i in 0..32 {
+                    let x = x1 + (x2 - x1) * (i as f64 + 0.5) / 32.;
+                    let y = y1 + (y2 - y1) * (j as f64 + 0.5) / 32.;
+                    values.push(f(x, y));
+                }
+            }
+            continue;
+        }
         let channels = &mark.mark.channels;
         for channel in [&channels.fill, &channels.stroke].into_iter().flatten() {
             values.extend(

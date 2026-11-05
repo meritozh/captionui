@@ -412,9 +412,10 @@ impl Plot {
     /// legend and caption above and below it.
     pub fn natural_height(&self, width: f32) -> f32 {
         let grid = self.facet_grid();
+        let bucketed = self.interval_marks();
         let (facets, _) = render::prepare_facets(
             &self.data,
-            &self.marks,
+            bucketed.as_deref().unwrap_or(&self.marks),
             &grid,
             self.fx.as_deref(),
             self.fy.as_deref(),
@@ -569,7 +570,13 @@ impl Plot {
 
     /// Add a mark from its builder.
     pub fn mark(mut self, mark: impl Into<Mark>) -> Self {
-        self.marks.push(mark.into());
+        let mark = mark.into();
+        // Plot's box marks are composites: a whisker rule, an
+        // interquartile bar, a median tick and outlier dots.
+        match mark.kind {
+            MarkKind::BoxX | MarkKind::BoxY => self.marks.extend(crate::mark::expand_box(mark)),
+            _ => self.marks.push(mark),
+        }
         self
     }
 
@@ -1021,8 +1028,8 @@ impl Plot {
         mut self,
         configure: impl FnOnce(crate::mark::BoxXMark) -> crate::mark::BoxXMark,
     ) -> Self {
-        self.marks
-            .push(configure(crate::mark::BoxXMark::new()).into());
+        let mark: Mark = configure(crate::mark::BoxXMark::new()).into();
+        self.marks.extend(crate::mark::expand_box(mark));
         self
     }
 
@@ -1031,8 +1038,8 @@ impl Plot {
         mut self,
         configure: impl FnOnce(crate::mark::BoxYMark) -> crate::mark::BoxYMark,
     ) -> Self {
-        self.marks
-            .push(configure(crate::mark::BoxYMark::new()).into());
+        let mark: Mark = configure(crate::mark::BoxYMark::new()).into();
+        self.marks.extend(crate::mark::expand_box(mark));
         self
     }
 
@@ -1482,6 +1489,61 @@ impl Plot {
         &self.frame_options
     }
 
+    /// The marks with Plot's facet-scale `interval` applied: each facet
+    /// channel (the mark's own, or the plot's `fx`/`fy` field) reads its
+    /// value's interval start, so `fx: {interval: 0.5}` facets by half-carat.
+    fn interval_marks(&self) -> Option<Vec<Mark>> {
+        let (ix, iy) = (self.scales.fx.interval, self.scales.fy.interval);
+        if ix.is_none() && iy.is_none() {
+            return None;
+        }
+        let wrap = |channel: crate::table::Channel, interval: crate::mark::Interval| {
+            crate::table::Channel::Accessor(Rc::new(move |row: &Table| {
+                let value = channel.read(row);
+                match interval.extent(&value) {
+                    Some((start, _)) => match value {
+                        Value::Date(_) => Value::date_from_millis(start as i64),
+                        _ => Value::Number((start * 1e9).round() / 1e9),
+                    },
+                    None => value,
+                }
+            }))
+        };
+        Some(
+            self.marks
+                .iter()
+                .map(|mark| {
+                    let mut mark = mark.clone();
+                    let plot_x = self
+                        .fx
+                        .clone()
+                        .filter(|_| mark.data.is_none() && mark.fx.is_none() && mark.fy.is_none());
+                    let plot_y = self
+                        .fy
+                        .clone()
+                        .filter(|_| mark.data.is_none() && mark.fx.is_none() && mark.fy.is_none());
+                    let fx = mark
+                        .fx
+                        .clone()
+                        .or(plot_x.map(|f| crate::table::Channel::Field(f)));
+                    let fy = mark
+                        .fy
+                        .clone()
+                        .or(plot_y.map(|f| crate::table::Channel::Field(f)));
+                    mark.fx = match (fx, ix) {
+                        (Some(c), Some(i)) => Some(wrap(c, i)),
+                        (c, _) => c,
+                    };
+                    mark.fy = match (fy, iy) {
+                        (Some(c), Some(i)) => Some(wrap(c, i)),
+                        (c, _) => c,
+                    };
+                    mark
+                })
+                .collect(),
+        )
+    }
+
     /// The facet grid the plot's `fx`/`fy` fields resolve.
     ///
     /// The domains come from the data's values, so a facet exists for every
@@ -1493,13 +1555,16 @@ impl Plot {
         // the mark's data.
         let mut fx: Vec<Value> = Vec::new();
         let mut fy: Vec<Value> = Vec::new();
-        if let Some(field) = &self.fx {
-            fx.extend(self.data.values(field));
+        let bucketed = self.interval_marks();
+        if bucketed.is_none() {
+            if let Some(field) = &self.fx {
+                fx.extend(self.data.values(field));
+            }
+            if let Some(field) = &self.fy {
+                fy.extend(self.data.values(field));
+            }
         }
-        if let Some(field) = &self.fy {
-            fy.extend(self.data.values(field));
-        }
-        for mark in &self.marks {
+        for mark in bucketed.as_deref().unwrap_or(&self.marks) {
             let data = mark.data.as_ref().unwrap_or(&self.data);
             for (channel, values) in [(&mark.fx, &mut fx), (&mark.fy, &mut fy)] {
                 if let Some(channel) = channel {
@@ -1623,10 +1688,10 @@ impl Plot {
             }
         }
         if grid.fx.is_some() && self.scales.fx.axis != Some(None) && !self.no_axes {
-            want(0, 30.);
+            want(if self.fx_axis_bottom() { 2 } else { 0 }, 30.);
         }
         if grid.fy.is_some() && self.scales.fy.axis != Some(None) && !self.no_axes {
-            want(1, 40.);
+            want(if self.fy_axis_left() { 3 } else { 1 }, 40.);
         }
         for (side, explicit) in self.margins.iter().enumerate() {
             if let Some(margin) = explicit {
@@ -1805,6 +1870,108 @@ impl Plot {
             None => self
                 .reads_axis(false)
                 .then_some(crate::options::AxisAnchor::Left),
+        }
+    }
+
+    /// Plot's facet axis placement: fx on top, unless the x axis is absent
+    /// or on top, when it goes to the bottom.
+    fn fx_axis_bottom(&self) -> bool {
+        match self.scales.fx.axis {
+            Some(Some(crate::options::AxisAnchor::Bottom)) => true,
+            Some(Some(_)) => false,
+            _ => matches!(
+                self.x_axis_anchor(),
+                None | Some(crate::options::AxisAnchor::Top)
+            ),
+        }
+    }
+
+    /// fy on the right, unless the y axis is absent or on the right.
+    fn fy_axis_left(&self) -> bool {
+        match self.scales.fy.axis {
+            Some(Some(crate::options::AxisAnchor::Left)) => true,
+            Some(Some(_)) => false,
+            _ => matches!(
+                self.y_axis_anchor(),
+                None | Some(crate::options::AxisAnchor::Right)
+            ),
+        }
+    }
+
+    /// The facet scales' axis labels, where Plot puts them: an explicit
+    /// `label` (or the facet field's name), `fx`'s at the end of its axis,
+    /// `fy`'s above its axis.
+    fn paint_facet_axis_labels(
+        &self,
+        frame: &Frame,
+        theme: &PlotTheme,
+        window: &mut Window,
+        cx: &mut App,
+        grid: &Grid,
+    ) {
+        let font = gpui::font(theme.font_family.clone());
+        let label_of = |options: &crate::options::ScaleOptions,
+                        field: &Option<SharedString>|
+         -> Option<SharedString> {
+            match &options.label {
+                Some(label) => label.clone(),
+                None if self.no_labels => None,
+                None => field.clone(),
+            }
+        };
+        let plot = frame.plot;
+        // The facet field: the plot's, else the first mark's own facet field.
+        let field = |plot_field: &Option<SharedString>, x: bool| -> Option<SharedString> {
+            plot_field.clone().or_else(|| {
+                self.marks
+                    .iter()
+                    .find_map(|m| match if x { &m.fx } else { &m.fy } {
+                        Some(crate::table::Channel::Field(name)) => Some(name.clone()),
+                        _ => None,
+                    })
+            })
+        };
+        let (fx_field, fy_field) = (field(&self.fx, true), field(&self.fy, false));
+        if grid.fx.is_some()
+            && self.scales.fx.axis != Some(None)
+            && !self.no_axes
+            && let Some(label) = label_of(&self.scales.fx, &fx_field)
+        {
+            let text = Label::new(
+                label,
+                theme.label_size,
+                theme.label,
+                FontWeight::NORMAL,
+                font.clone(),
+                window,
+            );
+            let y = if self.fx_axis_bottom() {
+                plot.origin.y + plot.size.height + px(27.) - text.height
+            } else {
+                plot.origin.y - px(27.)
+            };
+            let x = plot.origin.x + plot.size.width;
+            text.paint_at(point(x, y), TextAlign::Right, None, window, cx);
+        }
+        if grid.fy.is_some()
+            && self.scales.fy.axis != Some(None)
+            && !self.no_axes
+            && let Some(label) = label_of(&self.scales.fy, &fy_field)
+        {
+            let text = Label::new(
+                label,
+                theme.label_size,
+                theme.label,
+                FontWeight::NORMAL,
+                font,
+                window,
+            );
+            let (x, align) = if self.fy_axis_left() {
+                (plot.origin.x - px(37.), TextAlign::Left)
+            } else {
+                (plot.origin.x + plot.size.width + px(37.), TextAlign::Right)
+            };
+            text.paint_at(point(x, plot.origin.y - px(17.)), align, None, window, cx);
         }
     }
 
@@ -2535,9 +2702,10 @@ impl PlotTrait for Plot {
         // `tooltip_state` and `tooltip` then share one consistent view.
         let theme = PlotTheme::from_theme(cx.theme());
         let mut grid = self.facet_grid();
+        let bucketed = self.interval_marks();
         let (mut facets, populated) = render::prepare_facets(
             &self.data,
-            &self.marks,
+            bucketed.as_deref().unwrap_or(&self.marks),
             &grid,
             self.fx.as_deref(),
             self.fy.as_deref(),
@@ -2551,6 +2719,10 @@ impl PlotTrait for Plot {
         let dodge_frame = cell_frame(&frame, &grid, 0);
         for marks in facets.iter_mut() {
             render::apply_dodge(marks, &dodge_frame);
+        }
+        let peak_frame = cell_frame(&frame, &grid, 0);
+        for mark in facets.iter_mut().flatten() {
+            mark.density_max = render::radial::density_peak(mark, &peak_frame);
         }
         let colors = self.plot_colors(&theme, &facets);
         self.facets_cache = Some(Rc::new(facets));
@@ -2667,7 +2839,10 @@ impl PlotTrait for Plot {
                 &grid,
                 show(&self.scales.fx).then_some(&self.scales.fx),
                 show(&self.scales.fy).then_some(&self.scales.fy),
+                self.fx_axis_bottom(),
+                self.fy_axis_left(),
             );
+            self.paint_facet_axis_labels(&frame, &theme, window, cx, &grid);
         } else {
             crate::frame::paint_axes(
                 &frame,

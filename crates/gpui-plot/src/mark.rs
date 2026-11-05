@@ -1018,6 +1018,16 @@ pub struct Mark {
     /// The mark's own data, Plot's first argument to a mark: `Plot.dot(data,
     /// …)`. `None` reads the plot's data.
     pub data: Option<crate::table::Dataset>,
+    /// A density mark's options: `bandwidth`, `thresholds` and `weight`.
+    pub density: Option<DensitySpec>,
+    /// A raster or contour mark's grid options.
+    pub raster: Option<crate::raster::RasterSpec>,
+    /// Keep only each `z` group's outliers on this axis (beyond 1.5 IQR), the
+    /// dots of Plot's box mark.
+    pub outliers: Option<Axis>,
+    /// A box part's value channel, written onto each record as `$box:x` or
+    /// `$box:y` for its group reducers to read.
+    pub box_value: Option<crate::table::Channel>,
     /// Plot's `filter` option: only the records it accepts are drawn.
     pub filter: Option<RowFilter>,
     /// The mark's horizontal facet channel, Plot's mark-level `fx` option.
@@ -1095,6 +1105,28 @@ pub struct DomainSort {
     pub reverse: bool,
     /// Keep only the first `limit` values, Plot's `limit`.
     pub limit: Option<usize>,
+}
+
+/// Plot's density options.
+#[derive(Clone, Default)]
+pub struct DensitySpec {
+    /// Plot's `bandwidth`, in pixels (20 by default).
+    pub bandwidth: Option<f32>,
+    /// Plot's `thresholds`: a count (20 by default).
+    pub count: Option<usize>,
+    /// Plot's explicit `thresholds`, in Plot's units (density × 100).
+    pub values: Option<Vec<f64>>,
+    /// Plot's `weight`.
+    pub weight: Option<std::rc::Rc<dyn Fn(&crate::table::Table) -> f64>>,
+}
+
+impl std::fmt::Debug for DensitySpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DensitySpec")
+            .field("bandwidth", &self.bandwidth)
+            .field("count", &self.count)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A predicate over records, Plot's `filter` option.
@@ -1440,6 +1472,10 @@ impl Mark {
         Self {
             kind,
             data: None,
+            density: None,
+            raster: None,
+            outliers: None,
+            box_value: None,
             filter: None,
             fx: None,
             fy: None,
@@ -2044,6 +2080,85 @@ impl Mark {
         self
     }
 
+    fn raster_mut(&mut self) -> &mut crate::raster::RasterSpec {
+        self.raster.get_or_insert_with(Default::default)
+    }
+
+    /// A raster or contour's grid size, Plot's `width` and `height`, for
+    /// data that is a dense array of values (row-major, top row first).
+    pub fn grid(mut self, width: usize, height: usize) -> Self {
+        self.raster_mut().size = Some((width, height));
+        self
+    }
+
+    /// A raster or contour's value function, Plot's `fill: (x, y) => …`.
+    pub fn sample(mut self, f: impl Fn(f64, f64) -> f64 + 'static) -> Self {
+        self.raster_mut().function = Some(std::rc::Rc::new(move |x, y| {
+            crate::value::Value::number(f(x, y))
+        }));
+        self
+    }
+
+    /// Plot's `interpolate`: `"nearest"`, `"barycentric"`, `"random-walk"`.
+    pub fn interpolate(mut self, how: &str) -> Self {
+        self.raster_mut().interpolate = crate::raster::Interpolate::parse(how);
+        self
+    }
+
+    /// Plot's `blur`, in grid cells.
+    pub fn blur(mut self, radius: f64) -> Self {
+        self.raster_mut().blur = radius;
+        self
+    }
+
+    /// A contour's `thresholds`: about this many.
+    pub fn contour_thresholds(mut self, count: usize) -> Self {
+        self.raster_mut().thresholds = Some(crate::raster::ContourThresholds::Count(count));
+        self
+    }
+
+    /// A contour's explicit `thresholds`.
+    pub fn contour_threshold_values(mut self, values: impl IntoIterator<Item = f64>) -> Self {
+        self.raster_mut().thresholds = Some(crate::raster::ContourThresholds::Values(
+            values.into_iter().collect(),
+        ));
+        self
+    }
+
+    /// A contour's `interval`: a threshold at every multiple.
+    pub fn contour_interval(mut self, step: f64) -> Self {
+        self.raster_mut().thresholds = Some(crate::raster::ContourThresholds::Interval(step));
+        self
+    }
+
+    fn density_mut(&mut self) -> &mut DensitySpec {
+        self.density.get_or_insert_with(Default::default)
+    }
+
+    /// A density mark's `bandwidth`, in pixels.
+    pub fn bandwidth(mut self, pixels: f32) -> Self {
+        self.density_mut().bandwidth = Some(pixels);
+        self
+    }
+
+    /// A density mark's `thresholds` count.
+    pub fn thresholds(mut self, count: usize) -> Self {
+        self.density_mut().count = Some(count);
+        self
+    }
+
+    /// A density mark's explicit `thresholds`.
+    pub fn threshold_values(mut self, values: impl IntoIterator<Item = f64>) -> Self {
+        self.density_mut().values = Some(values.into_iter().collect());
+        self
+    }
+
+    /// A density mark's `weight`.
+    pub fn weight(mut self, weight: impl Fn(&crate::table::Table) -> f64 + 'static) -> Self {
+        self.density_mut().weight = Some(std::rc::Rc::new(weight));
+        self
+    }
+
     /// Bin the mark's data.
     pub fn bin(mut self, thresholds: Thresholds) -> Self {
         let outputs = self.bin.take().map(|bin| bin.outputs).unwrap_or_default();
@@ -2617,6 +2732,72 @@ macro_rules! mark_builder {
             /// Clip the mark to the plot area, Plot's `clip: true`.
             pub fn clip(mut self, clip: bool) -> Self {
                 self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::bandwidth`].
+            pub fn bandwidth(mut self, pixels: f32) -> Self {
+                self.0 = self.0.bandwidth(pixels);
+                self
+            }
+
+            /// See [`Mark::thresholds`].
+            pub fn thresholds(mut self, count: usize) -> Self {
+                self.0 = self.0.thresholds(count);
+                self
+            }
+
+            /// See [`Mark::threshold_values`].
+            pub fn threshold_values(mut self, values: impl IntoIterator<Item = f64>) -> Self {
+                self.0 = self.0.threshold_values(values);
+                self
+            }
+
+            /// See [`Mark::weight`].
+            pub fn weight(mut self, weight: impl Fn(&crate::table::Table) -> f64 + 'static) -> Self {
+                self.0 = self.0.weight(weight);
+                self
+            }
+
+            /// See [`Mark::grid`].
+            pub fn grid(mut self, width: usize, height: usize) -> Self {
+                self.0 = self.0.grid(width, height);
+                self
+            }
+
+            /// See [`Mark::sample`].
+            pub fn sample(mut self, f: impl Fn(f64, f64) -> f64 + 'static) -> Self {
+                self.0 = self.0.sample(f);
+                self
+            }
+
+            /// See [`Mark::interpolate`].
+            pub fn interpolate(mut self, how: &str) -> Self {
+                self.0 = self.0.interpolate(how);
+                self
+            }
+
+            /// See [`Mark::blur`].
+            pub fn blur(mut self, radius: f64) -> Self {
+                self.0 = self.0.blur(radius);
+                self
+            }
+
+            /// See [`Mark::contour_thresholds`].
+            pub fn contour_thresholds(mut self, count: usize) -> Self {
+                self.0 = self.0.contour_thresholds(count);
+                self
+            }
+
+            /// See [`Mark::contour_threshold_values`].
+            pub fn contour_threshold_values(mut self, values: impl IntoIterator<Item = f64>) -> Self {
+                self.0 = self.0.contour_threshold_values(values);
+                self
+            }
+
+            /// See [`Mark::contour_interval`].
+            pub fn contour_interval(mut self, step: f64) -> Self {
+                self.0 = self.0.contour_interval(step);
                 self
             }
 
@@ -3651,3 +3832,154 @@ mark_builder!(
     BollingerYMark,
     MarkKind::BollingerY
 );
+
+/// The quartiles of numbers, d3's R-7 quantiles.
+fn quartiles(values: &[crate::value::Value]) -> Option<(f64, f64)> {
+    let mut v: Vec<f64> = values
+        .iter()
+        .filter_map(crate::value::Value::as_number)
+        .collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    let q = |p: f64| {
+        let h = (v.len() - 1) as f64 * p;
+        let (lo, hi) = (h.floor() as usize, h.ceil() as usize);
+        v[lo] + (v[hi] - v[lo]) * (h - h.floor())
+    };
+    Some((q(0.25), q(0.75)))
+}
+
+/// Plot's `loqr1`: the least value within 1.5 IQR below the first quartile.
+pub fn whisker_low(values: &[crate::value::Value]) -> crate::value::Value {
+    let Some((q1, q3)) = quartiles(values) else {
+        return crate::value::Value::Null;
+    };
+    let lo = q1 * 2.5 - q3 * 1.5;
+    values
+        .iter()
+        .filter_map(crate::value::Value::as_number)
+        .filter(|v| *v >= lo)
+        .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.min(v))))
+        .map(crate::value::Value::Number)
+        .unwrap_or(crate::value::Value::Null)
+}
+
+/// Plot's `hiqr2`: the greatest value within 1.5 IQR above the third.
+pub fn whisker_high(values: &[crate::value::Value]) -> crate::value::Value {
+    let Some((q1, q3)) = quartiles(values) else {
+        return crate::value::Value::Null;
+    };
+    let hi = q3 * 2.5 - q1 * 1.5;
+    values
+        .iter()
+        .filter_map(crate::value::Value::as_number)
+        .filter(|v| *v <= hi)
+        .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))))
+        .map(crate::value::Value::Number)
+        .unwrap_or(crate::value::Value::Null)
+}
+
+/// Plot's `boxX`/`boxY` as the marks it composes: a rule from whisker to
+/// whisker, a bar across the interquartile range filled `#ccc`, a two-pixel
+/// tick at the median, and the outliers as dots. Each groups by the category
+/// channel (the other axis), or as one group without one.
+pub fn expand_box(mark: Mark) -> Vec<Mark> {
+    let vertical = mark.kind == MarkKind::BoxY;
+    let category = if vertical {
+        mark.channels.x.clone()
+    } else {
+        mark.channels.y.clone()
+    };
+    let value = if vertical {
+        mark.channels.y.clone()
+    } else {
+        mark.channels.x.clone()
+    };
+    let value = value.or_else(|| Some(crate::table::Channel::identity()));
+    let base = |kind: MarkKind| {
+        let mut m = Mark::new(kind);
+        m.data = mark.data.clone();
+        m.fx = mark.fx.clone();
+        m.fy = mark.fy.clone();
+        m.filter = mark.filter.clone();
+        if vertical {
+            m.channels.x = category.clone();
+            m.channels.y = value.clone();
+        } else {
+            m.channels.y = category.clone();
+            m.channels.x = value.clone();
+        }
+        m.channels.z = category.clone();
+        m
+    };
+    let group = |m: Mark| {
+        if category.is_some() {
+            if vertical { m.group_x() } else { m.group_y() }
+        } else {
+            m.group_z()
+        }
+    };
+    let (lo, hi, q1, q3, mid) = if vertical {
+        ("y1", "y2", "y1", "y2", "y")
+    } else {
+        ("x1", "x2", "x1", "x2", "x")
+    };
+    let input = if vertical { "y" } else { "x" };
+    let custom = |f: fn(&[crate::value::Value]) -> crate::value::Value| {
+        GroupReducer::custom(move |values, _| f(values))
+    };
+    let stroke = mark.channels.stroke.clone();
+    let mut rule = group(base(if vertical {
+        MarkKind::RuleX
+    } else {
+        MarkKind::RuleY
+    }))
+    .group_output(lo, custom(whisker_low))
+    .group_output(hi, custom(whisker_high));
+    let mut bar = group(base(if vertical {
+        MarkKind::BarY
+    } else {
+        MarkKind::BarX
+    }))
+    .group_output(q1, GroupReducer::Quantile(0.25))
+    .group_output(q3, GroupReducer::Quantile(0.75));
+    let mut tick = group(base(if vertical {
+        MarkKind::TickY
+    } else {
+        MarkKind::TickX
+    }))
+    .group_output(mid, GroupReducer::Quantile(0.5));
+    for m in [&mut rule, &mut bar, &mut tick] {
+        if let Some(config) = m.group.as_mut() {
+            for output in config.outputs.iter_mut() {
+                output.input = Some(format!("$box:{input}").into());
+            }
+        }
+    }
+    bar.channels.fill =
+        mark.channels
+            .fill
+            .clone()
+            .or(Some(ColorChannel::Constant(crate::scale::hsla_from_hex(
+                0xcccccc,
+            ))));
+    bar.style.fill_opacity = mark.style.fill_opacity;
+    for m in [&mut rule, &mut tick] {
+        m.channels.stroke = stroke.clone();
+    }
+    tick.style.stroke_width = 2.;
+    let mut dots = base(MarkKind::Dot);
+    dots.outliers = Some(if vertical { Axis::Y } else { Axis::X });
+    dots.channels.stroke = stroke;
+    dots.channels.r = mark.channels.r.clone();
+    // The group reducers read the value through a field the box writes on
+    // each record, since its value channel may be an accessor.
+    let value_channel = value.expect("defaulted");
+    let tag = move |mut m: Mark| {
+        m.box_value = Some(value_channel.clone());
+        m
+    };
+    vec![tag(rule), tag(bar), tag(tick), tag(dots)]
+}
