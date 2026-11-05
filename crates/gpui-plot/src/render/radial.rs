@@ -643,60 +643,169 @@ const DENSITY_BANDWIDTH: f32 = 20.;
 const DENSITY_CELL: f32 = 4.;
 const DENSITY_THRESHOLDS: usize = 20;
 
-/// Draw Plot's `density`: each series' kernel density estimated over the
-/// plot's pixels, stroked as contour lines at thresholds spread evenly up to
-/// the densest series' peak, so the series compare on one scale.
+/// Draw Plot's `density`: each series' kernel density over the frame's
+/// pixels, d3's `contourDensity` (20-pixel bandwidth, 4-pixel cells), cut at
+/// thresholds shared by every series — `thresholds` evenly spaced up to the
+/// densest series' peak, or the ones given (in Plot's units, density × 100).
+/// `fill: "density"` or `stroke: "density"` colors each threshold's band
+/// through the color scale; another fill fills the bands, and without one the
+/// lines stroke in their series' color.
 fn draw_density_2d(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let plot = ctx.frame.plot;
     let (width, height) = (plot.size.width.as_f32(), plot.size.height.as_f32());
+    let spec = prepared.mark.density.clone().unwrap_or_default();
+    let bandwidth = spec.bandwidth.unwrap_or(DENSITY_BANDWIDTH);
     let groups = series_groups(prepared);
+    let place = |row: &crate::render::PreparedRow| -> Option<(f32, f32)> {
+        let p = crate::render::basic::position(prepared, ctx, row)?;
+        Some((p.x.as_f32(), p.y.as_f32()))
+    };
     let grids: Vec<(usize, crate::density::DensityGrid)> = groups
         .iter()
         .filter_map(|group| {
-            let points: Vec<(f32, f32)> = group
+            let points: Vec<(f32, f32, f64)> = group
                 .iter()
                 .filter_map(|(_, row)| {
-                    let point = ctx.frame.point(row.x_value(), row.y_value())?;
-                    Some((point.x.as_f32(), point.y.as_f32()))
+                    let (x, y) = place(row)?;
+                    let w = spec.weight.as_ref().map_or(1., |f| f(&row.row));
+                    Some((x, y, w))
                 })
                 .collect();
             let first = group.first()?.0;
             (!points.is_empty()).then(|| {
                 (
                     first,
-                    crate::density::DensityGrid::estimate(
+                    crate::density::DensityGrid::estimate_weighted(
                         &points,
                         width,
                         height,
-                        DENSITY_BANDWIDTH,
+                        bandwidth,
                         DENSITY_CELL,
                     ),
                 )
             })
         })
         .collect();
-    let max = grids.iter().map(|(_, grid)| grid.max()).fold(0., f64::max);
-    if max <= 0. {
-        return;
-    }
-    let stroke_width = prepared.mark.style.stroke_width.min(1.);
+    // d3 normalizes the density to points per square pixel; our grid holds
+    // weight per cell after blurring, so divide by the cell's area. Plot's
+    // thresholds are in units of density × 100.
+    let k = 100. / (DENSITY_CELL as f64 * DENSITY_CELL as f64);
+    let thresholds: Vec<f64> = match &spec.values {
+        Some(values) => values.iter().map(|t| t / k).collect(),
+        None => {
+            let max = grids.iter().map(|(_, g)| g.max()).fold(0., f64::max);
+            let n = spec.count.unwrap_or(DENSITY_THRESHOLDS).max(1);
+            (1..n).map(|i| max * i as f64 / n as f64).collect()
+        }
+    };
+    let is_density = |c: &Option<crate::style::ColorChannel>| matches!(c, Some(crate::style::ColorChannel::Field(f)) if f.eq_ignore_ascii_case("density"));
+    let (fill_density, stroke_density) = (
+        is_density(&prepared.mark.channels.fill),
+        is_density(&prepared.mark.channels.stroke),
+    );
+    let style = &prepared.mark.style;
+    let density_color = |t: f64, ctx: &DrawContext<'_>| {
+        ctx.colors
+            .scale
+            .as_ref()
+            .and_then(|s| s.color(&crate::value::Value::Number(t * k)))
+    };
     ctx.clipped(|ctx| {
         for (first, grid) in &grids {
             let row = &prepared.rows[*first];
-            let color = paint::alpha(
-                ctx.colors.series_color(prepared, ctx.mark_index, row),
-                ctx.row_stroke_opacity(prepared, row) * ctx.appear,
-            );
-            for step in 1..DENSITY_THRESHOLDS {
-                let threshold = max * step as f64 / DENSITY_THRESHOLDS as f64;
-                for line in grid.contours(threshold) {
-                    let points: Vec<Point<gpui::Pixels>> = line
-                        .iter()
-                        .map(|(x, y)| ctx.absolute(point(px(*x), px(*y))))
-                        .collect();
-                    paint::paint_stroke(&points, stroke_width, color, ctx.window);
+            let fill = if fill_density {
+                None
+            } else {
+                prepared
+                    .mark
+                    .channels
+                    .fill
+                    .as_ref()
+                    .map(|c| ctx.colors.channel(c, &row.row))
+            };
+            let stroke = if stroke_density || fill_density || fill.is_some() {
+                prepared
+                    .mark
+                    .channels
+                    .stroke
+                    .as_ref()
+                    .filter(|_| !stroke_density)
+                    .map(|c| ctx.colors.channel(c, &row.row))
+            } else {
+                Some(ctx.colors.series_color(prepared, ctx.mark_index, row))
+            };
+            for &t in &thresholds {
+                let rings: Vec<Vec<Point<gpui::Pixels>>> = grid
+                    .contours(t)
+                    .into_iter()
+                    .map(|line| {
+                        line.iter()
+                            .map(|(x, y)| ctx.absolute(point(px(*x), px(*y))))
+                            .collect()
+                    })
+                    .collect();
+                let band_fill = if fill_density {
+                    density_color(t, ctx)
+                } else {
+                    fill
+                };
+                if let Some(color) = band_fill {
+                    let color =
+                        paint::alpha(color, style.opacity * style.fill_opacity * ctx.appear);
+                    paint::paint_fill_rings(&rings, color, ctx.window);
+                }
+                let band_stroke = if stroke_density {
+                    density_color(t, ctx)
+                } else {
+                    stroke
+                };
+                if let Some(color) = band_stroke {
+                    let color =
+                        paint::alpha(color, ctx.row_stroke_opacity(prepared, row) * ctx.appear);
+                    for ring in &rings {
+                        paint::paint_stroke(ring, style.stroke_width, color, ctx.window);
+                    }
                 }
             }
         }
     });
+}
+
+/// The peak of a density mark's estimate in Plot's units (density × 100),
+/// over the frame, for its "density" color scale.
+pub fn density_peak(prepared: &PreparedMark, frame: &crate::frame::Frame) -> Option<f64> {
+    if prepared.mark.kind != MarkKind::Density {
+        return None;
+    }
+    let spec = prepared.mark.density.clone().unwrap_or_default();
+    let bandwidth = spec.bandwidth.unwrap_or(DENSITY_BANDWIDTH);
+    let (width, height) = (
+        frame.plot.size.width.as_f32(),
+        frame.plot.size.height.as_f32(),
+    );
+    let mut max = 0.0_f64;
+    for group in series_groups(prepared) {
+        let points: Vec<(f32, f32, f64)> = group
+            .iter()
+            .filter_map(|(_, row)| {
+                let p = crate::render::basic::position_in(prepared, frame, row)?;
+                Some((
+                    p.x.as_f32(),
+                    p.y.as_f32(),
+                    spec.weight.as_ref().map_or(1., |f| f(&row.row)),
+                ))
+            })
+            .collect();
+        let grid = crate::density::DensityGrid::estimate_weighted(
+            &points,
+            width,
+            height,
+            bandwidth,
+            DENSITY_CELL,
+        );
+        max = max.max(grid.max());
+    }
+    let n = spec.count.unwrap_or(DENSITY_THRESHOLDS).max(1) as f64;
+    // The highest threshold, as Plot's legend runs to it.
+    Some(max * (n - 1.) / n * 100. / (DENSITY_CELL as f64 * DENSITY_CELL as f64))
 }

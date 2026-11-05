@@ -2720,6 +2720,10 @@ impl PlotTrait for Plot {
         for marks in facets.iter_mut() {
             render::apply_dodge(marks, &dodge_frame);
         }
+        let peak_frame = cell_frame(&frame, &grid, 0);
+        for mark in facets.iter_mut().flatten() {
+            mark.density_max = render::radial::density_peak(mark, &peak_frame);
+        }
         let colors = self.plot_colors(&theme, &facets);
         self.facets_cache = Some(Rc::new(facets));
         self.colors_cache = Some(Rc::new(colors));

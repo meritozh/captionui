@@ -131,19 +131,32 @@ impl DensityGrid {
         bandwidth: f32,
         cell: f32,
     ) -> Self {
+        let weighted: Vec<(f32, f32, f64)> = points.iter().map(|&(x, y)| (x, y, 1.)).collect();
+        Self::estimate_weighted(&weighted, width, height, bandwidth, cell)
+    }
+
+    /// [`DensityGrid::estimate`] with a weight per point, d3's
+    /// `contourDensity().weight(…)`; weights may be negative.
+    pub fn estimate_weighted(
+        points: &[(f32, f32, f64)],
+        width: f32,
+        height: f32,
+        bandwidth: f32,
+        cell: f32,
+    ) -> Self {
         let cell = cell.max(1.);
         let pad = (bandwidth * 3.).max(cell);
         let columns = (((width + pad * 2.) / cell).ceil() as usize).max(2);
         let rows = (((height + pad * 2.) / cell).ceil() as usize).max(2);
         let mut values = vec![0.0_f64; columns * rows];
-        for &(x, y) in points {
-            if !(x.is_finite() && y.is_finite()) {
+        for &(x, y, w) in points {
+            if !(x.is_finite() && y.is_finite() && w.is_finite()) {
                 continue;
             }
             let column = ((x + pad) / cell).floor();
             let row = ((y + pad) / cell).floor();
             if column >= 0. && row >= 0. && (column as usize) < columns && (row as usize) < rows {
-                values[row as usize * columns + column as usize] += 1.;
+                values[row as usize * columns + column as usize] += w;
             }
         }
         let sigma = (bandwidth / cell) as f64;

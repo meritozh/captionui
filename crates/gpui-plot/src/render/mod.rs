@@ -9,7 +9,7 @@ pub(crate) mod basic;
 pub mod color;
 pub(crate) mod delaunay;
 pub(crate) mod furniture;
-pub(crate) mod radial;
+pub mod radial;
 pub mod stack;
 pub(crate) mod stat;
 
@@ -30,6 +30,8 @@ pub struct PreparedMark {
     /// A raster or contour mark's grid, resolved from its rows (or sampled
     /// once the frame is known, for a function).
     pub raster: Option<std::rc::Rc<crate::raster::RasterGrid>>,
+    /// A density mark's peak, in Plot's density units, for the color scale.
+    pub density_max: Option<f64>,
     /// Whether a dodge packed this mark's rows along x, so its offsets are
     /// vertical; meaningless when the mark does not dodge.
     pub dodge_along_x: bool,
@@ -433,6 +435,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     PreparedMark {
         mark: mark.clone(),
         raster: dense_raster(mark, &source_rows_for_raster),
+        density_max: None,
         rows,
         dodge_along_x: false,
     }
