@@ -1320,7 +1320,8 @@ fn apply_maps(source: &Dataset, mark: &Mark) -> (Dataset, Mark) {
     let mut rows: Vec<Table> = source.rows().to_vec();
     // The series a map restarts at: Plot's `maybeZ`, the `z` channel (which
     // a color field implies).
-    let mut series: Vec<(Value, Vec<usize>)> = Vec::new();
+    let mut series: Vec<Vec<usize>> = Vec::new();
+    let mut slots: std::collections::HashMap<Value, usize> = std::collections::HashMap::new();
     for (index, row) in rows.iter().enumerate() {
         let key = mark
             .channels
@@ -1328,15 +1329,18 @@ fn apply_maps(source: &Dataset, mark: &Mark) -> (Dataset, Mark) {
             .as_ref()
             .map(|z| z.read(row))
             .unwrap_or(Value::Null);
-        match series.iter_mut().find(|(existing, _)| *existing == key) {
-            Some((_, members)) => members.push(index),
-            None => series.push((key, vec![index])),
-        }
+        let slot = *slots.entry(key).or_insert_with(|| {
+            series.push(Vec::new());
+            series.len() - 1
+        });
+        series[slot].push(index);
     }
     let maps = std::mem::take(&mut mark.maps);
-    // Plot reads every input before it writes any output.
-    let inputs = mark.channels.clone();
     for (target, mapper) in &maps {
+        // Each map call is its own transform, so a later one reads what an
+        // earlier one wrote, as Plot's nested `windowY(k, mapY(…))` does;
+        // within one call, every input is read before any output is written.
+        let inputs = mark.channels.clone();
         // `mapX`/`mapY`: the axis's channels the mark has, else the datum.
         let names: Vec<&str> = match target {
             MapTarget::X | MapTarget::Y => {
@@ -1378,7 +1382,7 @@ fn apply_maps(source: &Dataset, mark: &Mark) -> (Dataset, Mark) {
                 "stroke" => c.stroke.as_ref(),
                 _ => None,
             }
-            .filter(|ch| ch.scaled_value(&Table::empty()).is_some());
+            .filter(|ch| matches!(ch, ColorChannel::Field(_) | ColorChannel::Value(_)));
             let number = match name {
                 "r" => c.r.as_ref(),
                 "opacity" => c.opacity.as_ref(),
@@ -1402,7 +1406,7 @@ fn apply_maps(source: &Dataset, mark: &Mark) -> (Dataset, Mark) {
             };
             let field: SharedString = format!("$map:{name}").into();
             let mut output = vec![Value::Null; rows.len()];
-            for (_, members) in &series {
+            for members in &series {
                 let series_values: Vec<Value> =
                     members.iter().map(|&i| values[i].clone()).collect();
                 for (&i, value) in members
@@ -2885,6 +2889,20 @@ mod transform_order_tests {
         let rows = &prepare(&data, &[windowed])[0].rows;
         let ys: Vec<Option<f64>> = rows.iter().map(|r| r.y_value().as_number()).collect();
         assert_eq!(ys, vec![Some(1.), Some(2.), Some(5.), Some(8.)]);
+    }
+
+    #[test]
+    fn map_calls_compose_in_order() {
+        // `mapY(window({k: 2, reduce: "sum", anchor: "end"}), mapY("cumsum", …))`:
+        // the window reads the running totals 1, 3, 6.
+        let mark = Mark::new(MarkKind::Line)
+            .x("x")
+            .y("v")
+            .map_y(transform::Mapper::Cumsum)
+            .map_y(transform::Mapper::window(2, WindowReducer::Sum).anchor(Anchor::End));
+        let rows = &prepare(&Dataset::new(nums(&[1., 2., 3.])), &[mark])[0].rows;
+        let ys: Vec<Option<f64>> = rows.iter().map(|r| r.y_value().as_number()).collect();
+        assert_eq!(ys, vec![Some(1.), Some(4.), Some(9.)]);
     }
 
     #[test]

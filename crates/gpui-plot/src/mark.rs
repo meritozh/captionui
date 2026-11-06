@@ -1150,7 +1150,8 @@ pub struct Mark {
     /// Write a computed value into a new field, Plot's `mapX`/`mapY`.
     pub map: Option<MapConfig>,
     /// The channels Plot's `map` transform rewrites, in order: `mapX`,
-    /// `mapY` or `map({channel: mapper})`.
+    /// `mapY` or `map({channel: mapper})`. Each entry reads the channels
+    /// the entries before it wrote, as nested Plot transforms do.
     pub maps: Vec<(MapTarget, Mapper)>,
     /// Move a field by an offset, Plot's `shiftX`/`shiftY`.
     pub shift: Option<ShiftConfig>,
