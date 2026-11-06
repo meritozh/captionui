@@ -232,6 +232,25 @@ pub fn axis_y() -> AxisYMark {
     AxisYMark::new()
 }
 
+/// Plot's `axisFx`, without data: a text mark labelling each facet column
+/// with its `fx` value, on top unless anchored at the bottom. Its text
+/// options (`line_width`, `font_size`, `dx`/`dy`, `frame_anchor`) and axis
+/// options (`axis_anchor`, `tick_format`, `tick_size`, `tick_padding`) are
+/// Plot's; a plot with one draws no implicit fx axis.
+pub fn axis_fx() -> TextMark {
+    let mut mark = TextMark::new().into_mark();
+    mark.facet_axis = Some(Axis::X);
+    TextMark::from_mark(mark)
+}
+
+/// Plot's `axisFy`, without data: each facet row's `fy` value, on the right
+/// unless anchored at the left. See [`axis_fx`].
+pub fn axis_fy() -> TextMark {
+    let mut mark = TextMark::new().into_mark();
+    mark.facet_axis = Some(Axis::Y);
+    TextMark::from_mark(mark)
+}
+
 /// Plot's `gridX`, without data.
 pub fn grid_x() -> GridXMark {
     GridXMark::new()

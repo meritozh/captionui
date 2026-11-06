@@ -662,6 +662,26 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
                 let ticks = point_ticks(&tick_keys, &point_scale, values, is_x, tick_count);
                 (PositionScale::Point(point_scale), ticks)
             };
+            // Plot's `inferTickFormat`: an ordinal axis of dates takes the
+            // multi-line time format a time axis does (`16\nMar`, then `19`).
+            let dates: Option<Vec<f64>> = ticks
+                .iter()
+                .map(|tick| match tick.value {
+                    crate::value::Value::Date(_) => tick.value.as_number(),
+                    _ => None,
+                })
+                .collect();
+            let dates = dates.filter(|d| !d.is_empty());
+            let mut ticks: Vec<AxisTick> = ticks;
+            if let Some(millis) = &dates {
+                let top = is_x && plot.axis == Some(Some(crate::options::AxisAnchor::Top));
+                for (tick, text) in ticks
+                    .iter_mut()
+                    .zip(crate::ticks::plot_time_labels(millis, top))
+                {
+                    tick.label = text.into();
+                }
+            }
             let ticks = ticks
                 .into_iter()
                 .map(|tick| AxisTick {
@@ -673,7 +693,9 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
                 scale,
                 kind: inferred,
                 ticks,
-                temporal: false,
+                // Plot's `hasTemporalDomain`: a domain of dates, ordinal or
+                // not, hides an inferred "date" label.
+                temporal: dates.is_some(),
                 categories,
             }
         }
@@ -1256,6 +1278,133 @@ pub(crate) fn paint_facet_labels(
     }
 }
 
+/// Paint a vertical axis's label (`y` or `fy`) the way Plot's `axisKy` places
+/// it: at `Center` rotated a quarter turn, its top toward the outside, in
+/// the margin's outer edge; at `End` (Plot's `top`) or `Start` (`bottom`)
+/// level, in the corner of the margin. `offset` is Plot's `labelOffset`,
+/// the distance left (or right) of the plot.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_vertical_axis_label(
+    plot: Bounds<Pixels>,
+    insets: &Insets,
+    text: &str,
+    right: bool,
+    anchor: crate::options::LabelAnchor,
+    offset: f32,
+    theme: &PlotTheme,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use crate::options::LabelAnchor;
+    let x = if right {
+        plot.origin.x + plot.size.width + px(offset)
+    } else {
+        plot.origin.x - px(offset)
+    };
+    if anchor == LabelAnchor::Center {
+        // Plot's line anchor `top` (`bottom` on the right): the rotated
+        // text's top edge sits on the offset, so its middle is inward.
+        let size = theme.label_size.as_f32();
+        let inward = if right { -0.6 * size } else { 0.6 * size };
+        paint::paint_rotated_text(
+            text,
+            size,
+            theme.label,
+            &theme.font_family,
+            point(x + px(inward), plot.origin.y + plot.size.height / 2.),
+            -90.,
+            TextAlign::Center,
+            window,
+            cx,
+        );
+        return;
+    }
+    let label = Label::new(
+        text.to_string().into(),
+        theme.label_size,
+        theme.label,
+        FontWeight::NORMAL,
+        font(theme.font_family.clone()),
+        window,
+    );
+    // A label's `Start` is the bottom of the axis, `End` its top.
+    let y = if anchor == LabelAnchor::Start {
+        plot.origin.y + plot.size.height + px(insets.bottom - 3.) - label.height
+    } else {
+        plot.origin.y + px(3. - insets.top)
+    };
+    let align = if right {
+        TextAlign::Right
+    } else {
+        TextAlign::Left
+    };
+    label.paint_at(point(x, y), align, None, window, cx);
+}
+
+/// Paint a horizontal axis's label (`x` or `fx`) the way Plot's `axisKx`
+/// places it: `offset` (Plot's `labelOffset`) beyond the plot's edge, centred,
+/// or at the margin's start or end.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_horizontal_axis_label(
+    plot: Bounds<Pixels>,
+    insets: &Insets,
+    text: &str,
+    top: bool,
+    anchor: crate::options::LabelAnchor,
+    offset: f32,
+    theme: &PlotTheme,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use crate::options::LabelAnchor;
+    let label = Label::new(
+        text.to_string().into(),
+        theme.label_size,
+        theme.label,
+        FontWeight::NORMAL,
+        font(theme.font_family.clone()),
+        window,
+    );
+    let y = if top {
+        plot.origin.y - px(offset)
+    } else {
+        plot.origin.y + plot.size.height + px(offset) - label.height
+    };
+    let (x, align) = match anchor {
+        LabelAnchor::Center => (plot.origin.x + plot.size.width / 2., TextAlign::Center),
+        LabelAnchor::Start => (plot.origin.x - px(insets.left - 3.), TextAlign::Left),
+        LabelAnchor::End => (
+            plot.origin.x + plot.size.width + px(insets.right - 3.),
+            TextAlign::Right,
+        ),
+    };
+    label.paint_at(point(x, y), align, None, window, cx);
+}
+
+/// Plot's `formatAxisLabel` for a vertical axis: with an arrow, a centred
+/// label points it along the text (`label →` when values increase upward),
+/// a level one up or down, after the label on a right axis.
+pub(crate) fn vertical_axis_label_text(
+    label: &str,
+    arrow: bool,
+    up: bool,
+    center: bool,
+    right: bool,
+) -> String {
+    match (arrow, center) {
+        (false, _) => label.to_string(),
+        (true, true) => format!("{label} {}", if up { "→" } else { "←" }),
+        (true, false) => {
+            let symbol = if up { "↑" } else { "↓" };
+            if right {
+                format!("{label} {symbol}")
+            } else {
+                format!("{symbol} {label}")
+            }
+        }
+    }
+}
+
 /// The marks area of one facet band: the band, less the axes the facet draws
 /// inside it.
 pub(crate) fn facet_marks(band: Bounds<Pixels>, frame: &Frame) -> Bounds<Pixels> {
@@ -1428,6 +1577,40 @@ mod tests {
         );
         assert!(frame.x.ticks.len() >= 4);
         assert!(frame.x.ticks.iter().any(|tick| tick.label == "20"));
+    }
+
+    #[test]
+    fn vertical_labels_point_their_arrows_like_plot() {
+        // A centred label reads along the axis, so its arrow points along x.
+        assert_eq!(vertical_axis_label_text("y", true, true, true, false), "y →");
+        assert_eq!(vertical_axis_label_text("y", true, false, true, false), "y ←");
+        // A level label points up or down, after the label on the right.
+        assert_eq!(vertical_axis_label_text("y", true, true, false, false), "↑ y");
+        assert_eq!(vertical_axis_label_text("y", true, false, false, true), "y ↓");
+        assert_eq!(vertical_axis_label_text("y", false, true, true, false), "y");
+    }
+
+    #[test]
+    fn a_band_axis_of_dates_takes_multi_line_time_labels() {
+        let day = 86_400_000;
+        let dates: Vec<Value> = [0, 3, 4]
+            .iter()
+            .map(|d| Value::date_from_millis(1_521_158_400_000 + d * day))
+            .collect();
+        let numbers = [Value::Number(1.), Value::Number(2.), Value::Number(3.)];
+        let options = FrameOptions {
+            x_kind: Some(ScaleKind::Band),
+            ..Default::default()
+        };
+        let frame = Frame::resolve(
+            bounds(point(px(0.), px(0.)), size(px(400.), px(300.))),
+            &options,
+            &dates,
+            &numbers,
+        );
+        let labels: Vec<_> = frame.x.ticks.iter().map(|t| t.label.to_string()).collect();
+        assert_eq!(labels, ["16\nMar", "19", "20"]);
+        assert!(frame.x.temporal);
     }
 
     #[test]

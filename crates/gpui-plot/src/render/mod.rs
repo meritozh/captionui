@@ -194,7 +194,8 @@ pub fn prepare_facets(
         }
         let groups = grid.partition_channels(source, mark_fx.as_ref(), mark_fy.as_ref());
         for (cell, rows) in groups.into_iter().enumerate() {
-            populated[cell] |= !rows.is_empty();
+            // A facet axis labels every facet, so it fills none of them.
+            populated[cell] |= !rows.is_empty() && mark.facet_axis.is_none();
             // A furniture mark's placeholder landed in another facet: this
             // one draws nothing (an empty dataset would read a placeholder).
             if rows.is_empty()

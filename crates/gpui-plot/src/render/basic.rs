@@ -1924,8 +1924,12 @@ pub fn position_in(
     if let Some((x, y)) = row.pixel {
         return Some(point(px(x), px(y)));
     }
-    // Under Plot's `projection`, x and y are longitude and latitude.
-    if let Some(projection) = &frame.projection {
+    // Under Plot's `projection`, x and y are longitude and latitude; a mark
+    // with neither (a facet axis's text) sits at its frame anchor instead.
+    let channels = &prepared.mark.channels;
+    if let Some(projection) = &frame.projection
+        && (channels.x.is_some() || channels.y.is_some())
+    {
         let (lon, lat) = (row.x_value().as_number()?, row.y_value().as_number()?);
         let [x, y] = projection.project(lon, lat)?;
         return Some(point(px(x as f32), px(y as f32)));

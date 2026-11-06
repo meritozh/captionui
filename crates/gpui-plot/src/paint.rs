@@ -415,28 +415,54 @@ pub fn paint_rotated_text(
     if text.is_empty() {
         return;
     }
-    let measured = Label::new(
-        SharedString::from(text.to_string()),
-        px(font_size),
-        color,
-        FontWeight::NORMAL,
-        gpui::font(SharedString::from(family.to_string())),
-        window,
-    );
-    let width = measured.width.as_f32().ceil() + 4.;
-    let height = (font_size * 1.4).ceil();
-    let escaped = text
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
+    // A label may run to several lines (`16\nMar`): each is a line of the
+    // block, which centres on the anchor as Plot's middle line anchor does.
+    let lines: Vec<&str> = text.split('\n').collect();
+    let widest = lines
+        .iter()
+        .map(|line| {
+            Label::new(
+                SharedString::from(line.to_string()),
+                px(font_size),
+                color,
+                FontWeight::NORMAL,
+                gpui::font(SharedString::from(family.to_string())),
+                window,
+            )
+            .width
+            .as_f32()
+        })
+        .fold(0., f32::max);
+    let width = widest.ceil() + 4.;
+    let line_height = font_size * 1.2;
+    let height = (font_size * 1.4 + line_height * (lines.len() - 1) as f32).ceil();
+    let escape = |line: &str| {
+        line.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    // Quoted, so a family CSS can't parse bare (`.SystemUIFont`) doesn't
+    // void the whole list and drop the text to the serif default.
+    let quoted = family.replace(['\'', '"', '<', '&'], "");
     let (x, text_anchor) = match align {
         TextAlign::Left => (2., "start"),
         TextAlign::Center => (width / 2., "middle"),
         TextAlign::Right => (width - 2., "end"),
     };
+    let first = height * 0.5 + font_size * 0.35 - line_height * (lines.len() - 1) as f32 / 2.;
+    let spans: String = lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            format!(
+                r#"<tspan x="{x}" y="{}">{}</tspan>"#,
+                first + line_height * i as f32,
+                escape(line)
+            )
+        })
+        .collect();
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><text x="{x}" y="{}" font-family="{family}, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="{font_size}" text-anchor="{text_anchor}" fill="black">{escaped}</text></svg>"#,
-        height * 0.5 + font_size * 0.35,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><text font-family="'{quoted}', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="{font_size}" text-anchor="{text_anchor}" fill="black">{spans}</text></svg>"#,
     );
     // The SVG box's own point that sits on the anchor.
     let offset_x = x;

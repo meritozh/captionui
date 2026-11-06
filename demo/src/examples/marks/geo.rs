@@ -131,8 +131,6 @@ fn e05() -> Plot {
 }
 
 fn e06() -> Plot {
-    // Gap: there is no `axisFy` mark, so the fy axis keeps its default
-    // placement and dates (the docs label each facet "1960’s" at the top).
     Plot::plot()
         .margin(0.)
         .padding(0.)
@@ -146,5 +144,14 @@ fn e06() -> Plot {
                 .r(1.5)
                 .fill("blue")
                 .tip_title("date"),
+        )
+        .mark(
+            axis_fy()
+                .frame_anchor(FrameAnchor::Top)
+                .dy(30.)
+                .tick_format(|d: &Value| match d {
+                    Value::Date(date) => format!("{}’s", date.year()),
+                    other => other.label().to_string(),
+                }),
         )
 }

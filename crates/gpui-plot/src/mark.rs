@@ -1166,6 +1166,9 @@ pub struct Mark {
     /// A GeoJSON-like collection of rings a `geo` mark fills — each ring a
     /// closed loop of `(lon, lat)` degree points, Plot's way of drawing shapes.
     pub geo_geometry: Option<Vec<Vec<(f64, f64)>>>,
+    /// Plot's `axisFx` (`X`) or `axisFy` (`Y`): a text mark that labels each
+    /// facet with its value, which the plot fills in from the facet domain.
+    pub facet_axis: Option<Axis>,
 }
 
 /// One entry of Plot's mark `sort` option: order the `scale`'s domain by the
@@ -1640,6 +1643,7 @@ impl Mark {
             image: None,
             projection: None,
             geo_geometry: None,
+            facet_axis: None,
         }
     }
 

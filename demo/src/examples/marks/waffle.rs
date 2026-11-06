@@ -109,21 +109,23 @@ fn e04() -> Plot {
         ))
 }
 
-/// Plot's `axisFx({lineWidth: 10, anchor: "bottom", dy: 20})` has no
-/// counterpart: the fx axis is the default one at the bottom. `rx: "100%"`
-/// is a corner radius past half the cell, which clamps to a circle as SVG's
-/// does.
+/// `rx: "100%"` is a corner radius past half the cell, which clamps to a
+/// circle as SVG's does.
 fn e05() -> Plot {
     Plot::plot()
         .no_axes()
-        .x(|x| x.no_label())
-        .y(|y| y.no_label())
+        .no_labels()
         .height(260.)
         .margin_top(20.)
         .margin_bottom(70.)
         .title("Subdued")
         .subtitle("Of 120 surveyed Syrian teenagers:")
-        .fx_scale(|fx| fx.axis(AxisAnchor::Bottom).no_label())
+        .mark(
+            axis_fx()
+                .line_width(10.)
+                .axis_anchor(AxisAnchor::Bottom)
+                .dy(20.),
+        )
         .mark(
             waffle_y(Dataset::length(1))
                 .y(Value::Number(120.))

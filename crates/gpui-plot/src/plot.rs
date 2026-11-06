@@ -413,9 +413,11 @@ impl Plot {
     pub fn natural_height(&self, width: f32) -> f32 {
         let grid = self.facet_grid();
         let bucketed = self.interval_marks();
+        let marks = bucketed.as_deref().unwrap_or(&self.marks);
+        let resolved = self.resolve_facet_axes(marks, &grid);
         let (facets, _) = render::prepare_facets(
             &self.data,
-            bucketed.as_deref().unwrap_or(&self.marks),
+            resolved.as_deref().unwrap_or(marks),
             &grid,
             self.fx.as_deref(),
             self.fy.as_deref(),
@@ -1649,6 +1651,212 @@ impl Plot {
         )
     }
 
+    /// The first `axisFx` (`x`) or `axisFy` mark: with one, the plot draws no
+    /// implicit axis for that facet scale, Plot's `hasAxis`.
+    fn facet_axis_mark(&self, x: bool) -> Option<&Mark> {
+        let axis = if x {
+            crate::mark::Axis::X
+        } else {
+            crate::mark::Axis::Y
+        };
+        self.marks.iter().find(|m| m.facet_axis == Some(axis))
+    }
+
+    /// Where a facet axis mark sits: its `anchor`, else Plot's `axisFx` top
+    /// or `axisFy` right.
+    fn facet_axis_anchor(mark: &Mark, x: bool) -> crate::options::AxisAnchor {
+        use crate::options::AxisAnchor;
+        mark.axis
+            .axis
+            .flatten()
+            .unwrap_or(if x { AxisAnchor::Top } else { AxisAnchor::Right })
+    }
+
+    /// The marks with each `axisFx`/`axisFy` resolved against the facet
+    /// domain into the text mark Plot's `axisTextKx`/`axisTextKy` make: one
+    /// label per facet value, at the facet frame's `frameAnchor` (the axis's
+    /// anchor by default), offset by `tickSize + tickPadding` outward, in the
+    /// facets along the anchor's edge. `None` when there are none.
+    fn resolve_facet_axes(&self, marks: &[Mark], grid: &Grid) -> Option<Vec<Mark>> {
+        use crate::mark::{FrameAnchor, LineAnchor, TextAnchor};
+        use crate::options::AxisAnchor;
+        if !marks.iter().any(|m| m.facet_axis.is_some()) {
+            return None;
+        }
+        let resolve = |mark: &Mark, x: bool| -> Mark {
+            let mut mark = mark.clone();
+            mark.facet_axis = Some(if x {
+                crate::mark::Axis::X
+            } else {
+                crate::mark::Axis::Y
+            });
+            let anchor = Self::facet_axis_anchor(&mark, x);
+            let options = mark.axis.clone();
+            let tick_size = options.tick_size.unwrap_or(0.);
+            let rotate = options.tick_rotate.unwrap_or(0.);
+            let style = &mut mark.style;
+            if x {
+                let tick_padding = options.tick_padding.unwrap_or(
+                    (9. - tick_size).max(3.)
+                        + if rotate.abs() >= 10. {
+                            4. * rotate.to_radians().cos()
+                        } else {
+                            0.
+                        },
+                );
+                let bottom = anchor == AxisAnchor::Bottom;
+                if !style.text_anchor_set {
+                    style.text_anchor = if rotate.abs() >= 10. {
+                        if (rotate < 0.) ^ bottom {
+                            TextAnchor::Start
+                        } else {
+                            TextAnchor::End
+                        }
+                    } else {
+                        TextAnchor::Middle
+                    };
+                    style.text_anchor_set = true;
+                }
+                if !style.line_anchor_set {
+                    style.line_anchor = if rotate.abs() >= 10. {
+                        LineAnchor::Middle
+                    } else if bottom {
+                        LineAnchor::Top
+                    } else {
+                        LineAnchor::Bottom
+                    };
+                    style.line_anchor_set = true;
+                }
+                style
+                    .frame_anchor
+                    .get_or_insert(if bottom { FrameAnchor::Bottom } else { FrameAnchor::Top });
+                style.dy += if bottom {
+                    tick_size + tick_padding
+                } else {
+                    -tick_size - tick_padding
+                };
+            } else {
+                let tick_padding = options.tick_padding.unwrap_or(
+                    (9. - tick_size).max(3.)
+                        + if rotate.abs() > 60. {
+                            4. * rotate.to_radians().cos()
+                        } else {
+                            0.
+                        },
+                );
+                let left = anchor == AxisAnchor::Left;
+                if !style.text_anchor_set {
+                    style.text_anchor = if rotate.abs() > 60. {
+                        TextAnchor::Middle
+                    } else if left {
+                        TextAnchor::End
+                    } else {
+                        TextAnchor::Start
+                    };
+                    style.text_anchor_set = true;
+                }
+                if !style.line_anchor_set {
+                    style.line_anchor = if rotate > 60. {
+                        LineAnchor::Top
+                    } else if rotate < -60. {
+                        LineAnchor::Bottom
+                    } else {
+                        LineAnchor::Middle
+                    };
+                    style.line_anchor_set = true;
+                }
+                style
+                    .frame_anchor
+                    .get_or_insert(if left { FrameAnchor::Left } else { FrameAnchor::Right });
+                style.dx += if left {
+                    -tick_size - tick_padding
+                } else {
+                    tick_size + tick_padding
+                };
+            }
+            if rotate != 0. {
+                style.text_rotate = rotate;
+            }
+            // The labels: each facet value through the axis's `tickFormat`,
+            // else Plot's inferred format (the multi-line one for dates).
+            let keys = if x { &grid.fx } else { &grid.fy };
+            let values: Vec<Value> = keys
+                .iter()
+                .flatten()
+                .map(crate::value::ValueKey::to_value)
+                .collect();
+            let millis: Option<Vec<f64>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Date(_) => v.as_number(),
+                    _ => None,
+                })
+                .collect();
+            let labels: Vec<SharedString> = match (&options.tick_format, millis) {
+                (Some(format), _) => values.iter().map(|v| format.format(v).into()).collect(),
+                (None, Some(millis)) => {
+                    crate::ticks::plot_time_labels(&millis, anchor == AxisAnchor::Top)
+                        .into_iter()
+                        .map(SharedString::from)
+                        .collect()
+                }
+                (None, None) => values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Null => "null".into(),
+                        other => other.label(),
+                    })
+                    .collect(),
+            };
+            // Plot's `facetAnchor`: an fx axis labels the facets along its
+            // edge of the grid, an fy axis those along its side.
+            let other = if x { &grid.fy } else { &grid.fx };
+            let edge = other.as_ref().and_then(|keys| {
+                let first = matches!(anchor, AxisAnchor::Top | AxisAnchor::Left);
+                if first { keys.first() } else { keys.last() }.map(crate::value::ValueKey::to_value)
+            });
+            let (own, cross) = if x {
+                ("$facet_x", "$facet_y")
+            } else {
+                ("$facet_y", "$facet_x")
+            };
+            let rows: Vec<Table> = values
+                .into_iter()
+                .zip(labels)
+                .map(|(value, label)| {
+                    let mut row = Table::empty()
+                        .with(own, value)
+                        .with("$facet_text", Value::text(label.to_string()));
+                    if let Some(edge) = &edge {
+                        row = row.with(cross, edge.clone());
+                    }
+                    row
+                })
+                .collect();
+            mark.data = Some(Dataset::new(rows));
+            let field = |name: &str| Some(crate::table::Channel::Field(name.to_string().into()));
+            mark.channels.text = field("$facet_text");
+            let (fx, fy) = if x {
+                (field(own), edge.as_ref().and_then(|_| field(cross)))
+            } else {
+                (edge.as_ref().and_then(|_| field(cross)), field(own))
+            };
+            mark.fx = fx;
+            mark.fy = fy;
+            mark
+        };
+        Some(
+            marks
+                .iter()
+                .map(|mark| match mark.facet_axis {
+                    Some(crate::mark::Axis::X) => resolve(mark, true),
+                    Some(_) => resolve(mark, false),
+                    None => mark.clone(),
+                })
+                .collect(),
+        )
+    }
+
     /// The facet grid the plot's `fx`/`fy` fields resolve.
     ///
     /// The domains come from the data's values, so a facet exists for every
@@ -1827,11 +2035,55 @@ impl Plot {
                 _ => want(3, 40.),
             }
         }
-        if grid.fx.is_some() && self.scales.fx.axis != Some(None) && !self.no_axes {
-            want(if self.fx_axis_bottom() { 2 } else { 0 }, 30.);
+        // A facet axis brings the margins of Plot's `axisFx` (20 either side)
+        // and `axisFy` (20 above and below) too.
+        if grid.fx.is_some() {
+            // An `axisFx` mark brings its own margins in place of the
+            // implicit axis's.
+            let anchors: Vec<AxisAnchor> = match self.facet_axis_mark(true) {
+                Some(_) => self
+                    .marks
+                    .iter()
+                    .filter(|m| m.facet_axis == Some(crate::mark::Axis::X))
+                    .map(|m| Self::facet_axis_anchor(m, true))
+                    .collect(),
+                None if self.scales.fx.axis != Some(None) && !self.no_axes => {
+                    vec![if self.fx_axis_bottom() {
+                        AxisAnchor::Bottom
+                    } else {
+                        AxisAnchor::Top
+                    }]
+                }
+                None => Vec::new(),
+            };
+            for anchor in anchors {
+                want(if anchor == AxisAnchor::Bottom { 2 } else { 0 }, 30.);
+                want(1, 20.);
+                want(3, 20.);
+            }
         }
-        if grid.fy.is_some() && self.scales.fy.axis != Some(None) && !self.no_axes {
-            want(if self.fy_axis_left() { 3 } else { 1 }, 40.);
+        if grid.fy.is_some() {
+            let anchors: Vec<AxisAnchor> = match self.facet_axis_mark(false) {
+                Some(_) => self
+                    .marks
+                    .iter()
+                    .filter(|m| m.facet_axis == Some(crate::mark::Axis::Y))
+                    .map(|m| Self::facet_axis_anchor(m, false))
+                    .collect(),
+                None if self.scales.fy.axis != Some(None) && !self.no_axes => {
+                    vec![if self.fy_axis_left() {
+                        AxisAnchor::Left
+                    } else {
+                        AxisAnchor::Right
+                    }]
+                }
+                None => Vec::new(),
+            };
+            for anchor in anchors {
+                want(if anchor == AxisAnchor::Left { 3 } else { 1 }, 40.);
+                want(0, 20.);
+                want(2, 20.);
+            }
         }
         for (side, explicit) in self.margins.iter().enumerate() {
             if let Some(margin) = explicit {
@@ -2041,8 +2293,8 @@ impl Plot {
     }
 
     /// The facet scales' axis labels, where Plot puts them: an explicit
-    /// `label` (or the facet field's name), `fx`'s at the end of its axis,
-    /// `fy`'s above its axis.
+    /// `label` (or the facet field's name), centred along the axis in the
+    /// margin's outer edge (`fy`'s rotated), as Plot labels any band axis.
     fn paint_facet_axis_labels(
         &self,
         frame: &Frame,
@@ -2051,17 +2303,39 @@ impl Plot {
         cx: &mut App,
         grid: &Grid,
     ) {
-        let font = gpui::font(theme.font_family.clone());
+        use crate::options::LabelAnchor;
+        // The label: an axis mark's own, else the scale's, else the facet
+        // field's name, which Plot's `formatAxisLabel` drops when it is a
+        // "date", "time" or "year" over a domain of dates.
         let label_of = |options: &crate::options::ScaleOptions,
-                        field: &Option<SharedString>|
+                        field: &Option<SharedString>,
+                        mark: Option<&Mark>,
+                        keys: &Option<Vec<crate::value::ValueKey>>|
          -> Option<SharedString> {
+            if let Some(label) = mark.and_then(|m| m.axis.label.clone()) {
+                return label;
+            }
             match &options.label {
                 Some(label) => label.clone(),
                 None if self.no_labels => None,
-                None => field.clone(),
+                None => field.clone().filter(|label| {
+                    let temporal = keys
+                        .iter()
+                        .flatten()
+                        .any(|key| matches!(key.to_value(), Value::Date(_)));
+                    !(temporal
+                        && ["date", "time", "year"]
+                            .iter()
+                            .any(|n| label.eq_ignore_ascii_case(n)))
+                }),
             }
         };
-        let plot = frame.plot;
+        let (fx_mark, fy_mark) = (self.facet_axis_mark(true), self.facet_axis_mark(false));
+        // An axis mark labels its scale wherever the plot's axes are; the
+        // implicit axis only when shown.
+        let shown = |options: &crate::options::ScaleOptions, mark: Option<&Mark>| {
+            mark.is_some() || (options.axis != Some(None) && !self.no_axes)
+        };
         // The facet field: the plot's, else the first mark's own facet field.
         let field = |plot_field: &Option<SharedString>, x: bool| -> Option<SharedString> {
             plot_field.clone().or_else(|| {
@@ -2074,46 +2348,91 @@ impl Plot {
             })
         };
         let (fx_field, fy_field) = (field(&self.fx, true), field(&self.fy, false));
+        let [top, right, bottom, left] = self.plot_margins(grid);
+        let insets = Insets {
+            top,
+            right,
+            bottom,
+            left,
+        };
+        // Plot's `formatAxisLabel`: a facet scale is ordinal, so its label
+        // has an arrow only when it has an interval.
+        let arrow = |options: &crate::options::ScaleOptions, label: &str| {
+            options.label_arrow.unwrap_or(true)
+                && options.interval.is_some()
+                && !label.contains(['↑', '↓', '→', '←'])
+        };
         if grid.fx.is_some()
-            && self.scales.fx.axis != Some(None)
-            && !self.no_axes
-            && let Some(label) = label_of(&self.scales.fx, &fx_field)
+            && shown(&self.scales.fx, fx_mark)
+            && let Some(label) = label_of(&self.scales.fx, &fx_field, fx_mark, &grid.fx)
         {
-            let text = Label::new(
-                label,
-                theme.label_size,
-                theme.label,
-                FontWeight::NORMAL,
-                font.clone(),
-                window,
-            );
-            let y = if self.fx_axis_bottom() {
-                plot.origin.y + plot.size.height + px(27.) - text.height
+            let options = &self.scales.fx;
+            let text = if !arrow(options, &label) {
+                label.to_string()
+            } else if options.reverse == Some(true) {
+                format!("← {label}")
             } else {
-                plot.origin.y - px(27.)
+                format!("{label} →")
             };
-            let x = plot.origin.x + plot.size.width;
-            text.paint_at(point(x, y), TextAlign::Right, None, window, cx);
+            let top = match fx_mark {
+                Some(mark) => {
+                    Self::facet_axis_anchor(mark, true) != crate::options::AxisAnchor::Bottom
+                }
+                None => !self.fx_axis_bottom(),
+            };
+            // Plot's `axisFx` label: centred by default, `labelOffset` past
+            // the plot's edge, by default the margin less three pixels.
+            let offset = options
+                .label_offset
+                .unwrap_or(if top { insets.top } else { insets.bottom } - 3.);
+            crate::frame::paint_horizontal_axis_label(
+                frame.plot,
+                &insets,
+                &text,
+                top,
+                options.label_anchor.unwrap_or(LabelAnchor::Center),
+                offset,
+                theme,
+                window,
+                cx,
+            );
         }
         if grid.fy.is_some()
-            && self.scales.fy.axis != Some(None)
-            && !self.no_axes
-            && let Some(label) = label_of(&self.scales.fy, &fy_field)
+            && shown(&self.scales.fy, fy_mark)
+            && let Some(label) = label_of(&self.scales.fy, &fy_field, fy_mark, &grid.fy)
         {
-            let text = Label::new(
-                label,
-                theme.label_size,
-                theme.label,
-                FontWeight::NORMAL,
-                font,
-                window,
-            );
-            let (x, align) = if self.fy_axis_left() {
-                (plot.origin.x - px(37.), TextAlign::Left)
-            } else {
-                (plot.origin.x + plot.size.width + px(37.), TextAlign::Right)
+            let options = &self.scales.fy;
+            let right = match fy_mark {
+                Some(mark) => {
+                    Self::facet_axis_anchor(mark, false) != crate::options::AxisAnchor::Left
+                }
+                None => !self.fy_axis_left(),
             };
-            text.paint_at(point(x, plot.origin.y - px(17.)), align, None, window, cx);
+            let label_anchor = options.label_anchor.unwrap_or(LabelAnchor::Center);
+            // An ordinal range runs top to bottom: its values grow
+            // downward unless reversed.
+            let up = options.reverse == Some(true);
+            let text = crate::frame::vertical_axis_label_text(
+                &label,
+                arrow(options, &label),
+                up,
+                label_anchor == LabelAnchor::Center,
+                right,
+            );
+            let offset = options
+                .label_offset
+                .unwrap_or(if right { insets.right } else { insets.left } - 3.);
+            crate::frame::paint_vertical_axis_label(
+                frame.plot,
+                &insets,
+                &text,
+                right,
+                label_anchor,
+                offset,
+                theme,
+                window,
+                cx,
+            );
         }
     }
 
@@ -2927,9 +3246,11 @@ impl PlotTrait for Plot {
         let theme = PlotTheme::from_theme(cx.theme());
         let mut grid = self.facet_grid();
         let bucketed = self.interval_marks();
+        let marks = bucketed.as_deref().unwrap_or(&self.marks);
+        let resolved = self.resolve_facet_axes(marks, &grid);
         let (mut facets, populated) = render::prepare_facets(
             &self.data,
-            bucketed.as_deref().unwrap_or(&self.marks),
+            resolved.as_deref().unwrap_or(marks),
             &grid,
             self.fx.as_deref(),
             self.fy.as_deref(),
@@ -3036,60 +3357,11 @@ impl PlotTrait for Plot {
                 }
             }
         }
-        // The axes sit on top of the marks. A faceted figure draws each
-        // facet's axes at the grid's outer edges, Plot's facet anchors.
-        let x_style = self
-            .x_axis_anchor()
-            .filter(|_| self.axis_mark(true).is_none())
-            .map(|anchor| crate::frame::AxisStyle::new(anchor, &self.scales.x));
-        let y_style = self
-            .y_axis_anchor()
-            .filter(|_| self.axis_mark(false).is_none())
-            .map(|anchor| crate::frame::AxisStyle::new(anchor, &self.scales.y));
-        if grid.is_faceted() {
-            for cell in 0..grid.cells.len() {
-                if grid.is_empty(cell) {
-                    continue;
-                }
-                crate::frame::paint_axes(
-                    &cell_frame(&frame, &grid, cell),
-                    &theme,
-                    window,
-                    cx,
-                    x_style,
-                    y_style,
-                    &crate::frame::AxisEdges::from_cell(cell, &grid),
-                );
-            }
-            // Plot's facet axes: hidden by `axis: null` or the facet scale's
-            // own `axis: null`, labelled through its tickFormat.
-            let show = |options: &crate::options::ScaleOptions| {
-                !self.no_axes && options.axis != Some(None)
-            };
-            crate::frame::paint_facet_labels(
-                &frame,
-                &theme,
-                window,
-                cx,
-                &grid,
-                show(&self.scales.fx).then_some(&self.scales.fx),
-                show(&self.scales.fy).then_some(&self.scales.fy),
-                self.fx_axis_bottom(),
-                self.fy_axis_left(),
-            );
-            self.paint_facet_axis_labels(&frame, &theme, window, cx, &grid);
-        } else {
-            crate::frame::paint_axes(
-                &frame,
-                &theme,
-                window,
-                cx,
-                x_style,
-                y_style,
-                &crate::frame::AxisEdges::default(),
-            );
-        }
-        self.paint_axis_labels(&frame, &theme, window, cx);
+        // The axes sit on top of the marks, clipped to the figure as Plot's
+        // SVG clips them: a long rotated tick label stops at its edge.
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            self.paint_axes_layer(&frame, &grid, &theme, window, cx)
+        });
     }
 
     fn id(&self) -> Option<ElementId> {
@@ -3520,6 +3792,71 @@ impl Plot {
         Some(first)
     }
 
+    /// Paint the axes over the marks: each facet's at the grid's outer
+    /// edges (Plot's facet anchors), the facet axes, then the axis labels.
+    fn paint_axes_layer(
+        &self,
+        frame: &Frame,
+        grid: &Grid,
+        theme: &PlotTheme,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let x_style = self
+            .x_axis_anchor()
+            .filter(|_| self.axis_mark(true).is_none())
+            .map(|anchor| crate::frame::AxisStyle::new(anchor, &self.scales.x));
+        let y_style = self
+            .y_axis_anchor()
+            .filter(|_| self.axis_mark(false).is_none())
+            .map(|anchor| crate::frame::AxisStyle::new(anchor, &self.scales.y));
+        if grid.is_faceted() {
+            for cell in 0..grid.cells.len() {
+                if grid.is_empty(cell) {
+                    continue;
+                }
+                crate::frame::paint_axes(
+                    &cell_frame(frame, grid, cell),
+                    theme,
+                    window,
+                    cx,
+                    x_style,
+                    y_style,
+                    &crate::frame::AxisEdges::from_cell(cell, grid),
+                );
+            }
+            // Plot's facet axes: hidden by `axis: null` or the facet scale's
+            // own `axis: null`, labelled through its tickFormat.
+            // An `axisFx`/`axisFy` mark replaces the implicit axis.
+            let show = |options: &crate::options::ScaleOptions, x: bool| {
+                !self.no_axes && options.axis != Some(None) && self.facet_axis_mark(x).is_none()
+            };
+            crate::frame::paint_facet_labels(
+                frame,
+                theme,
+                window,
+                cx,
+                grid,
+                show(&self.scales.fx, true).then_some(&self.scales.fx),
+                show(&self.scales.fy, false).then_some(&self.scales.fy),
+                self.fx_axis_bottom(),
+                self.fy_axis_left(),
+            );
+            self.paint_facet_axis_labels(frame, theme, window, cx, grid);
+        } else {
+            crate::frame::paint_axes(
+                frame,
+                theme,
+                window,
+                cx,
+                x_style,
+                y_style,
+                &crate::frame::AxisEdges::default(),
+            );
+        }
+        self.paint_axis_labels(frame, theme, window, cx);
+    }
+
     /// Paint the axis labels where Plot puts them: the y label in the top
     /// margin at the figure's left as `↑ label`, the x label in the bottom
     /// margin at the plot's right as `label →`. A categorical axis has no
@@ -3536,7 +3873,6 @@ impl Plot {
         cx: &mut App,
     ) {
         use crate::options::{AxisAnchor, LabelAnchor};
-        let font = gpui::font(theme.font_family.clone());
         let continuous = |scale: &crate::scale::PositionScale| {
             matches!(scale, crate::scale::PositionScale::Continuous(_))
         };
@@ -3552,16 +3888,6 @@ impl Plot {
             left,
         };
         let plot = frame.plot;
-        let make = |text: String, window: &mut Window| {
-            Label::new(
-                text.into(),
-                theme.label_size,
-                theme.label,
-                FontWeight::NORMAL,
-                font.clone(),
-                window,
-            )
-        };
         // The labels each axis draws: its anchor, label and label anchor.
         let specs = |x: bool| -> Vec<(AxisAnchor, SharedString, Option<LabelAnchor>)> {
             let kind = if x { MarkKind::AxisX } else { MarkKind::AxisY };
@@ -3600,70 +3926,50 @@ impl Plot {
                 .collect()
         };
         for (anchor, label, label_anchor) in specs(false) {
+            // Plot's `formatAxisLabel`: an ordinal scale has no direction, so
+            // no arrow unless it has an interval.
+            let ordinal = !continuous(&frame.y.scale);
             let arrow = self.scales.y.label_arrow.unwrap_or(true)
-                && (continuous(&frame.y.scale) || self.scales.y.interval.is_some())
+                && (!ordinal || self.scales.y.interval.is_some())
                 && !label.contains(['↑', '↓', '→', '←']);
-            let up = !self
+            let reverse = self
                 .scales
                 .y
                 .reverse
                 .unwrap_or(self.frame_options.y_reverse);
+            // An ordinal y range runs top to bottom, so its values grow
+            // downward unless reversed.
+            let up = reverse == ordinal;
             let right = anchor == AxisAnchor::Right;
-            let center = label_anchor == Some(LabelAnchor::Center);
-            // Plot's `formatAxisLabel`: a centred y label reads along the axis,
-            // its arrow pointing along x; a right axis puts its arrow last.
-            let text = match (arrow, center) {
-                (false, _) => label.to_string(),
-                (true, true) => format!("{label} {}", if up { "→" } else { "←" }),
-                (true, false) => {
-                    let symbol = if up { "↑" } else { "↓" };
-                    if right {
-                        format!("{label} {symbol}")
-                    } else {
-                        format!("{symbol} {label}")
-                    }
-                }
-            };
+            // Plot centres an ordinal scale's label, else puts it on top.
+            let label_anchor = label_anchor.unwrap_or(if ordinal {
+                LabelAnchor::Center
+            } else {
+                LabelAnchor::End
+            });
+            let text = crate::frame::vertical_axis_label_text(
+                &label,
+                arrow,
+                up,
+                label_anchor == LabelAnchor::Center,
+                right,
+            );
             let offset = self
                 .scales
                 .y
                 .label_offset
                 .unwrap_or(if right { insets.right } else { insets.left } - 3.);
-            let x = if right {
-                plot.origin.x + plot.size.width + px(offset)
-            } else {
-                plot.origin.x - px(offset)
-            };
-            if center {
-                // Rotated a quarter turn, its top toward the outside.
-                let size = theme.label_size.as_f32();
-                let inward = if right { -0.6 * size } else { 0.6 * size };
-                paint::paint_rotated_text(
-                    &text,
-                    size,
-                    theme.label,
-                    &theme.font_family,
-                    point(x + px(inward), plot.origin.y + plot.size.height / 2.),
-                    -90.,
-                    TextAlign::Center,
-                    window,
-                    cx,
-                );
-                continue;
-            }
-            let text = make(text, window);
-            // A y label's `Start` is the bottom of its range, `End` the top.
-            let y = if label_anchor == Some(LabelAnchor::Start) {
-                plot.origin.y + plot.size.height + px(insets.bottom - 3.) - text.height
-            } else {
-                plot.origin.y + px(3. - insets.top)
-            };
-            let align = if right {
-                TextAlign::Right
-            } else {
-                TextAlign::Left
-            };
-            text.paint_at(point(x, y), align, None, window, cx);
+            crate::frame::paint_vertical_axis_label(
+                plot,
+                &insets,
+                &text,
+                right,
+                label_anchor,
+                offset,
+                theme,
+                window,
+                cx,
+            );
         }
         for (anchor, label, label_anchor) in specs(true) {
             let arrow = self.scales.x.label_arrow.unwrap_or(true)
@@ -3681,7 +3987,6 @@ impl Plot {
             } else {
                 format!("← {label}")
             };
-            let text = make(text, window);
             let top = anchor == AxisAnchor::Top;
             // A band scale centres its label, as Plot does; a continuous one
             // puts it at the axis's end.
@@ -3695,20 +4000,17 @@ impl Plot {
                 .x
                 .label_offset
                 .unwrap_or(if top { insets.top } else { insets.bottom } - 3.);
-            let y = if top {
-                plot.origin.y - px(offset)
-            } else {
-                plot.origin.y + plot.size.height + px(offset) - text.height
-            };
-            let (x, align) = match label_anchor {
-                LabelAnchor::Center => (plot.origin.x + plot.size.width / 2., TextAlign::Center),
-                LabelAnchor::Start => (plot.origin.x - px(insets.left - 3.), TextAlign::Left),
-                LabelAnchor::End => (
-                    plot.origin.x + plot.size.width + px(insets.right - 3.),
-                    TextAlign::Right,
-                ),
-            };
-            text.paint_at(point(x, y), align, None, window, cx);
+            crate::frame::paint_horizontal_axis_label(
+                plot,
+                &insets,
+                &text,
+                top,
+                label_anchor,
+                offset,
+                theme,
+                window,
+                cx,
+            );
         }
     }
 
@@ -4135,6 +4437,42 @@ mod tests {
                     .with("y", Value::Number(y))
             })
             .collect()
+    }
+
+    #[test]
+    fn a_facet_axis_mark_labels_each_facet_and_replaces_the_implicit_axis() {
+        use crate::mark::{FrameAnchor, LineAnchor, TextAnchor};
+        let data = vec![
+            Table::empty()
+                .with("q", Value::text("a"))
+                .with("y", Value::Number(1.)),
+            Table::empty()
+                .with("q", Value::text("b"))
+                .with("y", Value::Number(2.)),
+        ];
+        let plot = Plot::new(data).mark(
+            crate::marks::axis_fx()
+                .axis_anchor(crate::options::AxisAnchor::Bottom)
+                .dy(20.),
+        );
+        let plot = plot.fx("q");
+        let grid = plot.facet_grid();
+        let marks = plot
+            .resolve_facet_axes(&plot.marks, &grid)
+            .expect("an axis mark resolves");
+        let axis = &marks[0];
+        let rows = axis.data.as_ref().expect("one row per facet").rows();
+        let texts: Vec<_> = rows.iter().map(|r| r.value("$facet_text").label()).collect();
+        assert_eq!(texts, ["a", "b"]);
+        // Plot's axisTextKx at the bottom: hanging below the frame, its dy
+        // grown by the default nine-pixel padding.
+        assert_eq!(axis.style.frame_anchor, Some(FrameAnchor::Bottom));
+        assert_eq!(axis.style.line_anchor, LineAnchor::Top);
+        assert_eq!(axis.style.text_anchor, TextAnchor::Middle);
+        assert_eq!(axis.style.dy, 29.);
+        // The mark brings a bottom margin in place of the implicit top one.
+        let [top, _, bottom, _] = plot.plot_margins(&grid);
+        assert_eq!((top, bottom), (0., 30.));
     }
 
     #[test]
