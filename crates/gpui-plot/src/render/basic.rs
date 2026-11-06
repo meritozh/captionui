@@ -3268,6 +3268,40 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         (grid.y2 - grid.y1) / grid.height as f64,
     );
     let _ = row;
+    let cell_color = |value: &Value, ctx: &DrawContext<'_>| -> Option<Hsla> {
+        if value.is_null() {
+            return None;
+        }
+        value
+            .as_text()
+            .and_then(|t| crate::css::parse(t))
+            .or_else(|| ctx.colors.scale.as_ref().and_then(|s| s.color(value)))
+    };
+    // Unprojected, the grid is an axis-aligned image, as Plot draws it: one
+    // pixel per cell, built once and stretched over the grid's extent.
+    if ctx.frame.projection.is_none() {
+        let (Some(a), Some(b)) = (place(grid.x1, grid.y1, ctx), place(grid.x2, grid.y2, ctx))
+        else {
+            return;
+        };
+        // Grid row 0 is the low end of y, drawn at the bottom unless reversed.
+        let (flip_x, flip_y) = (a.x > b.x, a.y > b.y);
+        let bounds = paint::rect_between(ctx.absolute(a), ctx.absolute(b));
+        // Upscaled to device pixels, nearest-neighbour, so GPUI's linear
+        // sampler keeps each cell crisp, as the quads it replaces were.
+        let scale = ctx.window.scale_factor();
+        let device = (
+            (bounds.size.width.as_f32() * scale).round().clamp(1., 4096.) as usize,
+            (bounds.size.height.as_f32() * scale).round().clamp(1., 4096.) as usize,
+        );
+        let image = raster_image(&grid, opacity, flip_x, flip_y, device, |v| cell_color(v, ctx));
+        ctx.clipped(|ctx| {
+            let _ = ctx
+                .window
+                .paint_image(bounds, bounds, Default::default(), image, 0, false);
+        });
+        return;
+    }
     ctx.clipped(|ctx| {
         for j in 0..grid.height {
             for i in 0..grid.width {
@@ -3311,6 +3345,81 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             }
         }
     });
+}
+
+/// A raster grid as an RGBA image, one pixel per cell (top row first), kept
+/// across repaints for the same grid, opacity and colors.
+fn raster_image(
+    grid: &std::rc::Rc<crate::raster::RasterGrid>,
+    opacity: f32,
+    flip_x: bool,
+    flip_y: bool,
+    device: (usize, usize),
+    color: impl Fn(&Value) -> Option<Hsla>,
+) -> std::sync::Arc<gpui::RenderImage> {
+    let (w, h) = (grid.width, grid.height);
+    // The grid is itself remembered across repaints, so its address names
+    // it; a few cells' colors stand in for the color scale.
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (std::rc::Rc::as_ptr(grid) as usize, opacity.to_bits(), flip_x, flip_y, device)
+            .hash(&mut hasher);
+        let n = grid.values.len();
+        for k in (0..n).step_by((n / 31).max(1)) {
+            color(&grid.values[k])
+                .map(|c| [c.h, c.s, c.l, c.a].map(f32::to_bits))
+                .hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+    type Images = Vec<(
+        u64,
+        std::rc::Rc<crate::raster::RasterGrid>,
+        std::sync::Arc<gpui::RenderImage>,
+    )>;
+    thread_local! {
+        static IMAGES: std::cell::RefCell<Images> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    if let Some(image) = IMAGES
+        .with_borrow(|images| images.iter().find(|(k, _, _)| *k == key).map(|(_, _, i)| i.clone()))
+    {
+        return image;
+    }
+    let mut rgba = vec![0u8; w * h * 4];
+    for j in 0..h {
+        for i in 0..w {
+            let Some(c) = color(&grid.values[j * w + i]) else {
+                continue;
+            };
+            let c = gpui::Rgba::from(c);
+            let (pi, pj) = (if flip_x { w - 1 - i } else { i }, if flip_y { h - 1 - j } else { j });
+            let k = (pj * w + pi) * 4;
+            // GPUI's images are BGRA, premultiplied by the sprite shader.
+            let a = (c.a * opacity).clamp(0., 1.);
+            rgba[k] = (c.b * 255.).round() as u8;
+            rgba[k + 1] = (c.g * 255.).round() as u8;
+            rgba[k + 2] = (c.r * 255.).round() as u8;
+            rgba[k + 3] = (a * 255.).round() as u8;
+        }
+    }
+    // Nearest-neighbour upscale, at least one device pixel per cell.
+    let (dw, dh) = (device.0.max(w), device.1.max(h));
+    let mut scaled = vec![0u8; dw * dh * 4];
+    for y in 0..dh {
+        let sy = y * h / dh;
+        for x in 0..dw {
+            let sx = x * w / dw;
+            let (from, to) = ((sy * w + sx) * 4, (y * dw + x) * 4);
+            scaled[to..to + 4].copy_from_slice(&rgba[from..from + 4]);
+        }
+    }
+    let image = crate::image_from_rgba(dw as u32, dh as u32, scaled);
+    IMAGES.with_borrow_mut(|images| {
+        images.insert(0, (key, grid.clone(), image.clone()));
+        images.truncate(8);
+    });
+    image
 }
 
 /// Plot's `contour`: the grid's isobands, one closed region per threshold
