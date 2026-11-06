@@ -1530,10 +1530,10 @@ pub fn resolve_raster(
             invert(&frame.y.scale, 0.),
         ]
     });
-    let mut grid = if let Some(f) = &spec.function {
-        crate::raster::RasterGrid::from_function(&|x, y| f(x, y), size.0, size.1, extent)
+    let samples: Vec<(f64, f64, Value)> = if spec.function.is_some() {
+        Vec::new()
     } else {
-        let samples: Vec<(f64, f64, Value)> = prepared
+        prepared
             .rows
             .iter()
             .filter_map(|row| {
@@ -1547,18 +1547,62 @@ pub fn resolve_raster(
                     value,
                 ))
             })
-            .collect();
-        let how = spec
-            .interpolate
-            .unwrap_or(if prepared.mark.kind == MarkKind::Contour {
-                crate::raster::Interpolate::Nearest
-            } else {
-                crate::raster::Interpolate::None
-            });
+            .collect()
+    };
+    let how = spec
+        .interpolate
+        .unwrap_or(if prepared.mark.kind == MarkKind::Contour {
+            crate::raster::Interpolate::Nearest
+        } else {
+            crate::raster::Interpolate::None
+        });
+    // Interpolating thousands of samples (or sampling a function per cell) is
+    // the costly part, and a plot repaints on every pointer move with the same
+    // inputs; remember the last few grids by a hash of what they were built
+    // from.
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (size, how as u8, spec.blur.to_bits()).hash(&mut h);
+        extent.map(f64::to_bits).hash(&mut h);
+        if let Some(f) = &spec.function {
+            // A function is rebuilt with its plot, so probe it instead of
+            // keying by its address.
+            for i in 0..5 {
+                for j in 0..5 {
+                    let x = extent[0] + (extent[2] - extent[0]) * (i as f64 + 0.37) / 5.;
+                    let y = extent[1] + (extent[3] - extent[1]) * (j as f64 + 0.61) / 5.;
+                    f(x, y).key().hash(&mut h);
+                }
+            }
+        }
+        for (x, y, v) in &samples {
+            (x.to_bits(), y.to_bits()).hash(&mut h);
+            v.key().hash(&mut h);
+        }
+        h.finish()
+    };
+    thread_local! {
+        static GRIDS: std::cell::RefCell<Vec<(u64, std::rc::Rc<crate::raster::RasterGrid>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    if let Some(grid) = GRIDS.with_borrow(|grids| {
+        grids.iter().find(|(k, _)| *k == key).map(|(_, g)| g.clone())
+    }) {
+        return Some(grid);
+    }
+    let mut grid = if let Some(f) = &spec.function {
+        crate::raster::RasterGrid::from_function(&|x, y| f(x, y), size.0, size.1, extent)
+    } else {
         crate::raster::RasterGrid::from_samples(&samples, size.0, size.1, extent, how)
     };
     grid.blur(spec.blur);
-    Some(std::rc::Rc::new(grid))
+    let grid = std::rc::Rc::new(grid);
+    GRIDS.with_borrow_mut(|grids| {
+        grids.insert(0, (key, grid.clone()));
+        grids.truncate(8);
+    });
+    Some(grid)
 }
 
 /// The channel names a transform output can read from the mark itself.
