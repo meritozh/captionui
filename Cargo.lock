@@ -2522,6 +2522,7 @@ dependencies = [
  "chrono",
  "gpui-kit",
  "image",
+ "rustc-hash 2.1.3",
  "serde_json",
  "smallvec",
 ]

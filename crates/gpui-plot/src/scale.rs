@@ -789,11 +789,10 @@ impl ColorScale {
 
 /// The distinct keys of `values`, keeping first-occurrence order.
 pub fn dedup(values: impl IntoIterator<Item = ValueKey>) -> Vec<ValueKey> {
-    let mut seen = Vec::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     let mut out = Vec::new();
     for value in values {
-        if !seen.contains(&value) {
-            seen.push(value.clone());
+        if seen.insert(value.clone()) {
             out.push(value);
         }
     }

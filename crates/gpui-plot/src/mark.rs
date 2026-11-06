@@ -1103,9 +1103,6 @@ pub struct Mark {
     /// Keep only each `z` group's outliers on this axis (beyond 1.5 IQR), the
     /// dots of Plot's box mark.
     pub outliers: Option<Axis>,
-    /// A box part's value channel, written onto each record as `$box:x` or
-    /// `$box:y` for its group reducers to read.
-    pub box_value: Option<crate::table::Channel>,
     /// Plot's `filter` option: only the records it accepts are drawn.
     pub filter: Option<RowFilter>,
     /// The mark's horizontal facet channel, Plot's mark-level `fx` option.
@@ -1635,7 +1632,6 @@ impl Mark {
             density: None,
             raster: None,
             outliers: None,
-            box_value: None,
             filter: None,
             fx: None,
             fy: None,
@@ -4433,7 +4429,7 @@ pub fn expand_box(mark: Mark) -> Vec<Mark> {
     for m in [&mut rule, &mut bar, &mut tick] {
         if let Some(config) = m.group.as_mut() {
             for output in config.outputs.iter_mut() {
-                output.input = Some(format!("$box:{input}").into());
+                output.input = Some(input.into());
             }
         }
     }
@@ -4453,14 +4449,9 @@ pub fn expand_box(mark: Mark) -> Vec<Mark> {
     dots.outliers = Some(if vertical { Axis::Y } else { Axis::X });
     dots.channels.stroke = stroke;
     dots.channels.r = mark.channels.r.clone();
-    // The group reducers read the value through a field the box writes on
-    // each record, since its value channel may be an accessor.
-    let value_channel = value.expect("defaulted");
-    let tag = move |mut m: Mark| {
-        m.box_value = Some(value_channel.clone());
-        m
-    };
-    vec![tag(rule), tag(bar), tag(tick), tag(dots)]
+    // The group reducers read the value channel itself: each part is a
+    // fresh mark whose value axis no transform rewrites before grouping.
+    vec![rule, bar, tick, dots]
 }
 
 /// Plot's `tree` (and `cluster`) mark as the marks it composes: a link per

@@ -141,6 +141,12 @@ impl Dataset {
         self.rows.is_empty()
     }
 
+    /// Whether `other` shares this dataset's rows (the same `Rc`), a cheap
+    /// identity check for caching work done per source.
+    pub fn same_rows(&self, other: &Dataset) -> bool {
+        Rc::ptr_eq(&self.rows, &other.rows)
+    }
+
     /// The values of one field, in row order.
     pub fn values(&self, name: &str) -> Vec<Value> {
         self.rows.iter().map(|row| row.value(name)).collect()
@@ -293,6 +299,18 @@ impl Channel {
     /// `(d) => 100 / d.mpg`; a non-finite result is missing.
     pub fn number(accessor: impl Fn(&Table) -> f64 + 'static) -> Self {
         Channel::Accessor(std::rc::Rc::new(move |row| Value::number(accessor(row))))
+    }
+
+    /// Whether `other` is known to read the same values as this channel: the
+    /// same field, the same accessor (by pointer) or an equal constant. Two
+    /// distinct accessors are never the same, so this only keys caches.
+    pub fn same(&self, other: &Channel) -> bool {
+        match (self, other) {
+            (Channel::Field(a), Channel::Field(b)) => a == b,
+            (Channel::Accessor(a), Channel::Accessor(b)) => std::rc::Rc::ptr_eq(a, b),
+            (Channel::Constant(a), Channel::Constant(b)) => a.key() == b.key(),
+            _ => false,
+        }
     }
 
     /// The value this channel reads from `row`.

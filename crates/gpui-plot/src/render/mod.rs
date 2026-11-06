@@ -178,6 +178,21 @@ pub fn prepare_facets(
     // A furniture mark faceted by constants reads one placeholder record,
     // which lands in the facet the constants name.
     let placeholder = Dataset::new([Table::empty()]);
+    // Marks over the same source and facet channels (a box's parts, marks
+    // over the plot's data) share one partition and one dataset per facet.
+    type Partition = (
+        Dataset,
+        Option<crate::table::Channel>,
+        Option<crate::table::Channel>,
+        Vec<Dataset>,
+    );
+    let mut partitions: Vec<Partition> = Vec::new();
+    let same_channel =
+        |a: &Option<crate::table::Channel>, b: &Option<crate::table::Channel>| match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.same(b),
+            _ => false,
+        };
     for mark in &marks {
         let source = if mark.kind.is_furniture() && mark.data.is_none() {
             &placeholder
@@ -192,8 +207,19 @@ pub fn prepare_facets(
             }
             continue;
         }
-        let groups = grid.partition_channels(source, mark_fx.as_ref(), mark_fy.as_ref());
-        for (cell, rows) in groups.into_iter().enumerate() {
+        let cached = partitions.iter().position(|(data, px, py, _)| {
+            data.same_rows(source) && same_channel(px, &mark_fx) && same_channel(py, &mark_fy)
+        });
+        let cached = cached.unwrap_or_else(|| {
+            let groups = grid
+                .partition_channels(source, mark_fx.as_ref(), mark_fy.as_ref())
+                .into_iter()
+                .map(Dataset::new)
+                .collect();
+            partitions.push((source.clone(), mark_fx.clone(), mark_fy.clone(), groups));
+            partitions.len() - 1
+        });
+        for (cell, rows) in partitions[cached].3.iter().enumerate() {
             // A facet axis labels every facet, so it fills none of them.
             populated[cell] |= !rows.is_empty() && mark.facet_axis.is_none();
             // A furniture mark's placeholder landed in another facet: this
@@ -207,7 +233,7 @@ pub fn prepare_facets(
                 prepared[cell].push(empty);
                 continue;
             }
-            prepared[cell].push(prepare_mark(&Dataset::new(rows), mark));
+            prepared[cell].push(prepare_mark(rows, mark));
         }
     }
     (prepared, populated)
@@ -343,14 +369,6 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
                     .cloned(),
             );
         }
-    }
-    if let Some(channel) = &mark.box_value {
-        source = Dataset::new(source.rows().iter().map(|row| {
-            let value = channel.read(row);
-            row.clone()
-                .with("$box:x", value.clone())
-                .with("$box:y", value)
-        }));
     }
     let mut dropped: Vec<Table> = Vec::new();
     if let Some(keep) = &mark.filter {
@@ -1231,6 +1249,20 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
 
     let mut x = read(&channels.x);
     let mut y = read(&channels.y);
+    // A box part's `z` is its category channel, which is also its x (or y):
+    // reuse that read rather than calling the channel twice. Constants are
+    // cheap to read, so only fields and accessors are shared.
+    let shared_z = channels.z.as_ref().and_then(|z| {
+        if matches!(z, crate::table::Channel::Constant(_)) {
+            None
+        } else if channels.x.as_ref().is_some_and(|x| z.same(x)) {
+            Some(x.clone())
+        } else if channels.y.as_ref().is_some_and(|y| z.same(y)) {
+            Some(y.clone())
+        } else {
+            None
+        }
+    });
     let x1 = read(&channels.x1);
     let x2 = read(&channels.x2);
     let y1 = read(&channels.y1);
@@ -1255,11 +1287,11 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
         x = Value::Number(index as f64);
     }
 
-    let z = channels
-        .z
-        .as_ref()
-        .map(|channel| channel.read(row))
-        .filter(|v| !v.is_null());
+    let z = match shared_z {
+        Some(value) => Some(value),
+        None => channels.z.as_ref().map(|channel| channel.read(row)),
+    }
+    .filter(|v| !v.is_null());
 
     PreparedRow {
         row: row.clone(),

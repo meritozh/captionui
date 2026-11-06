@@ -411,8 +411,8 @@ impl Plot {
     /// with no y at all, or what `aspectRatio` asks for) plus the title,
     /// legend and caption above and below it.
     pub fn natural_height(&self, width: f32) -> f32 {
-        let grid = self.facet_grid();
         let bucketed = self.interval_marks();
+        let grid = self.facet_grid_with(bucketed.as_deref());
         let marks = bucketed.as_deref().unwrap_or(&self.marks);
         let resolved = self.resolve_facet_axes(marks, &grid);
         let (mut facets, _) = render::prepare_facets(
@@ -1615,8 +1615,20 @@ impl Plot {
         if ix.is_none() && iy.is_none() {
             return None;
         }
-        let wrap = |channel: crate::table::Channel, interval: crate::mark::Interval| {
-            crate::table::Channel::Accessor(Rc::new(move |row: &Table| {
+        // Marks that shared a facet channel share its wrapper, so the facet
+        // partition (keyed on channel identity) is computed once for them.
+        let wrapped: std::cell::RefCell<Vec<(bool, crate::table::Channel, crate::table::Channel)>> =
+            Default::default();
+        let wrap = |channel: crate::table::Channel, interval: crate::mark::Interval, x: bool| {
+            if let Some((_, _, w)) = wrapped
+                .borrow()
+                .iter()
+                .find(|(axis, original, _)| *axis == x && original.same(&channel))
+            {
+                return w.clone();
+            }
+            let original = channel.clone();
+            let w = crate::table::Channel::Accessor(Rc::new(move |row: &Table| {
                 let value = channel.read(row);
                 match interval.extent(&value) {
                     Some((start, _)) => match value {
@@ -1625,7 +1637,9 @@ impl Plot {
                     },
                     None => value,
                 }
-            }))
+            }));
+            wrapped.borrow_mut().push((x, original, w.clone()));
+            w
         };
         Some(
             self.marks
@@ -1649,11 +1663,11 @@ impl Plot {
                         .clone()
                         .or(plot_y.map(crate::table::Channel::Field));
                     mark.fx = match (fx, ix) {
-                        (Some(c), Some(i)) => Some(wrap(c, i)),
+                        (Some(c), Some(i)) => Some(wrap(c, i, true)),
                         (c, _) => c,
                     };
                     mark.fy = match (fy, iy) {
-                        (Some(c), Some(i)) => Some(wrap(c, i)),
+                        (Some(c), Some(i)) => Some(wrap(c, i, false)),
                         (c, _) => c,
                     };
                     mark
@@ -1874,28 +1888,64 @@ impl Plot {
     /// value a mark could draw there — the same values Plot's facet band
     /// scales read.
     fn facet_grid(&self) -> Grid {
+        let bucketed = self.interval_marks();
+        self.facet_grid_with(bucketed.as_deref())
+    }
+
+    /// [`Plot::facet_grid`] given the plot's [`Plot::interval_marks`], so a
+    /// caller that already has them doesn't compute them twice.
+    fn facet_grid_with(&self, bucketed: Option<&[Mark]>) -> Grid {
         // The domains are every facet value a mark could draw: the plot's
         // `fx`/`fy` over its data, and each mark's own facet channels over
-        // the mark's data.
-        let mut fx: Vec<Value> = Vec::new();
-        let mut fy: Vec<Value> = Vec::new();
-        let bucketed = self.interval_marks();
-        if bucketed.is_none() {
-            if let Some(field) = &self.fx {
-                fx.extend(self.data.values(field));
-            }
-            if let Some(field) = &self.fy {
-                fy.extend(self.data.values(field));
-            }
+        // the mark's data. Only each key's first value is kept, since the
+        // grid keeps distinct keys, and a (data, channel) pair already read
+        // adds nothing.
+        #[derive(Default)]
+        struct Distinct {
+            seen: rustc_hash::FxHashSet<crate::value::ValueKey>,
+            values: Vec<Value>,
         }
-        for mark in bucketed.as_deref().unwrap_or(&self.marks) {
-            let data = mark.data.as_ref().unwrap_or(&self.data);
-            for (channel, values) in [(&mark.fx, &mut fx), (&mark.fy, &mut fy)] {
-                if let Some(channel) = channel {
-                    values.extend(data.rows().iter().map(|row| channel.read(row)));
+        impl Distinct {
+            fn push(&mut self, value: Value) {
+                if self.seen.insert(value.key()) {
+                    self.values.push(value);
                 }
             }
         }
+        let mut fx = Distinct::default();
+        let mut fy = Distinct::default();
+        if bucketed.is_none() {
+            if let Some(field) = &self.fx {
+                self.data
+                    .rows()
+                    .iter()
+                    .for_each(|row| fx.push(row.value(field)));
+            }
+            if let Some(field) = &self.fy {
+                self.data
+                    .rows()
+                    .iter()
+                    .for_each(|row| fy.push(row.value(field)));
+            }
+        }
+        let mut read: Vec<(bool, &Dataset, &crate::table::Channel)> = Vec::new();
+        for mark in bucketed.unwrap_or(&self.marks) {
+            let data = mark.data.as_ref().unwrap_or(&self.data);
+            for (x, channel, values) in [(true, &mark.fx, &mut fx), (false, &mark.fy, &mut fy)] {
+                let Some(channel) = channel else { continue };
+                if read
+                    .iter()
+                    .any(|(axis, d, c)| *axis == x && d.same_rows(data) && c.same(channel))
+                {
+                    continue;
+                }
+                read.push((x, data, channel));
+                data.rows()
+                    .iter()
+                    .for_each(|row| values.push(channel.read(row)));
+            }
+        }
+        let (mut fx, mut fy) = (fx.values, fy.values);
         // Plot's interval domain is the range of the intervals between the
         // values' extent, so a missing value has no facet.
         if self.scales.fx.interval.is_some() {
@@ -3261,8 +3311,8 @@ impl PlotTrait for Plot {
         // (which needs the frame's pixels) and the color scales. `paint`,
         // `tooltip_state` and `tooltip` then share one consistent view.
         let theme = PlotTheme::from_theme(cx.theme());
-        let mut grid = self.facet_grid();
         let bucketed = self.interval_marks();
+        let mut grid = self.facet_grid_with(bucketed.as_deref());
         let marks = bucketed.as_deref().unwrap_or(&self.marks);
         let resolved = self.resolve_facet_axes(marks, &grid);
         let (mut facets, populated) = render::prepare_facets(

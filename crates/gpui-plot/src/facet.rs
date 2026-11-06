@@ -227,17 +227,27 @@ impl Grid {
         fy: Option<&crate::table::Channel>,
     ) -> Vec<Vec<crate::table::Table>> {
         let mut groups: Vec<Vec<crate::table::Table>> = vec![Vec::new(); self.cells.len()];
+        // The facets each pair of keys lands in, in the grid's order. An axis
+        // without a channel is a wildcard (`None`), matching every facet
+        // along it; with one, only facets keyed on that axis can match.
+        type CellKey = (Option<ValueKey>, Option<ValueKey>);
+        let mut lookup: rustc_hash::FxHashMap<CellKey, Vec<usize>> = Default::default();
+        for (index, cell) in self.cells.iter().enumerate() {
+            let side =
+                |channel: Option<&crate::table::Channel>, have: &Option<ValueKey>| match channel {
+                    None => Some(None),
+                    Some(_) => have.clone().map(Some),
+                };
+            if let (Some(x), Some(y)) = (side(fx, &cell.x), side(fy, &cell.y)) {
+                lookup.entry((x, y)).or_default().push(index);
+            }
+        }
         for row in data.rows() {
             let key = |channel: Option<&crate::table::Channel>| {
-                channel.map(|channel| Some(channel.read(row).key()))
+                channel.map(|channel| channel.read(row).key())
             };
-            let (x, y) = (key(fx), key(fy));
-            for (index, cell) in self.cells.iter().enumerate() {
-                let fits = |want: &Option<Option<ValueKey>>, have: &Option<ValueKey>| match want {
-                    None => true,
-                    Some(key) => key.as_ref() == have.as_ref() && key.is_some(),
-                };
-                if fits(&x, &cell.x) && fits(&y, &cell.y) {
+            if let Some(cells) = lookup.get(&(key(fx), key(fy))) {
+                for &index in cells {
                     groups[index].push(row.clone());
                 }
             }
