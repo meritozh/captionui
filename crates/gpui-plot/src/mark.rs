@@ -10,7 +10,7 @@ use gpui::{Hsla, SharedString};
 use crate::style::{ColorChannel, NumberChannel, Symbol};
 use crate::table::{Channel, IntoChannel};
 use crate::transform::{
-    Anchor, Dodge, GroupReducer, Reducer, Selector, StackOffset, Thresholds, WindowReducer,
+    Anchor, Dodge, GroupReducer, Mapper, Reducer, Selector, StackOffset, Thresholds, WindowReducer,
 };
 
 /// The mark types this library draws, matching Plot's mark set.
@@ -1149,6 +1149,9 @@ pub struct Mark {
     pub select: Option<SelectConfig>,
     /// Write a computed value into a new field, Plot's `mapX`/`mapY`.
     pub map: Option<MapConfig>,
+    /// The channels Plot's `map` transform rewrites, in order: `mapX`,
+    /// `mapY` or `map({channel: mapper})`.
+    pub maps: Vec<(MapTarget, Mapper)>,
     /// Move a field by an offset, Plot's `shiftX`/`shiftY`.
     pub shift: Option<ShiftConfig>,
     /// Draw the rows in a shuffled order, Plot's `shuffle`.
@@ -1534,6 +1537,21 @@ pub enum MapReducer {
     Rank,
 }
 
+/// The channels a [`Mapper`] rewrites.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MapTarget {
+    /// Plot's `mapX`: each of `x`, `x1` and `x2` the mark has (`x`, the
+    /// datum itself, when it has none).
+    X,
+    /// Plot's `mapY`: each of `y`, `y1` and `y2` the mark has.
+    Y,
+    /// One named channel, Plot's `map({name: mapper})`: a position (`x`,
+    /// `x1`, `x2`, `y`, `y1`, `y2`), `fill`, `stroke`, `r` or `opacity`. An
+    /// interval end the mark lacks reads its axis's channel, Plot's
+    /// `maybeInput`.
+    Channel(SharedString),
+}
+
 /// A [`Mark::shift`] configuration, Plot's `shiftX`/`shiftY`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShiftConfig {
@@ -1632,6 +1650,7 @@ impl Mark {
             title: None,
             select: None,
             map: None,
+            maps: Vec::new(),
             shift: None,
             shuffle: None,
             length: None,
@@ -2670,6 +2689,25 @@ impl Mark {
         self
     }
 
+    /// Map the mark's x channels, Plot's `mapX(mapper)`, per `z` series.
+    pub fn map_x(mut self, mapper: Mapper) -> Self {
+        self.maps.push((MapTarget::X, mapper));
+        self
+    }
+
+    /// Map the mark's y channels, Plot's `mapY(mapper)`, per `z` series.
+    pub fn map_y(mut self, mapper: Mapper) -> Self {
+        self.maps.push((MapTarget::Y, mapper));
+        self
+    }
+
+    /// Map one of the mark's channels, Plot's `map({name: mapper})`, per `z`
+    /// series.
+    pub fn map_channel(mut self, name: impl Into<SharedString>, mapper: Mapper) -> Self {
+        self.maps.push((MapTarget::Channel(name.into()), mapper));
+        self
+    }
+
     /// Move the mark's value by an offset, Plot's `shiftX`/`shiftY`.
     pub fn shift(
         mut self,
@@ -3623,6 +3661,24 @@ macro_rules! mark_builder {
             /// Restart the mark's fold at each series.
             pub fn map_group(mut self, group: impl Into<SharedString>) -> Self {
                 self.0 = self.0.map_group(group);
+                self
+            }
+
+            /// Map the mark's x channels, Plot's `mapX(mapper)`.
+            pub fn map_x(mut self, mapper: Mapper) -> Self {
+                self.0 = self.0.map_x(mapper);
+                self
+            }
+
+            /// Map the mark's y channels, Plot's `mapY(mapper)`.
+            pub fn map_y(mut self, mapper: Mapper) -> Self {
+                self.0 = self.0.map_y(mapper);
+                self
+            }
+
+            /// Map one of the mark's channels, Plot's `map({name: mapper})`.
+            pub fn map_channel(mut self, name: impl Into<SharedString>, mapper: Mapper) -> Self {
+                self.0 = self.0.map_channel(name, mapper);
                 self
             }
 

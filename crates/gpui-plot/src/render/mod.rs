@@ -434,6 +434,18 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
                 .map(|(row, value)| row.with(&config.output, value)),
         );
     }
+    // Plot's `map` transform: each mapped channel's values, per `z` series,
+    // land on the record under `$map:<channel>`, which the channel then
+    // reads. The mark keeps its original channels for its labels.
+    let mapped;
+    let (mark, channels) = if mark.maps.is_empty() {
+        (mark, channels)
+    } else {
+        let (data, with_maps) = apply_maps(&source, mark);
+        source = data;
+        mapped = with_maps;
+        (&mapped, &mapped.channels)
+    };
     if let Some(config) = &mark.shift {
         source = transform::shift(&source, &config.input, &config.output, config.offset);
     }
@@ -1295,6 +1307,151 @@ fn apply_sort(rows: &mut [PreparedRow], mark: &Mark) {
     if sort.reverse {
         rows.reverse();
     }
+}
+
+/// Plot's `map` transform over the mark's records: each target channel's
+/// values are mapped per `z` series and written under `$map:<channel>`,
+/// and the returned mark reads them there.
+fn apply_maps(source: &Dataset, mark: &Mark) -> (Dataset, Mark) {
+    use crate::mark::MapTarget;
+    use crate::style::{ColorChannel, NumberChannel};
+    use crate::table::Channel;
+    let mut mark = mark.clone();
+    let mut rows: Vec<Table> = source.rows().to_vec();
+    // The series a map restarts at: Plot's `maybeZ`, the `z` channel (which
+    // a color field implies).
+    let mut series: Vec<(Value, Vec<usize>)> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let key = mark
+            .channels
+            .z
+            .as_ref()
+            .map(|z| z.read(row))
+            .unwrap_or(Value::Null);
+        match series.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, members)) => members.push(index),
+            None => series.push((key, vec![index])),
+        }
+    }
+    let maps = std::mem::take(&mut mark.maps);
+    // Plot reads every input before it writes any output.
+    let inputs = mark.channels.clone();
+    for (target, mapper) in &maps {
+        // `mapX`/`mapY`: the axis's channels the mark has, else the datum.
+        let names: Vec<&str> = match target {
+            MapTarget::X | MapTarget::Y => {
+                let (names, slots) = if *target == MapTarget::X {
+                    (["x", "x1", "x2"], [&inputs.x, &inputs.x1, &inputs.x2])
+                } else {
+                    (["y", "y1", "y2"], [&inputs.y, &inputs.y1, &inputs.y2])
+                };
+                let present: Vec<&str> = names
+                    .iter()
+                    .zip(slots)
+                    .filter(|(_, slot)| slot.is_some())
+                    .map(|(name, _)| *name)
+                    .collect();
+                if present.is_empty() {
+                    vec![names[0]]
+                } else {
+                    present
+                }
+            }
+            MapTarget::Channel(name) => vec![name.as_ref()],
+        };
+        for name in names {
+            let c = &inputs;
+            // Plot's `maybeInput`: an interval end the mark lacks reads its
+            // axis's channel.
+            let position = |own: &Option<Channel>, axis: &Option<Channel>| {
+                own.clone().or_else(|| axis.clone())
+            };
+            let position = match name {
+                "x" => Some(c.x.clone().unwrap_or_else(Channel::identity)),
+                "y" => Some(c.y.clone().unwrap_or_else(Channel::identity)),
+                "x1" | "x2" => position(if name == "x1" { &c.x1 } else { &c.x2 }, &c.x),
+                "y1" | "y2" => position(if name == "y1" { &c.y1 } else { &c.y2 }, &c.y),
+                _ => None,
+            };
+            let color = match name {
+                "fill" => c.fill.as_ref(),
+                "stroke" => c.stroke.as_ref(),
+                _ => None,
+            }
+            .filter(|ch| ch.scaled_value(&Table::empty()).is_some());
+            let number = match name {
+                "r" => c.r.as_ref(),
+                "opacity" => c.opacity.as_ref(),
+                _ => None,
+            }
+            .filter(|ch| ch.is_scaled());
+            let values: Vec<Value> = if let Some(channel) = position {
+                rows.iter().map(|row| channel.read(row)).collect()
+            } else if let Some(channel) = color {
+                rows.iter()
+                    .map(|row| channel.scaled_value(row).unwrap_or(Value::Null))
+                    .collect()
+            } else if let Some(channel) = number {
+                rows.iter()
+                    .map(|row| channel.data_value(row).map_or(Value::Null, Value::number))
+                    .collect()
+            } else {
+                // Plot throws on a missing channel; a constant has nothing
+                // to map.
+                continue;
+            };
+            let field: SharedString = format!("$map:{name}").into();
+            let mut output = vec![Value::Null; rows.len()];
+            for (_, members) in &series {
+                let series_values: Vec<Value> =
+                    members.iter().map(|&i| values[i].clone()).collect();
+                for (&i, value) in members
+                    .iter()
+                    .zip(transform::map_values(&series_values, mapper))
+                {
+                    output[i] = value;
+                }
+            }
+            for (row, value) in rows.iter_mut().zip(output) {
+                *row = std::mem::take(row).with(&field, value);
+            }
+            let c = &mut mark.channels;
+            match name {
+                "x" => c.x = Some(Channel::Field(field)),
+                "x1" => c.x1 = Some(Channel::Field(field)),
+                "x2" => c.x2 = Some(Channel::Field(field)),
+                "y" => c.y = Some(Channel::Field(field)),
+                "y1" => c.y1 = Some(Channel::Field(field)),
+                "y2" => c.y2 = Some(Channel::Field(field)),
+                "fill" => c.fill = Some(ColorChannel::Field(field)),
+                "stroke" => c.stroke = Some(ColorChannel::Field(field)),
+                "r" => c.r = Some(NumberChannel::Field(field)),
+                _ => c.opacity = Some(NumberChannel::Field(field)),
+            }
+        }
+    }
+    // Plot's `maybeStackY`/`maybeStackX`: an interval mark given an
+    // interval end draws `y1`–`y2` (the missing end from `y`) and drops `y`,
+    // so `areaY(map({y1, y2}, {y}))` draws the band alone.
+    let c = &mut mark.channels;
+    match mark.kind {
+        MarkKind::BarY | MarkKind::AreaY | MarkKind::RectY | MarkKind::WaffleY
+            if c.y.is_some() && (c.y1.is_some() || c.y2.is_some()) =>
+        {
+            let y = c.y.take();
+            c.y1 = c.y1.take().or_else(|| y.clone());
+            c.y2 = c.y2.take().or(y);
+        }
+        MarkKind::BarX | MarkKind::AreaX | MarkKind::RectX | MarkKind::WaffleX
+            if c.x.is_some() && (c.x1.is_some() || c.x2.is_some()) =>
+        {
+            let x = c.x.take();
+            c.x1 = c.x1.take().or_else(|| x.clone());
+            c.x2 = c.x2.take().or(x);
+        }
+        _ => {}
+    }
+    (Dataset::new(rows), mark)
 }
 
 fn apply_window(mark: &Mark, rows: &mut [PreparedRow]) {
@@ -2707,6 +2864,46 @@ mod transform_order_tests {
                 &Value::Number(3.),
                 &Value::Number(6.),
                 &Value::Number(10.)
+            ]
+        );
+    }
+
+    #[test]
+    fn map_y_restarts_per_series_and_window_reads_it() {
+        // Plot's `windowY(2, mapY("cumsum", {x, y: "v", z: "g"}))`: the sum
+        // restarts per `g`, and the window runs over the mapped values.
+        let mark = Mark::new(MarkKind::Line)
+            .x("x")
+            .y("v")
+            .z("g")
+            .map_y(transform::Mapper::Cumsum);
+        let data = Dataset::new(nums(&[1., 2., 3., 4.]));
+        let rows = &prepare(&data, std::slice::from_ref(&mark))[0].rows;
+        let ys: Vec<Option<f64>> = rows.iter().map(|r| r.y_value().as_number()).collect();
+        assert_eq!(ys, vec![Some(1.), Some(2.), Some(4.), Some(6.)]);
+        let windowed = mark.window(2, WindowReducer::Sum, Anchor::End);
+        let rows = &prepare(&data, &[windowed])[0].rows;
+        let ys: Vec<Option<f64>> = rows.iter().map(|r| r.y_value().as_number()).collect();
+        assert_eq!(ys, vec![Some(1.), Some(2.), Some(5.), Some(8.)]);
+    }
+
+    #[test]
+    fn mapped_interval_ends_replace_an_area_y() {
+        // `areaY(map({y1, y2}, {y: "v"}))` draws the band and drops `y`.
+        let mark = Mark::new(MarkKind::AreaY)
+            .x("x")
+            .y("v")
+            .map_channel("y1", transform::Mapper::Rank)
+            .map_channel("y2", transform::Mapper::Cumsum);
+        let prepared = &prepare(&Dataset::new(nums(&[1., 2., 3.])), &[mark])[0];
+        assert!(prepared.mark.channels.y.is_none());
+        let bands: Vec<_> = prepared.rows.iter().map(PreparedRow::y_interval).collect();
+        assert_eq!(
+            bands,
+            vec![
+                Some((Value::Number(0.), Value::Number(1.))),
+                Some((Value::Number(1.), Value::Number(3.))),
+                Some((Value::Number(2.), Value::Number(6.))),
             ]
         );
     }

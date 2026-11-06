@@ -3,6 +3,7 @@
 use chrono::NaiveDate;
 
 use crate::prelude::*;
+use gpui_plot::Mapper;
 
 pub fn examples() -> Vec<Example> {
     vec![
@@ -18,30 +19,6 @@ pub fn examples() -> Vec<Example> {
 const N: usize = 20;
 const K: f32 = 2.;
 
-/// `Plot.mapY(Plot.bollinger({n, k}), {y: "Close"})`: each close replaced by
-/// the band's edge over the trailing `n` closes, the mean plus `k` standard
-/// deviations, or missing until the window fills.
-fn bollinger_band(data: &Dataset, n: usize, k: f64) -> Dataset {
-    let closes: Vec<f64> = data.rows().iter().map(|d| d.num("Close")).collect();
-    data.rows()
-        .iter()
-        .enumerate()
-        .map(|(i, d)| {
-            let band = if i + 1 < n {
-                f64::NAN
-            } else {
-                let window = &closes[i + 1 - n..=i];
-                let mean = window.iter().sum::<f64>() / n as f64;
-                // d3.deviation: the sample standard deviation.
-                let variance =
-                    window.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
-                mean + k * variance.sqrt()
-            };
-            d.clone().with("band", Value::number(band))
-        })
-        .collect()
-}
-
 fn date(year: i32, month: u32, day: u32) -> Value {
     Value::date(NaiveDate::from_ymd_opt(year, month, day).expect("a valid date"))
 }
@@ -55,24 +32,25 @@ fn e01() -> Plot {
         .plot()
 }
 
+/// `Plot.mapY(Plot.bollinger({n: 20, k: ±2}), {x: "Date", y: "Close"})`:
+/// each close replaced by the band's edge.
 fn e02() -> Plot {
-    let aapl = data::aapl();
-    // `Plot.mapY(Plot.bollinger(...))` has no map form: the bands are
-    // computed into a field first.
     Plot::plot()
         .mark(
-            line_y(bollinger_band(&aapl, 20, -2.))
+            line_y(data::aapl())
                 .x("Date")
-                .y("band")
+                .y("Close")
+                .map_y(Mapper::bollinger(20, -2.))
                 .stroke("red"),
         )
         .mark(
-            line_y(bollinger_band(&aapl, 20, 2.))
+            line_y(data::aapl())
                 .x("Date")
-                .y("band")
+                .y("Close")
+                .map_y(Mapper::bollinger(20, 2.))
                 .stroke("green"),
         )
-        .mark(line_y(aapl).x("Date").y("Close"))
+        .mark(line_y(data::aapl()).x("Date").y("Close"))
 }
 
 fn e03() -> Plot {
