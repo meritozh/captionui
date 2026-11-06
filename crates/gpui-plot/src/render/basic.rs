@@ -1552,11 +1552,13 @@ fn draw_tree(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     });
 }
 
-/// Draw an image mark's rows, each painting the mark's image at its position.
+/// Plot's `image` reads an `src` per row; here the mark carries one
+/// [`gpui::RenderImage`] shared across its rows.
 ///
-/// Plot's `image` reads an `src` and paints it with a `width`/`height`; here
-/// the mark carries one [`gpui::RenderImage`] shared across its rows, and each
-/// row draws it at its scaled position with the image's own size.
+/// Plot's `image`: each row's image centred on its position in a box
+/// `width` × `height` pixels (16 by default, each defaulting to the other),
+/// or a circle of radius `r`, fit to the box by `preserveAspectRatio`
+/// (`xMidYMid meet` by default; `slice` covers the box and crops).
 fn draw_image(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let Some(image) = prepared.mark.image.clone() else {
         return;
@@ -1564,30 +1566,80 @@ fn draw_image(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     if prepared.rows.is_empty() {
         return;
     }
-    // The image's pixel size, once.
-    let size = image.size(0);
-    let pixel_size = gpui::size(px(size.width.0 as f32), px(size.height.0 as f32));
+    let style = &prepared.mark.style;
+    let natural = image.size(0);
+    let (natural_w, natural_h) = (natural.width.0 as f32, natural.height.0 as f32);
+    if natural_w <= 0. || natural_h <= 0. {
+        return;
+    }
+    let aspect = style.preserve_aspect_ratio.as_deref().unwrap_or("xMidYMid meet");
+    let mut words = aspect.split_whitespace();
+    let align = words.next().unwrap_or("xMidYMid");
+    let slice = words.next() == Some("slice");
+    // SVG's alignment: where the image sits along each axis of the box.
+    let along = |axis: &str| {
+        if align.contains(&format!("{axis}Min")) {
+            0.
+        } else if align.contains(&format!("{axis}Max")) {
+            1.
+        } else {
+            0.5
+        }
+    };
+    let (ax, ay) = (along("x"), along("y"));
+    let none = align == "none";
     ctx.clipped(|ctx| {
         for row in prepared.rows.iter() {
-            // The image sits at the row's scaled position, its top-left there.
-            let (Some(x), Some(y)) = (
-                ctx.frame.x.scale.position(row.x_value()),
-                ctx.frame.y.scale.position(row.y_value()),
-            ) else {
+            let Some(centre) = position(prepared, ctx, row) else {
                 continue;
             };
-            let origin = ctx.absolute(point(px(x), px(y)));
-            let bounds = Bounds::new(origin, pixel_size);
-            let image_bounds = Bounds::new(origin, pixel_size);
-            // `paint_image` returns a Result; a failure paints nothing.
-            let _ = ctx.window.paint_image(
-                bounds,
-                image_bounds,
-                Default::default(),
-                image.clone(),
-                0,
-                false,
+            let r = prepared
+                .mark
+                .channels
+                .r
+                .as_ref()
+                .map(|channel| channel.read(&row.row));
+            let (w, h) = match (r, style.image_size) {
+                (Some(r), _) => (r * 2., r * 2.),
+                (None, [Some(w), Some(h)]) => (w, h),
+                (None, [Some(s), None] | [None, Some(s)]) => (s, s),
+                (None, [None, None]) => (16., 16.),
+            };
+            if !(w > 0. && h > 0.) {
+                continue;
+            }
+            let at = ctx.absolute(centre);
+            let origin = point(
+                at.x + px(style.dx - w / 2.),
+                at.y + px(style.dy - h / 2.),
             );
+            let bounds = Bounds::new(origin, gpui::size(px(w), px(h)));
+            let image_bounds = if none {
+                bounds
+            } else {
+                let scale = if slice {
+                    (w / natural_w).max(h / natural_h)
+                } else {
+                    (w / natural_w).min(h / natural_h)
+                };
+                let (iw, ih) = (natural_w * scale, natural_h * scale);
+                Bounds::new(
+                    point(
+                        origin.x + px((w - iw) * ax),
+                        origin.y + px((h - ih) * ay),
+                    ),
+                    gpui::size(px(iw), px(ih)),
+                )
+            };
+            // Plot's `r` clips the image to a circle.
+            let corners = match r {
+                Some(r) => gpui::Corners::all(px(r)),
+                None => Default::default(),
+            };
+            // `paint_image` returns a Result; a failure paints nothing.
+            let _ = ctx
+                .window
+                .paint_image(bounds, image_bounds, corners, image.clone(), 0, false);
         }
     });
 }
@@ -2331,13 +2383,29 @@ pub fn y_values(prepared: &PreparedMark) -> Vec<Value> {
         .collect()
 }
 
-/// Plot's `tip`: a label at the datum the mark selects, drawn permanently so
-/// a chart can point at a value without a pointer.
+/// Plot's `tip`: a box around the row's text with a pointer at the datum,
+/// on the side `anchor` names or else the side that fits.
+///
+/// As in Plot, the box fills with the background and strokes in the
+/// foreground (a `fill` or `stroke` overrides either), the text reads in the
+/// foreground at `lineHeight` 1, wraps at `lineWidth` (20 ems), and sits
+/// `textPadding` (8px) inside the box, whose pointer is `pointerSize` (12px).
+/// Without a `title` (or text) the tip lists the row's channels as bold
+/// name, value pairs.
 fn draw_tips(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    use crate::mark::FrameAnchor as A;
+    let style = &prepared.mark.style;
     let font = gpui::font(ctx.theme.font_family.clone());
-    let size = ctx.theme.label_size;
-    let padding = 6.;
-    let gap = 10.;
+    let size = style.font_size.unwrap_or(ctx.theme.label_size.as_f32());
+    let r = style.text_padding.unwrap_or(8.);
+    let m = style.pointer_size.unwrap_or(12.);
+    let line_width = style.line_width.unwrap_or(20.);
+    let ink = ctx.theme.mark_color;
+    let defaults = crate::mark::MarkStyle::default();
+    let (figure_width, figure_height) = (
+        ctx.frame.bounds.size.width.as_f32(),
+        ctx.frame.bounds.size.height.as_f32(),
+    );
 
     // Tips are not clipped to the plot: a tip on the topmost point sits above
     // it, and Plot draws the whole label.
@@ -2345,82 +2413,221 @@ fn draw_tips(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         let Some(placed) = position(prepared, ctx, row) else {
             continue;
         };
-        let text = prepared
+        // Each line is an optional bold name and its value.
+        let mut lines: Vec<(Option<String>, String)> = Vec::new();
+        let title = prepared
             .mark
             .channels
             .text
             .as_ref()
-            .map(|channel| channel.read(&row.row).label())
-            .unwrap_or_else(|| row.y_value().label());
-        if text.is_empty() {
-            continue;
-        }
-        let fill = match &prepared.mark.channels.fill {
-            Some(channel) => ctx.colors.channel(channel, &row.row),
-            None => {
-                let color = prepared.mark.style.fill;
-                if color == crate::mark::MarkStyle::default().fill {
-                    ctx.theme.mark_color
-                } else {
-                    color
+            .or(prepared.mark.channels.title.as_ref());
+        if let Some(channel) = title {
+            let text = channel.read(&row.row);
+            if text.is_null() {
+                continue;
+            }
+            for line in text.label().split('\n') {
+                for wrapped in wrap(line, line_width, size, ctx.window, &font) {
+                    lines.push((None, wrapped));
                 }
             }
-        };
-        // The box takes the mark's color, so its label reads in whichever of
-        // the theme's two tooltip colors contrasts with it.
-        let ink = if contrast_ratio(fill, ctx.theme.tooltip_foreground)
-            >= contrast_ratio(fill, ctx.theme.tooltip_background)
-        {
-            ctx.theme.tooltip_foreground
         } else {
-            ctx.theme.tooltip_background
-        };
-        let label = Label::new(
-            text,
-            size,
-            ink,
-            gpui::FontWeight::MEDIUM,
-            font.clone(),
-            ctx.window,
-        );
-        let at = ctx.absolute(placed);
-        // Above the datum, or below it when the tip would run off the top.
-        let above = at.y - px(gap + size.as_f32() + padding * 2.);
-        let top = if above < ctx.frame.plot.origin.y {
-            at.y + px(gap)
-        } else {
-            above
-        };
-        let box_bounds = Bounds::new(
-            point(at.x - px(label.width.as_f32() / 2. + padding), top),
-            gpui::size(label.width + px(padding * 2.), size + px(padding * 2.)),
-        );
-        paint::paint_rect(box_bounds, 4., fill, ctx.window);
-        let text_at = point(
-            box_bounds.origin.x + px(padding),
-            box_bounds.origin.y + px(padding),
-        );
-        label.paint_at(text_at, TextAlign::Left, None, ctx.window, ctx.cx);
-    }
-}
-
-/// The WCAG contrast ratio between two colors' relative luminances, so a
-/// label can pick the ink that reads against the color behind it.
-fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
-    let (a, b) = (luminance(a), luminance(b));
-    (a.max(b) + 0.05) / (a.min(b) + 0.05)
-}
-
-fn luminance(color: Hsla) -> f32 {
-    let rgba = gpui::Rgba::from(color);
-    let channel = |value: f32| {
-        if value <= 0.03928 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
+            let channels = &prepared.mark.channels;
+            for (name, channel, value) in [
+                ("x", &channels.x, row.x_value()),
+                ("y", &channels.y, row.y_value()),
+            ] {
+                if channel.is_none() || value.is_null() {
+                    continue;
+                }
+                let label = match channel {
+                    Some(crate::table::Channel::Field(field)) => field.to_string(),
+                    _ => name.to_string(),
+                };
+                lines.push((Some(label), format!(" {}", value.label())));
+            }
         }
-    };
-    0.2126 * channel(rgba.r) + 0.7152 * channel(rgba.g) + 0.0722 * channel(rgba.b)
+        if lines.iter().all(|(l, v)| l.is_none() && v.is_empty()) {
+            continue;
+        }
+        let shaped: Vec<(Option<Label>, Label)> = lines
+            .into_iter()
+            .map(|(label, value)| {
+                let label = label.map(|label| {
+                    Label::new(
+                        label.into(),
+                        px(size),
+                        ink,
+                        gpui::FontWeight::BOLD,
+                        font.clone(),
+                        ctx.window,
+                    )
+                });
+                let value = Label::new(
+                    value.into(),
+                    px(size),
+                    ink,
+                    gpui::FontWeight::NORMAL,
+                    font.clone(),
+                    ctx.window,
+                );
+                (label, value)
+            })
+            .collect();
+        let n = shaped.len() as f32;
+        // The text's bounding box, rounded for crisp edges as Plot does: the
+        // lines sit one em apart, and the last carries its descent.
+        let w = shaped
+            .iter()
+            .map(|(label, value)| {
+                label.as_ref().map_or(0., |l| l.width.as_f32()) + value.width.as_f32()
+            })
+            .fold(0., f32::max)
+            .round();
+        let h = (size * (n - 1. + 1.15)).round();
+
+        let at = ctx.absolute(point(
+            px(placed.x.as_f32().round() + style.dx),
+            px(placed.y.as_f32().round() + style.dy),
+        ));
+        let anchor = style.tip_anchor.unwrap_or_else(|| {
+            let x = at.x.as_f32() - ctx.frame.bounds.origin.x.as_f32();
+            let y = at.y.as_f32() - ctx.frame.bounds.origin.y.as_f32();
+            let fit_left = x + w + m + r * 2. < figure_width;
+            let fit_right = x - w - m - r * 2. > 0.;
+            let fit_top = y + h + m + r * 2. < figure_height;
+            let fit_bottom = y - h - m - r * 2. > 0.;
+            match (fit_left && fit_right, fit_top && fit_bottom) {
+                (true, true) => A::Bottom,
+                (true, false) if fit_bottom => A::Bottom,
+                (true, false) => A::Top,
+                (false, true) if fit_left => A::Left,
+                (false, true) => A::Right,
+                _ if (fit_left || fit_right) && (fit_top || fit_bottom) => {
+                    match (fit_bottom, fit_left) {
+                        (true, true) => A::BottomLeft,
+                        (true, false) => A::BottomRight,
+                        (false, true) => A::TopLeft,
+                        (false, false) => A::TopRight,
+                    }
+                }
+                _ => A::Bottom,
+            }
+        });
+
+        // Plot's `getPath`, and its `getTextTranslate` for the text block.
+        let (bw, bh, m2) = (w + r * 2., h + r * 2., m / 2.);
+        let outline: Vec<(f32, f32)> = match anchor {
+            A::Middle => vec![
+                (-bw / 2., -bh / 2.),
+                (bw / 2., -bh / 2.),
+                (bw / 2., bh / 2.),
+                (-bw / 2., bh / 2.),
+            ],
+            A::TopLeft => vec![(0., 0.), (m2, m2), (bw, m2), (bw, m2 + bh), (0., m2 + bh)],
+            A::Top => vec![
+                (0., 0.),
+                (m2, m2),
+                (bw / 2., m2),
+                (bw / 2., m2 + bh),
+                (-bw / 2., m2 + bh),
+                (-bw / 2., m2),
+                (-m2, m2),
+            ],
+            A::TopRight => vec![(0., 0.), (-m2, m2), (-bw, m2), (-bw, m2 + bh), (0., m2 + bh)],
+            A::Right => vec![
+                (0., 0.),
+                (-m2, -m2),
+                (-m2, -bh / 2.),
+                (-m2 - bw, -bh / 2.),
+                (-m2 - bw, bh / 2.),
+                (-m2, bh / 2.),
+                (-m2, m2),
+            ],
+            A::BottomLeft => vec![(0., 0.), (m2, -m2), (bw, -m2), (bw, -m2 - bh), (0., -m2 - bh)],
+            A::Bottom => vec![
+                (0., 0.),
+                (m2, -m2),
+                (bw / 2., -m2),
+                (bw / 2., -m2 - bh),
+                (-bw / 2., -m2 - bh),
+                (-bw / 2., -m2),
+                (-m2, -m2),
+            ],
+            A::BottomRight => vec![
+                (0., 0.),
+                (-m2, -m2),
+                (-bw, -m2),
+                (-bw, -m2 - bh),
+                (0., -m2 - bh),
+            ],
+            A::Left => vec![
+                (0., 0.),
+                (m2, -m2),
+                (m2, -bh / 2.),
+                (m2 + bw, -bh / 2.),
+                (m2 + bw, bh / 2.),
+                (m2, bh / 2.),
+                (m2, m2),
+            ],
+        };
+        let (tx, ty) = match anchor {
+            A::Middle => (-w / 2., h / 2.),
+            A::TopLeft => (r, m2 + r),
+            A::Top => (-w / 2., m2 + r),
+            A::TopRight => (-w - r, m2 + r),
+            A::Right => (-m2 - w - r, h / 2.),
+            A::BottomLeft => (r, -m2 - r),
+            A::Bottom => (-w / 2., -m2 - r),
+            A::BottomRight => (-w - r, -m2 - r),
+            A::Left => (r + m2, h / 2.),
+        };
+        // Plot's `getLineOffset`: a top anchor hangs the first baseline 0.94em
+        // below the text's origin; every other anchor (its regex test is
+        // always truthy) rests the last baseline 0.29em above it.
+        let first_baseline = match anchor {
+            A::Top | A::TopLeft | A::TopRight => 0.94 * size,
+            _ => (-0.29 - n + 1.) * size,
+        };
+
+        let to_point = |(x, y): (f32, f32)| point(at.x + px(x), at.y + px(y));
+        let polygon: Vec<Point<Pixels>> = outline.iter().copied().map(to_point).collect();
+        let fill = match &prepared.mark.channels.fill {
+            Some(channel) => ctx.colors.channel(channel, &row.row),
+            None if style.fill != defaults.fill => style.fill,
+            None => ctx.theme.background,
+        };
+        let stroke = match &prepared.mark.channels.stroke {
+            Some(channel) => ctx.colors.channel(channel, &row.row),
+            None if style.stroke != defaults.stroke => style.stroke,
+            None => ink,
+        };
+        // Plot's `drop-shadow(0 3px 4px rgba(0,0,0,0.2))`, as stacked offsets
+        // that fade with distance.
+        for offset in 1..=4 {
+            let shadow: Vec<Point<Pixels>> = polygon
+                .iter()
+                .map(|p| point(p.x, p.y + px(offset as f32)))
+                .collect();
+            paint::paint_fill(&shadow, paint::alpha(Hsla::black(), 0.05), ctx.window);
+        }
+        paint::paint_fill(&polygon, fill, ctx.window);
+        let mut closed = polygon.clone();
+        closed.push(polygon[0]);
+        paint::paint_stroke(&closed, style.stroke_width.max(1.), stroke, ctx.window);
+
+        for (i, (label, value)) in shaped.iter().enumerate() {
+            let baseline = ty + first_baseline + i as f32 * size;
+            // A label's top sits about 0.85em above its baseline.
+            let top = at.y + px(baseline - 0.85 * size);
+            let mut left = at.x + px(tx);
+            if let Some(label) = label {
+                label.paint_at(point(left, top), TextAlign::Left, None, ctx.window, ctx.cx);
+                left += label.width;
+            }
+            value.paint_at(point(left, top), TextAlign::Left, None, ctx.window, ctx.cx);
+        }
+    }
 }
 
 /// Plot's `spike`: a triangle whose point sits at the datum, `length` tall.
@@ -2589,27 +2796,30 @@ fn draw_differences(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let line = ctx.default_stroke(prepared);
     let width = prepared.mark.style.stroke_width.max(1.);
 
-    // Each row is one position with two values: the point on the axis the
-    // mark runs along, and the two series' positions across it.
-    let placed: Vec<(f32, f32, f32)> = prepared
-        .rows
-        .iter()
-        .filter_map(|row| {
-            Some((
-                position_along(ctx, row, along_x)?,
-                position_across(ctx, row, along_x, true)?,
-                position_across(ctx, row, along_x, false)?,
-            ))
+    // Each series is two curves, each placed by its own channels: the first
+    // at (x1, y1) and the second at (x2, y2), so a `shiftX` compares a series
+    // with itself moved along x.
+    let curves: Vec<[Vec<(f32, f32)>; 2]> = series_groups(prepared)
+        .into_iter()
+        .map(|group| {
+            [true, false].map(|first| {
+                group
+                    .iter()
+                    .filter_map(|(_, row)| {
+                        Some((
+                            position_along_of(ctx, row, along_x, first)?,
+                            position_across(ctx, row, along_x, first)?,
+                        ))
+                    })
+                    .collect()
+            })
         })
         .collect();
 
-    // A span is positive where the second series is the larger one. The two
-    // axes invert differently on screen: a larger value sits *higher* on y and
-    // further right on x, so the comparison flips with the axis.
-    let sign =
-        |(_, first, second): &(f32, f32, f32)| difference_is_positive(along_x, *first, *second);
-
     let origin = ctx.frame.plot.origin;
+    // Plot clips the difference's line to the frame (`clip: true`).
+    let clip = ctx.clip;
+    ctx.clip = true;
     ctx.clipped(|ctx| {
         let at = |along: f32, across: f32| {
             origin
@@ -2619,38 +2829,130 @@ fn draw_differences(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                     point(px(across), px(along))
                 }
         };
-
-        // Consecutive spans of one sign are one area, so a run of them fills as
-        // a single path: filling each span on its own leaves a seam where two
-        // quads meet.
-        let mut start = 0;
-        while start + 1 < placed.len() {
-            let positive_run = sign(&placed[start + 1]);
-            let mut end = start + 1;
-            while end + 1 < placed.len() && sign(&placed[end + 1]) == positive_run {
-                end += 1;
+        for [first, second] in &curves {
+            // Plot clips each curve's area by the other's, so the fills cover
+            // only where both curves run, split where they cross.
+            for (along, a, b, positive_run) in difference_spans(first, second, along_x) {
+                let color = if positive_run { positive } else { negative };
+                let mut polygon: Vec<Point<Pixels>> =
+                    along.iter().zip(&a).map(|(t, v)| at(*t, *v)).collect();
+                polygon.extend(along.iter().zip(&b).rev().map(|(t, v)| at(*t, *v)));
+                paint::paint_fill(&polygon, color, ctx.window);
             }
-            let color = if positive_run { positive } else { negative };
-            let mut polygon: Vec<Point<Pixels>> = (start..=end)
-                .map(|index| at(placed[index].0, placed[index].1))
-                .collect();
-            polygon.extend(
-                (start..=end)
-                    .rev()
-                    .map(|index| at(placed[index].0, placed[index].2)),
-            );
-            paint::paint_fill(&polygon, color, ctx.window);
-            start = end;
+            // The second series' line runs over the areas, as one path so it
+            // has no breaks at the sign changes.
+            let line_path: Vec<Point<Pixels>> = second.iter().map(|(t, v)| at(*t, *v)).collect();
+            paint::paint_stroke(&line_path, width, line, ctx.window);
         }
-
-        // The second series' line runs over the areas, as one path so it has no
-        // breaks at the sign changes.
-        let line_path: Vec<Point<Pixels>> = placed
-            .iter()
-            .map(|(along, _, second)| at(*along, *second))
-            .collect();
-        paint::paint_stroke(&line_path, width, line, ctx.window);
     });
+    ctx.clip = clip;
+}
+
+/// The runs of one sign between two piecewise-linear curves, each a list of
+/// `(along, across)` pixels: for each run, its along positions, the first and
+/// second curves' across positions there, and whether the second is the
+/// larger value. Both curves are sampled at every vertex of either within
+/// the span they share, and a crossing splits a run.
+#[allow(clippy::type_complexity)]
+fn difference_spans(
+    first: &[(f32, f32)],
+    second: &[(f32, f32)],
+    along_x: bool,
+) -> Vec<(Vec<f32>, Vec<f32>, Vec<f32>, bool)> {
+    let sorted = |curve: &[(f32, f32)]| {
+        let mut curve = curve.to_vec();
+        curve.sort_by(|a, b| a.0.total_cmp(&b.0));
+        curve
+    };
+    let (first, second) = (sorted(first), sorted(second));
+    let (Some(f0), Some(s0), Some(f1), Some(s1)) =
+        (first.first(), second.first(), first.last(), second.last())
+    else {
+        return Vec::new();
+    };
+    let (lo, hi) = (f0.0.max(s0.0), f1.0.min(s1.0));
+    if hi <= lo {
+        return Vec::new();
+    }
+    let sample = |curve: &[(f32, f32)], t: f32| -> f32 {
+        let i = curve.partition_point(|p| p.0 < t);
+        if i == 0 {
+            return curve[0].1;
+        }
+        if i >= curve.len() {
+            return curve[curve.len() - 1].1;
+        }
+        let (a, b) = (curve[i - 1], curve[i]);
+        if b.0 == a.0 {
+            b.1
+        } else {
+            a.1 + (b.1 - a.1) * (t - a.0) / (b.0 - a.0)
+        }
+    };
+    let mut ts: Vec<f32> = first
+        .iter()
+        .chain(&second)
+        .map(|p| p.0)
+        .filter(|t| *t >= lo && *t <= hi)
+        .chain([lo, hi])
+        .collect();
+    ts.sort_by(f32::total_cmp);
+    ts.dedup();
+    let sign = |a: f32, b: f32| difference_is_positive(along_x, a, b);
+    type Run = (Vec<f32>, Vec<f32>, Vec<f32>, bool);
+    let mut runs: Vec<Run> = Vec::new();
+    let push = |t: f32, a: f32, b: f32, positive: bool, runs: &mut Vec<Run>| {
+        match runs.last_mut() {
+            Some((along, va, vb, p)) if *p == positive => {
+                along.push(t);
+                va.push(a);
+                vb.push(b);
+            }
+            _ => runs.push((vec![t], vec![a], vec![b], positive)),
+        }
+    };
+    let mut previous: Option<(f32, f32, f32)> = None;
+    for &t in &ts {
+        let (a, b) = (sample(&first, t), sample(&second, t));
+        if let Some((pt, pa, pb)) = previous {
+            let (d0, d1) = (pb - pa, b - a);
+            if d0 * d1 < 0. {
+                // The curves cross: both runs meet at the crossing.
+                let u = d0 / (d0 - d1);
+                let (ct, cv) = (pt + (t - pt) * u, pa + (a - pa) * u);
+                let before = sign(pa, pb);
+                push(ct, cv, cv, before, &mut runs);
+                push(ct, cv, cv, !before, &mut runs);
+            }
+        }
+        // A tie takes the sign of the run it continues.
+        let positive = if a == b {
+            runs.last().is_some_and(|r| r.3)
+        } else {
+            sign(a, b)
+        };
+        push(t, a, b, positive, &mut runs);
+        previous = Some((t, a, b));
+    }
+    runs.retain(|run| run.0.len() >= 2);
+    runs
+}
+
+/// A row's first or second position along the axis a difference runs along:
+/// its `x1` or `x2` (for a `differenceY`), else its `x`.
+fn position_along_of(
+    ctx: &DrawContext<'_>,
+    row: &PreparedRow,
+    along_x: bool,
+    first: bool,
+) -> Option<f32> {
+    let (one, two, value, scale) = if along_x {
+        (&row.x1, &row.x2, row.x_value(), &ctx.frame.x.scale)
+    } else {
+        (&row.y1, &row.y2, row.y_value(), &ctx.frame.y.scale)
+    };
+    let chosen = if first { one } else { two };
+    scale.position(chosen.as_ref().unwrap_or(value))
 }
 
 /// Whether a difference span's second series is the larger one, given both
@@ -2663,15 +2965,6 @@ fn difference_is_positive(along_x: bool, first: f32, second: f32) -> bool {
         second < first
     } else {
         second > first
-    }
-}
-
-/// A row's position along the axis a difference mark runs along.
-fn position_along(ctx: &DrawContext<'_>, row: &PreparedRow, along_x: bool) -> Option<f32> {
-    if along_x {
-        ctx.frame.x.scale.position(row.x_value())
-    } else {
-        ctx.frame.y.scale.position(row.y_value())
     }
 }
 

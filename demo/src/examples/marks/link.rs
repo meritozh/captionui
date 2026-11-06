@@ -51,21 +51,50 @@ fn e01() -> Plot {
 
 /// `Plot.treeLink` and `Plot.treeNode` are not separate transforms here: the
 /// `tree` mark draws the same links, nodes and labels in one.
+/// ```js
+/// Plot.plot({axis: null, height: 120, inset: 20, insetRight: 120, marks: [
+///   Plot.link(gods, Plot.treeLink({stroke: "node:internal"})),
+///   Plot.dot(gods, Plot.treeNode({fill: "node:internal"})),
+///   Plot.text(gods, Plot.treeNode({text: "node:name", stroke: "var(--vp-c-bg)", fill: "currentColor", dx: 6}))
+/// ]})
+/// ```
 fn e02() -> Plot {
-    let gods = Dataset::values_of([
-        "Chaos/Gaia/Mountains",
-        "Chaos/Gaia/Pontus",
-        "Chaos/Gaia/Uranus",
-        "Chaos/Eros",
-        "Chaos/Erebus",
-        "Chaos/Tartarus",
-    ]);
+    let gods = || {
+        Dataset::values_of(
+            [
+                "Chaos/Gaia/Mountains",
+                "Chaos/Gaia/Pontus",
+                "Chaos/Gaia/Uranus",
+                "Chaos/Eros",
+                "Chaos/Erebus",
+                "Chaos/Tartarus",
+            ]
+            .map(Value::text),
+        )
+    };
     Plot::plot()
         .no_axes()
         .height(120.)
         .inset(20.)
-        .margin_right(120.)
-        .mark(tree(gods).path(Channel::identity()))
+        .inset_right(120.)
+        .mark(
+            link(gods())
+                .tree_link(TreeSpec::default())
+                .stroke("node:internal"),
+        )
+        .mark(
+            dot(gods())
+                .tree_node(TreeSpec::default())
+                .fill("node:internal"),
+        )
+        .mark(
+            text(gods())
+                .tree_node(TreeSpec::default())
+                .text(Channel::Field("node:name".into()))
+                .text_stroke("white")
+                .fill("currentColor")
+                .dx(6.),
+        )
 }
 
 fn e03() -> Plot {

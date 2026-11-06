@@ -98,6 +98,23 @@ pub fn color_scale(
     values: &[Value],
     options: &ScaleOptions,
 ) -> Option<ColorScale> {
+    // A `currentColor` in the range reads as the theme's foreground.
+    let resolved;
+    let options = match &options.colors {
+        Some(colors) if colors.contains(&crate::css::CURRENT_COLOR) => {
+            resolved = ScaleOptions {
+                colors: Some(
+                    colors
+                        .iter()
+                        .map(|&c| if c == crate::css::CURRENT_COLOR { theme.mark_color } else { c })
+                        .collect(),
+                ),
+                ..options.clone()
+            };
+            &resolved
+        }
+        _ => options,
+    };
     let explicit: Option<Vec<Value>> = options.domain.clone();
     let sample = explicit.as_ref().map_or(values, |domain| domain.as_slice());
     if sample.is_empty() && options.r#type.is_none() {
@@ -133,6 +150,30 @@ pub fn color_scale(
                 }
             };
             let k = domain.len().max(1);
+            // Plot's `maybeBooleanRange`: an all-boolean domain maps false to
+            // the low and true to the high color of a two-color scheme, greys
+            // by default (ColorBrewer's three greys, favoring the darker two).
+            let all_boolean = explicit.is_none()
+                && options.colors.is_none()
+                && !values.is_empty()
+                && values.iter().all(|value| matches!(value, Value::Bool(_)));
+            if all_boolean {
+                let [f, t] = match options.scheme.as_deref() {
+                    None => [0xbdbdbd, 0x636363].map(crate::scale::hsla_from_hex),
+                    Some(scheme) => {
+                        let two = crate::css::discrete(scheme, 2).unwrap_or_default();
+                        [0, 1].map(|i| two.get(i).copied().unwrap_or(theme.mark_color))
+                    }
+                };
+                // The domain's keys, sorted, put false before true.
+                let has = |b: bool| values.contains(&Value::Bool(b));
+                let colors = [(false, f), (true, t)]
+                    .into_iter()
+                    .filter(|(b, _)| has(*b))
+                    .map(|(_, color)| color)
+                    .collect();
+                return Some(ColorScale::ordinal(domain, colors).with_unknown(unknown));
+            }
             let colors = match (&options.colors, &options.scheme) {
                 (Some(colors), _) => colors.clone(),
                 (None, Some(scheme)) => {

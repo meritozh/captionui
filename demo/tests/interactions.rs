@@ -41,7 +41,24 @@ fn sweeping_the_pointer_across_every_example_does_not_error() {
     // its own tests do so a raw TestAppContext has a theme.
     cx.update(gpui_kit::init);
 
+    // `SWEEP_FILTER=a,b` limits the sweep to examples whose id contains one;
+    // `SWEEP_SKIP=a,b` leaves out those whose id contains one.
+    let filter = std::env::var("SWEEP_FILTER").ok();
+    let skip = std::env::var("SWEEP_SKIP").ok();
     for example in &examples {
+        if let Some(filter) = &filter
+            && !filter.split(',').any(|f| example.id().contains(f))
+        {
+            continue;
+        }
+        if let Some(skip) = &skip
+            && skip.split(',').any(|f| example.id().contains(f))
+        {
+            continue;
+        }
+        if std::env::var("SWEEP_TRACE").is_ok() {
+            eprintln!("sweep {}", example.id());
+        }
         // Open a window holding just this example's plot.
         let build = example.build;
         let (_, window) = cx.add_window_view(|_, _| Host { build });

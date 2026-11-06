@@ -191,6 +191,17 @@ pub fn prepare_facets(
         let groups = grid.partition_channels(source, mark_fx.as_ref(), mark_fy.as_ref());
         for (cell, rows) in groups.into_iter().enumerate() {
             populated[cell] |= !rows.is_empty();
+            // A furniture mark's placeholder landed in another facet: this
+            // one draws nothing (an empty dataset would read a placeholder).
+            if rows.is_empty()
+                && std::ptr::eq(source, &placeholder)
+                && (mark.fx.is_some() || mark.fy.is_some())
+            {
+                let mut empty = prepare_mark(&placeholder, mark);
+                empty.rows.clear();
+                prepared[cell].push(empty);
+                continue;
+            }
             prepared[cell].push(prepare_mark(&Dataset::new(rows), mark));
         }
     }
@@ -784,7 +795,8 @@ pub fn apply_hexbin(facets: &mut [Vec<PreparedMark>], frame: &Frame) {
         };
         let dx = width as f64;
         let dy = dx * 1.5 / 3f64.sqrt();
-        let mut bins: Vec<((Option<crate::value::ValueKey>, i64, i64), Vec<usize>)> = Vec::new();
+        type Bins = Vec<((Option<crate::value::ValueKey>, i64, i64), Vec<usize>)>;
+        let mut bins: Bins = Vec::new();
         for (index, row) in prepared.rows.iter().enumerate() {
             let Some(p) = crate::render::basic::position_in(prepared, frame, row) else {
                 continue;
@@ -916,7 +928,10 @@ pub fn apply_dodge(prepared: &mut [PreparedMark], frame: &Frame) {
         // The dodge packs along the axis the mark's data varies on, and writes
         // the offset across it: a `dotX` varies on x and spreads vertically,
         // a `dotY` varies on y and spreads horizontally.
-        let along_x = mark.mark.kind.is_x_only();
+        // A mark with only an x (Plot's `dodgeY` on an image or dot) varies
+        // on x too.
+        let along_x = mark.mark.kind.is_x_only()
+            || (mark.mark.channels.x.is_some() && mark.mark.channels.y.is_none());
         // The positions come from the axis the data varies on; the packed
         // offsets land on the *other* axis, so the extent is that one's.
         let (scale, extent) = if along_x {
@@ -1026,12 +1041,13 @@ fn derive_intervals(
     match mark.kind {
         MarkKind::RuleX => optional_zero(y, y1, y2),
         MarkKind::RuleY => optional_zero(x, x1, x2),
-        // Plot's difference compares y with zero when given only y.
-        MarkKind::DifferenceY if unset(y1, y2) && !y.is_null() => {
+        // Plot's difference compares y with zero when given only y and one
+        // x; with two x's (Plot's `shiftX`) it compares the two placements.
+        MarkKind::DifferenceY if unset(y1, y2) && unset(x1, x2) && !y.is_null() => {
             *y1 = Some(Value::Number(0.));
             *y2 = Some(y.clone());
         }
-        MarkKind::DifferenceX if unset(x1, x2) && !x.is_null() => {
+        MarkKind::DifferenceX if unset(x1, x2) && unset(y1, y2) && !x.is_null() => {
             *x1 = Some(Value::Number(0.));
             *x2 = Some(x.clone());
         }

@@ -229,7 +229,13 @@ impl ScaleOptions {
         self.colors = Some(
             colors
                 .into_iter()
-                .map(|c| crate::css::parse(c).unwrap_or_default())
+                .map(|c| {
+                    if c.eq_ignore_ascii_case("currentcolor") {
+                        crate::css::CURRENT_COLOR
+                    } else {
+                        crate::css::parse(c).unwrap_or_default()
+                    }
+                })
                 .collect(),
         );
         self

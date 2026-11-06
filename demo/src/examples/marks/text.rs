@@ -105,6 +105,7 @@ fn e03() -> Plot {
 /// `width: 240` has no counterpart: the timetable spans the full width.
 fn e04() -> Plot {
     Plot::plot()
+        .width(240.)
         .no_axes()
         .x(|x| x.type_name("point"))
         .y(|y| y.type_name("point").domain((4..25).map(|h| h as f64)))

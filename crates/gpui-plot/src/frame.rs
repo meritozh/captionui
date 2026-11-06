@@ -413,8 +413,9 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
     let temporal = inferred == PlotKind::Date || plot.r#type == Some(ScaleType::Utc);
     let range = pinned_range.unwrap_or(range);
     let range = [
-        range[0] + plot.inset_start.unwrap_or(0.) * range_sign(range) + inset * range_sign(range),
-        range[1] - plot.inset_end.unwrap_or(0.) * range_sign(range) - inset * range_sign(range),
+        // Plot's `insetLeft` (…) replaces the `inset` on its side.
+        range[0] + plot.inset_start.unwrap_or(inset) * range_sign(range),
+        range[1] - plot.inset_end.unwrap_or(inset) * range_sign(range),
     ];
     let range = if reverse { [range[1], range[0]] } else { range };
     // Plot's default tick density: one per 80 pixels across x, one per 35
@@ -994,15 +995,22 @@ pub(crate) fn paint_axes(
                 if tick.label.is_empty() {
                     continue;
                 }
-                let label = text(&tick.label, window);
                 let offset = style.tick_size.max(0.) + style.tick_padding;
-                let origin = point(edge + px(offset * direction), ty - label.height / 2.);
                 let align = if right {
                     TextAlign::Left
                 } else {
                     TextAlign::Right
                 };
-                label.paint_at(origin, align, None, window, cx);
+                // A label may run to several lines (`Jan\n2021`), centred on
+                // its tick as Plot's middle line anchor does.
+                let lines: Vec<&str> = tick.label.split('\n').collect();
+                let mut top = ty - size * lines.len() as f32 / 2.;
+                for line in lines {
+                    let label = text(&line.to_string().into(), window);
+                    let origin = point(edge + px(offset * direction), top);
+                    label.paint_at(origin, align, None, window, cx);
+                    top += label.height;
+                }
             }
         }
     }
@@ -1013,6 +1021,7 @@ pub(crate) fn paint_axes(
 ///
 /// Plot's facet axes label the grid rather than the data, so each label is
 /// centred on its band and sits outside the plot.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_facet_labels(
     frame: &Frame,
     theme: &PlotTheme,

@@ -296,6 +296,7 @@ pub fn size_f32(width: f32, height: f32) -> Size<Pixels> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use gpui::{point, px};

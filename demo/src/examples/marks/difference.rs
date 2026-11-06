@@ -29,19 +29,21 @@ fn temperature() -> Dataset {
 }
 
 fn e01() -> Plot {
-    // `positiveFill: "red", negativeFill: "blue", tip: true` have no port.
     difference_y(data::gistemp())
         .x("Date")
         .y("Anomaly")
+        .positive_fill("red")
+        .negative_fill("blue")
         .plot()
         .y(|y| y.grid(true))
 }
 
 fn e02() -> Plot {
-    // `positiveFill: "red", negativeFill: "blue", tip: true` have no port.
     difference_y(data::gistemp())
         .x("Date")
         .y("Anomaly")
+        .positive_fill("red")
+        .negative_fill("blue")
         .window(12 * 2, WindowReducer::Mean, Anchor::Middle)
         .plot()
         .y(|y| y.grid(true))
@@ -64,37 +66,64 @@ fn e03() -> Plot {
 }
 
 fn e04() -> Plot {
+    // Plot.windowY(14, Plot.groupX({y1: find SJ, y2: find SF}, {x: "date",
+    // y: "tmin"})): the mark's window runs before its grouping, so the
+    // grouping (one row per date with each station's `tmin`) and then the
+    // 14-day centred mean over y1 and y2 are spelled out; `tip: true` has no
+    // port.
+    let mut days: std::collections::BTreeMap<Value, (Value, Value)> = Default::default();
+    for d in temperature().rows() {
+        let entry = days.entry(d.value("date")).or_insert((Value::Null, Value::Null));
+        match d.text("station").as_ref().map(|s| s.as_ref()) {
+            Some("SJ") if entry.0.is_null() => entry.0 = d.value("tmin"),
+            Some("SF") if entry.1.is_null() => entry.1 = d.value("tmin"),
+            _ => {}
+        }
+    }
+    let grouped: Dataset = days
+        .into_iter()
+        .map(|(date, (sj, sf))| {
+            Table::empty()
+                .with("date", date)
+                .with("SJ", sj)
+                .with("SF", sf)
+        })
+        .collect();
+    let smooth = |data: &Dataset, field: &str| {
+        gpui_plot::transform::window(data, field, 14, WindowReducer::Mean, Anchor::Middle)
+    };
+    let smoothed = smooth(&smooth(&grouped, "SJ"), "SF");
     Plot::plot()
         .x(|x| x.tick_format("%b"))
-        .y(|y| y.grid(true))
+        .y(|y| y.grid(true).label("tmin"))
         .mark(rule_y([32.]))
-        .mark(
-            // Plot.windowY(14, Plot.groupX({y1: find SJ, y2: find SF}, …)):
-            // the window here would run before the grouping, over both
-            // stations' rows, so it is left out; `tip: true` has no port.
-            difference_y(temperature())
-                .x("date")
-                .y("tmin")
-                .group_x()
-                .group_output(
-                    "y1",
-                    GroupReducer::find(|d| d.text("station").is_some_and(|s| s == "SJ")),
-                )
-                .group_output(
-                    "y2",
-                    GroupReducer::find(|d| d.text("station").is_some_and(|s| s == "SF")),
-                ),
-        )
+        .mark(difference_y(smoothed).x("date").y1("SJ").y2("SF"))
 }
 
 fn e05() -> Plot {
-    // Plot.shiftX("+1 year", …) yields x1 = Date and x2 = Date + 1 year; the
-    // shift here writes the moved date into `Date2` (an offset in days).
-    difference_y(data::aapl())
-        .shift("Date", "Date2", 365.)
-        .x1("Date")
-        .x2("Date2")
+    // Plot.shiftX("+1 year", {x: "Date", y: "Close"}) yields x1 = Date + 1
+    // year and x2 = Date, and promotes the x domain [first + 1 year, last];
+    // the accessor and the domain spell those out.
+    let aapl = data::aapl();
+    let year_later = |value: &Value| match value {
+        Value::Date(date) => date
+            .checked_add_months(chrono::Months::new(12))
+            .map_or(Value::Null, Value::Date),
+        _ => Value::Null,
+    };
+    let dates: Vec<Value> = aapl.rows().iter().map(|d| d.value("Date")).collect();
+    let first = dates.iter().filter(|d| !d.is_null()).min().cloned();
+    let last = dates.iter().filter(|d| !d.is_null()).max().cloned();
+    let domain: Vec<Value> = first
+        .map(|first| year_later(&first))
+        .into_iter()
+        .chain(last)
+        .collect();
+    difference_y(aapl)
+        .x1(move |d: &Table| year_later(&d.value("Date")))
+        .x2("Date")
         .y("Close")
         .plot()
+        .x(|x| x.domain(domain))
         .y(|y| y.grid(true))
 }

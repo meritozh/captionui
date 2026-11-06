@@ -154,6 +154,7 @@ pub enum GroupReducer {
     /// The `p`-quantile, Plot's `"p25"`, `"p75"` …
     Quantile(f64),
     /// A custom reducer over the group's values and records.
+    #[allow(clippy::type_complexity)]
     Custom(std::rc::Rc<dyn Fn(&[Value], &[&Table]) -> Value>),
 }
 
@@ -997,9 +998,12 @@ pub fn dodge(
             if offset.is_nan() {
                 return row.clone();
             }
+            // Plot lifts a baseline-anchored pack by a radius and the padding,
+            // so the first row sits inside the frame.
+            let baseline = config.radius + config.padding;
             let value = match config.anchor {
-                DodgeAnchor::Start => start + offset,
-                DodgeAnchor::End => end - offset,
+                DodgeAnchor::Start => start + offset + baseline,
+                DodgeAnchor::End => end - offset - baseline,
                 DodgeAnchor::Middle => (start + end) / 2. + offset,
             };
             row.clone().with(output, Value::Number(value as f64))
@@ -1258,9 +1262,10 @@ mod tests {
             .collect();
         assert_eq!(offsets.len(), 3);
         // The dodge writes the cross-axis coordinate, not the along-axis one:
-        // the first point keeps the baseline, and the others are pushed off it
-        // by at least a diameter so that no two overlap.
-        assert_eq!(offsets[0], 0.);
+        // the first point sits a radius and the padding off the baseline, as
+        // Plot's does, and the others are pushed off it by at least a
+        // diameter so that no two overlap.
+        assert_eq!(offsets[0], 5.);
         for pair in offsets.windows(2) {
             assert!((pair[1] - pair[0]).abs() >= 8., "points {pair:?} overlap");
         }
@@ -1282,8 +1287,8 @@ mod tests {
             .filter_map(Value::as_number)
             .collect();
         // Far enough apart that every point fits where it already is, so each
-        // keeps the baseline of the axis it spreads along.
-        assert_eq!(offsets, vec![0., 0., 0.]);
+        // sits on the first row, a radius and the padding off the baseline.
+        assert_eq!(offsets, vec![4., 4., 4.]);
     }
 
     #[test]
