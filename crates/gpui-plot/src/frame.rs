@@ -1046,17 +1046,20 @@ pub(crate) fn paint_axes(
                 }
                 // A label may run to several lines, Plot's `Jan\n2021`.
                 let lines: Vec<&str> = tick.label.split('\n').collect();
-                let line_height = size.as_f32() * 1.1;
+                // Plot's text lineHeight defaults to 1em.
+                let line_height = size.as_f32();
                 let offset = style.tick_size.max(0.) + style.tick_padding;
                 for (i, line) in lines.iter().enumerate() {
                     let label = text(&gpui::SharedString::from(line.to_string()), window);
-                    let ty = if top {
-                        edge - px(offset)
-                            - label.height
-                            - px(line_height * (lines.len() - 1 - i) as f32)
+                    // Plot sets a top axis's labels on their baseline (line
+                    // anchor `bottom`) and a bottom axis's 0.71em below the
+                    // offset (line anchor `top`).
+                    let baseline = if top {
+                        edge - px(offset) - px(line_height * (lines.len() - 1 - i) as f32)
                     } else {
-                        edge + px(offset + line_height * i as f32)
+                        edge + px(offset + line_height * i as f32) + size * 0.71
                     };
+                    let ty = label.top_for_baseline(baseline);
                     label.paint_at(point(tx, ty), TextAlign::Center, None, window, cx);
                 }
             }

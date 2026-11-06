@@ -3572,16 +3572,27 @@ impl PlotTrait for Plot {
             }
         }
 
-        if self.interaction.crosshair {
+        // The crosshair follows the chart's axes, as Plot's crosshair draws a
+        // rule for each position channel: both lines on a two-axis chart, a
+        // vertical one when only x is read (`dotX`), a horizontal one when
+        // only y is (`tickY`), and none for a chart with neither (a map).
+        let axes = (self.reads_axis(true), self.reads_axis(false));
+        if self.interaction.crosshair && axes != (false, false) {
             // The crosshair spans the hovered facet's plot area only, not the
             // title, legend or axis gutters around it.
             let facet_frame = cell_frame(frame, grid, cell);
-            let top = facet_frame.plot.origin.y - bounds.origin.y;
-            tooltip = tooltip.cross_line(
-                CrossLine::new(state.cross_line)
-                    .span(top.as_f32(), facet_frame.plot.size.height.as_f32())
-                    .band(px(6.)),
-            );
+            let plot = facet_frame.plot;
+            let top = (plot.origin.y - bounds.origin.y).as_f32();
+            let left = (plot.origin.x - bounds.origin.x).as_f32();
+            let line = CrossLine::new(state.cross_line)
+                .span(top, plot.size.height.as_f32())
+                .h_span(left, plot.size.width.as_f32());
+            let line = match axes {
+                (true, true) => line.both(),
+                (false, true) => line.horizontal(),
+                _ => line,
+            };
+            tooltip = tooltip.cross_line(line.band(px(6.)));
         }
         if self.interaction.highlight {
             let dots: Vec<Dot> = state

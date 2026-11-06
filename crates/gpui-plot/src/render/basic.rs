@@ -205,6 +205,22 @@ impl Colors {
 
 /// Paint one prepared mark.
 pub fn draw(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
+    // Plot's `clip: "sphere"`: cut the mark's shapes to the projected globe.
+    // A raster masks its own image to it.
+    if prepared.mark.style.clip_sphere
+        && prepared.mark.kind != MarkKind::Raster
+        && let Some(sphere) = ctx.frame.projection.as_ref().and_then(|p| p.sphere())
+    {
+        let ring = sphere
+            .iter()
+            .map(|&[x, y]| ctx.absolute(point(px(x as f32), px(y as f32))))
+            .collect();
+        return paint::with_clip_polygon(Some(ring), || draw_kind(prepared, ctx));
+    }
+    draw_kind(prepared, ctx)
+}
+
+fn draw_kind(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     match prepared.mark.kind {
         MarkKind::Dot | MarkKind::DotX | MarkKind::DotY => draw_dots(prepared, ctx),
         MarkKind::Line | MarkKind::LineX | MarkKind::LineY => draw_lines(prepared, ctx),

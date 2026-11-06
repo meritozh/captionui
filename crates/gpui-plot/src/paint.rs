@@ -10,8 +10,147 @@ use gpui::{
     ShapedLine, SharedString, Size, TextAlign, TextRun, Window, point, px, quad, size,
 };
 
+thread_local! {
+    /// The convex polygon the current mark is clipped to (Plot's
+    /// `clip: "sphere"`), counter-clockwise in window pixels. GPUI's content
+    /// masks are rectangles, so the fills and strokes below cut their
+    /// geometry against it instead.
+    static CLIP: std::cell::RefCell<Option<Vec<Point<Pixels>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with fills and strokes clipped to `ring`, when it is a convex
+/// polygon; a concave outline (a conic's sphere) leaves the mark unclipped.
+pub fn with_clip_polygon<R>(ring: Option<Vec<Point<Pixels>>>, f: impl FnOnce() -> R) -> R {
+    let ring = ring.and_then(convex_ccw);
+    let previous = CLIP.with_borrow_mut(|clip| std::mem::replace(clip, ring));
+    let result = f();
+    CLIP.with_borrow_mut(|clip| *clip = previous);
+    result
+}
+
+/// `ring` as a counter-clockwise convex polygon, or `None` when it is not
+/// convex.
+fn convex_ccw(mut ring: Vec<Point<Pixels>>) -> Option<Vec<Point<Pixels>>> {
+    if ring.len() > 1 && ring.first() == ring.last() {
+        ring.pop();
+    }
+    if ring.len() < 3 || !finite(&ring) {
+        return None;
+    }
+    let n = ring.len();
+    let cross = |i: usize| {
+        let (a, b, c) = (ring[i], ring[(i + 1) % n], ring[(i + 2) % n]);
+        (b.x - a.x).as_f32() * (c.y - b.y).as_f32() - (b.y - a.y).as_f32() * (c.x - b.x).as_f32()
+    };
+    let turns: Vec<f32> = (0..n).map(cross).filter(|c| c.abs() > 1e-3).collect();
+    let positive = turns.iter().filter(|c| **c > 0.).count();
+    if positive != 0 && positive != turns.len() {
+        return None;
+    }
+    // In y-down pixels a positive cross product turns clockwise on screen;
+    // the half-plane test below wants the interior on the left.
+    if positive == 0 {
+        ring.reverse();
+    }
+    Some(ring)
+}
+
+/// Which side of edge `a → b` the point is on: positive inside.
+fn side(a: Point<Pixels>, b: Point<Pixels>, p: Point<Pixels>) -> f32 {
+    (b.x - a.x).as_f32() * (p.y - a.y).as_f32() - (b.y - a.y).as_f32() * (p.x - a.x).as_f32()
+}
+
+fn lerp(a: Point<Pixels>, b: Point<Pixels>, t: f32) -> Point<Pixels> {
+    point(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+}
+
+/// A polygon cut to the clip polygon (Sutherland–Hodgman), or as it is
+/// when nothing clips.
+fn clip_polygon(points: &[Point<Pixels>]) -> std::borrow::Cow<'_, [Point<Pixels>]> {
+    CLIP.with_borrow(|clip| {
+        let Some(clip) = clip else {
+            return std::borrow::Cow::Borrowed(points);
+        };
+        let mut out = points.to_vec();
+        for (i, &a) in clip.iter().enumerate() {
+            let b = clip[(i + 1) % clip.len()];
+            let input = std::mem::take(&mut out);
+            for (j, &p) in input.iter().enumerate() {
+                let q = input[(j + 1) % input.len()];
+                let (sp, sq) = (side(a, b, p), side(a, b, q));
+                if sp >= 0. {
+                    out.push(p);
+                }
+                if (sp >= 0.) != (sq >= 0.) {
+                    out.push(lerp(p, q, sp / (sp - sq)));
+                }
+            }
+            if out.is_empty() {
+                break;
+            }
+        }
+        std::borrow::Cow::Owned(out)
+    })
+}
+
+/// A polyline cut to the clip polygon (Cyrus–Beck per segment), as the
+/// runs that stay inside; the whole line when nothing clips.
+fn clip_polyline(points: &[Point<Pixels>]) -> Vec<Vec<Point<Pixels>>> {
+    CLIP.with_borrow(|clip| {
+        let Some(clip) = clip else {
+            return vec![points.to_vec()];
+        };
+        let mut runs: Vec<Vec<Point<Pixels>>> = Vec::new();
+        let mut current: Vec<Point<Pixels>> = Vec::new();
+        for pair in points.windows(2) {
+            let (p, q) = (pair[0], pair[1]);
+            let (mut t0, mut t1) = (0f32, 1f32);
+            for (i, &a) in clip.iter().enumerate() {
+                let b = clip[(i + 1) % clip.len()];
+                let (sp, sq) = (side(a, b, p), side(a, b, q));
+                if sp < 0. && sq < 0. {
+                    t0 = 1.;
+                    t1 = 0.;
+                    break;
+                }
+                let t = sp / (sp - sq);
+                if sp < 0. {
+                    t0 = t0.max(t);
+                } else if sq < 0. {
+                    t1 = t1.min(t);
+                }
+            }
+            if t0 > t1 {
+                if current.len() > 1 {
+                    runs.push(std::mem::take(&mut current));
+                }
+                current.clear();
+                continue;
+            }
+            let (from, to) = (lerp(p, q, t0), lerp(p, q, t1));
+            if current.last() != Some(&from) {
+                if current.len() > 1 {
+                    runs.push(std::mem::take(&mut current));
+                }
+                current = vec![from];
+            }
+            current.push(to);
+            if t1 < 1. {
+                runs.push(std::mem::take(&mut current));
+            }
+        }
+        if current.len() > 1 {
+            runs.push(current);
+        }
+        runs
+    })
+}
+
 /// A path built from points, filled.
 pub fn fill_path(points: &[Point<Pixels>], color: Hsla) -> Option<Path<Pixels>> {
+    let points = clip_polygon(points);
+    let points = points.as_ref();
     if points.len() < 3 || !finite(points) {
         return None;
     }
@@ -25,6 +164,8 @@ pub fn fill_path(points: &[Point<Pixels>], color: Hsla) -> Option<Path<Pixels>> 
 /// gives up (an area over unsorted data). Each half-pixel row paints the
 /// spans where the polygon's winding number is not zero.
 pub fn paint_fill_nonzero(points: &[Point<Pixels>], color: Hsla, window: &mut Window) {
+    let points = clip_polygon(points);
+    let points = points.as_ref();
     if points.len() < 3 || !finite(points) {
         return;
     }
@@ -75,9 +216,23 @@ pub fn stroke_path(points: &[Point<Pixels>], width: f32, color: Hsla) -> Option<
         return None;
     }
     let mut builder = PathBuilder::stroke(px(width.max(0.1)));
-    builder.move_to(points[0]);
-    for point in &points[1..] {
-        builder.line_to(*point);
+    let clipped = CLIP.with_borrow(Option::is_some);
+    if !clipped {
+        builder.move_to(points[0]);
+        for point in &points[1..] {
+            builder.line_to(*point);
+        }
+    } else {
+        let runs = clip_polyline(points);
+        if runs.is_empty() {
+            return None;
+        }
+        for run in runs {
+            builder.move_to(run[0]);
+            for point in &run[1..] {
+                builder.line_to(*point);
+            }
+        }
     }
     builder.build().ok().map(|path| with_alpha(path, color))
 }
@@ -246,6 +401,18 @@ impl Label {
         }
     }
 
+    /// How far below a label's top [`Label::paint_at`] puts its baseline:
+    /// GPUI centres the font's ascent and descent in the line box.
+    pub fn baseline(&self) -> Pixels {
+        (self.height + self.line.ascent - self.line.descent) / 2.
+    }
+
+    /// The top that puts this label's baseline at `baseline`, for placing
+    /// text the way SVG does, by its baseline (Plot's `dy: "0.71em"`).
+    pub fn top_for_baseline(&self, baseline: Pixels) -> Pixels {
+        baseline - self.baseline()
+    }
+
     /// Paint the line with its top-left at `origin`, aligned within `width`.
     pub fn paint_at(
         &self,
@@ -322,6 +489,48 @@ mod tests {
         assert!(fill_path(&[point(px(0.), px(0.)); 2], Hsla::default()).is_none());
         assert!(stroke_path(&[point(px(0.), px(0.))], 1., Hsla::default()).is_some());
     }
+
+    fn square() -> Vec<Point<Pixels>> {
+        // Clockwise on screen (y down), to check the winding is normalised.
+        [(0., 0.), (10., 0.), (10., 10.), (0., 10.)]
+            .map(|(x, y)| point(px(x), px(y)))
+            .to_vec()
+    }
+
+    #[test]
+    fn a_fill_is_cut_to_a_convex_clip() {
+        let big: Vec<_> = [(-5., -5.), (5., -5.), (5., 5.), (-5., 5.)]
+            .map(|(x, y)| point(px(x), px(y)))
+            .to_vec();
+        let cut = with_clip_polygon(Some(square()), || clip_polygon(&big).into_owned());
+        for p in &cut {
+            assert!((0. ..=5.).contains(&p.x.as_f32()) && (0. ..=5.).contains(&p.y.as_f32()));
+        }
+        assert_eq!(cut.len(), 4);
+        // Without a clip the polygon is untouched.
+        assert_eq!(clip_polygon(&big).len(), 4);
+    }
+
+    #[test]
+    fn a_polyline_keeps_only_its_inside_runs() {
+        let line: Vec<_> = [(-5., 5.), (5., 5.), (15., 5.), (15., 8.), (5., 8.)]
+            .map(|(x, y)| point(px(x), px(y)))
+            .to_vec();
+        let runs = with_clip_polygon(Some(square()), || clip_polyline(&line));
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].first().map(|p| p.x.as_f32()), Some(0.));
+        assert_eq!(runs[0].last().map(|p| p.x.as_f32()), Some(10.));
+        assert_eq!(runs[1].first().map(|p| p.x.as_f32()), Some(10.));
+        assert_eq!(runs[1].last().map(|p| p.x.as_f32()), Some(5.));
+    }
+
+    #[test]
+    fn a_concave_clip_is_ignored() {
+        let notch: Vec<_> = [(0., 0.), (10., 0.), (5., 5.), (10., 10.), (0., 10.)]
+            .map(|(x, y)| point(px(x), px(y)))
+            .to_vec();
+        assert!(convex_ccw(notch).is_none());
+    }
 }
 
 /// Paint a dashed line from `start` to `end`, Plot's `strokeDasharray`.
@@ -382,7 +591,11 @@ pub fn paint_fill_rings(rings: &[Vec<Point<Pixels>>], color: Hsla, window: &mut 
     let mut builder = PathBuilder::fill();
     let mut any = false;
     for ring in rings.iter().filter(|r| r.len() >= 3 && finite(r)) {
-        builder.add_polygon(ring, true);
+        let ring = clip_polygon(ring);
+        if ring.len() < 3 {
+            continue;
+        }
+        builder.add_polygon(&ring, true);
         any = true;
     }
     if !any {
