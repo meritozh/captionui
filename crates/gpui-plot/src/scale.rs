@@ -714,7 +714,8 @@ impl ColorScale {
 
     /// The color for a value, or `None` for a null.
     pub fn color(&self, value: &Value) -> Option<Hsla> {
-        if value.is_null() {
+        // An ordinal domain may hold null, as Plot's does, sorted last.
+        if value.is_null() && !self.domain.contains(&value.key()) {
             return self.unknown;
         }
         if let (Some(thresholds), ColorRange::Ordinal(colors)) = (&self.thresholds, &self.range) {

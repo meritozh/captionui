@@ -64,6 +64,7 @@ pub mod value;
 
 pub use mark::{
     Axis, GroupConfig, GroupOutput, Interval, MapConfig, MapReducer, SelectConfig, ShiftConfig,
+    Sweep,
 };
 pub use scale::{
     BandScale, ColorRange, ColorScale, ContinuousScale, OrdinalScale, PointScale, PositionScale,

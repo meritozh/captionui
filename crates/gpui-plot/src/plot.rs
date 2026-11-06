@@ -435,6 +435,8 @@ impl Plot {
         };
         // Plot's autoHeight counts a y scale whether or not its axis draws.
         let has_y = !y_values.is_empty() || grid.fy.is_some();
+        // Plot's `ny` is 1 without a y scale, even when fy facets the plot.
+        let has_y_scale = y_values.iter().any(|v| !v.is_null());
         let projected = self.projection.as_ref().map(|p| {
             // Plot's `projectionAspectRatio`: a domain's bounds at 100 × 100,
             // else the projection's own; clamped as Plot clamps it.
@@ -484,9 +486,13 @@ impl Plot {
                 ratio * w * (1.1 * nfy - 0.1).max(1.) + mt + mb
             }
             (None, None) => {
-                let ny = if !has_y {
+                let ny = if !has_y_scale {
                     1.
-                } else if ordinal(&y_values, &self.scales.y) {
+                } else if ordinal(&y_values, &self.scales.y)
+                    // A bar or cell reads its band axis as ordinal, years
+                    // and all.
+                    || (self.scales.y.r#type.is_none() && marks_use_band(&facets, false))
+                {
                     crate::scale::dedup(y_values.iter().map(Value::key))
                         .len()
                         .max(1) as f32
@@ -518,7 +524,7 @@ impl Plot {
         if self.title.text.is_some() {
             extras += 13. + 6.;
             if self.title.subtitle.is_some() {
-                extras += 14.;
+                extras += 18.;
             }
         }
         if self.legend_position() != LegendPosition::None {
@@ -611,6 +617,16 @@ impl Plot {
     ) -> Self {
         let rows: Vec<Table> = data.into_iter().collect();
         crate::auto::build(&rows, x, y, color)
+    }
+
+    /// Plot's `Plot.auto(data, options)` with its full options: per-dimension
+    /// reducers and zero, `size`, and `mark`.
+    pub fn auto_with(
+        data: impl IntoIterator<Item = Table>,
+        options: crate::auto::AutoOptions,
+    ) -> Self {
+        let rows: Vec<Table> = data.into_iter().collect();
+        crate::auto::build_with(&rows, &options)
     }
 
     /// A barcode: one quantitative field laid as a strip of dots along x,
@@ -1583,11 +1599,11 @@ impl Plot {
                     let fx = mark
                         .fx
                         .clone()
-                        .or(plot_x.map(|f| crate::table::Channel::Field(f)));
+                        .or(plot_x.map(crate::table::Channel::Field));
                     let fy = mark
                         .fy
                         .clone()
-                        .or(plot_y.map(|f| crate::table::Channel::Field(f)));
+                        .or(plot_y.map(crate::table::Channel::Field));
                     mark.fx = match (fx, ix) {
                         (Some(c), Some(i)) => Some(wrap(c, i)),
                         (c, _) => c,
@@ -1644,7 +1660,15 @@ impl Plot {
         if let (Some(domain), Some(keys)) = (&self.scales.fy.domain, grid.fy.as_mut()) {
             *keys = crate::scale::dedup(domain.iter().map(Value::key));
         }
-        if self.scales.fx.domain.is_some() || self.scales.fy.domain.is_some() {
+        // Plot's `reverse` on a facet scale reverses its domain.
+        let mut rebuild = self.scales.fx.domain.is_some() || self.scales.fy.domain.is_some();
+        for (options, keys) in [(&self.scales.fx, grid.fx.as_mut()), (&self.scales.fy, grid.fy.as_mut())] {
+            if let (Some(true), Some(keys)) = (options.reverse, keys) {
+                keys.reverse();
+                rebuild = true;
+            }
+        }
+        if rebuild {
             grid = Grid::new(grid.fx.clone(), grid.fy.clone());
         }
         grid
@@ -1683,7 +1707,7 @@ impl Plot {
         if self.title.text.is_some() {
             insets.top += theme.title_size.as_f32() + 6.;
             if self.title.subtitle.is_some() {
-                insets.top += theme.label_size.as_f32() + 4.;
+                insets.top += theme.label_size.as_f32() + 8.;
             }
         }
 
@@ -1818,6 +1842,8 @@ impl Plot {
                     let color = scale.color(&value).unwrap_or_default();
                     let label = match &self.scales.color.tick_format {
                         Some(format) => format.format(&value).into(),
+                        // Plot's legend stringifies a null category.
+                        None if value.is_null() => "null".into(),
                         None => value.label(),
                     };
                     entries.push(LegendEntry {
@@ -2072,11 +2098,26 @@ impl Plot {
                 .and_then(|data| render::with_value_defaults(mark, data));
             let mark = defaulted.as_ref().unwrap_or(mark);
             let c = &mark.channels;
-            let named = if x {
-                c.x.is_some() || c.x1.is_some() || c.x2.is_some()
-            } else {
-                c.y.is_some() || c.y1.is_some() || c.y2.is_some()
+            // An explicit null channel, a box's missing category, reads
+            // nothing.
+            let set = |channel: &Option<crate::table::Channel>| {
+                channel.as_ref().is_some_and(|channel| {
+                    !matches!(channel, crate::table::Channel::Constant(Value::Null))
+                })
             };
+            let named = if x {
+                set(&c.x) || c.x1.is_some() || c.x2.is_some()
+            } else {
+                set(&c.y) || c.y1.is_some() || c.y2.is_some()
+            };
+            let explicit_null = if x {
+                c.x.is_some() && !set(&c.x) && c.x1.is_none() && c.x2.is_none()
+            } else {
+                c.y.is_some() && !set(&c.y) && c.y1.is_none() && c.y2.is_none()
+            };
+            if explicit_null {
+                return false;
+            }
             // A mark over plain values reads its single axis by default, and a
             // one-dimensional mark spreads along the other by index.
             let single = mark.kind.category().single_axis;
@@ -2099,7 +2140,21 @@ impl Plot {
             // A raster or contour over a grid reads both axes.
             let gridded = matches!(mark.kind, MarkKind::Raster | MarkKind::Contour)
                 && crate::render::raster_extent(mark).is_some();
+            // A group writes its outputs to the axes they name, and its
+            // default count to the axis the grouping leaves free.
+            let grouped = mark.group.as_ref().is_some_and(|group| {
+                let names: &[&str] = if x {
+                    &["x", "x1", "x2"]
+                } else {
+                    &["y", "y1", "y2"]
+                };
+                let by_x = group.both || group.axis == Some(crate::mark::Axis::X);
+                let by_y = group.both || group.axis == Some(crate::mark::Axis::Y);
+                (group.outputs.is_empty() && ((!x && by_x && !by_y) || (x && by_y && !by_x)))
+                    || group.outputs.iter().any(|o| names.contains(&o.name.as_ref()))
+            });
             named
+                || grouped
                 || gridded
                 || indexed
                 || (by_value
@@ -2204,7 +2259,7 @@ impl Plot {
         if self.title.text.is_some() {
             y += theme.title_size.as_f32() + 6.;
             if self.title.subtitle.is_some() {
-                y += theme.label_size.as_f32() + 4.;
+                y += theme.label_size.as_f32() + 8.;
             }
         }
         y
@@ -2674,6 +2729,20 @@ pub(crate) fn sorted_domain(facets: &[Vec<PreparedMark>], scale: &str) -> Option
                     }
                 }
                 "data" => Value::Number(index as f64),
+                // The color channels' data values, before their scale.
+                "fill" | "stroke" => {
+                    let channels = &prepared.mark.channels;
+                    let channel = if spec.by.as_ref() == "fill" {
+                        &channels.fill
+                    } else {
+                        &channels.stroke
+                    };
+                    channel
+                        .as_ref()
+                        .and_then(|channel| channel.scaled_value(&row.row))
+                        .unwrap_or(Value::Null)
+                }
+                "z" => row.z.clone().unwrap_or(Value::Null),
                 // Plot sorts `x` by `-y` as `{x: "y", reverse: true}`; any
                 // other name reads the record's field.
                 field => row.row.value(field),
@@ -2694,18 +2763,23 @@ pub(crate) fn sorted_domain(facets: &[Vec<PreparedMark>], scale: &str) -> Option
         })
         .collect();
     // Plot's `ascendingDefined`: missing values last, whichever the order.
-    scored.sort_by(|(_, a), (_, b)| match (a.is_null(), b.is_null()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Greater,
-        (false, true) => std::cmp::Ordering::Less,
-        _ => {
-            let ordering = a.cmp(b);
-            if sort.reverse {
-                ordering.reverse()
-            } else {
-                ordering
+    // Plot's `ascendingGroup`/`descendingGroup`: ties fall back to the
+    // keys, ascending.
+    scored.sort_by(|(ka, a), (kb, b)| {
+        match (a.is_null(), b.is_null()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => {
+                let ordering = a.cmp(b);
+                if sort.reverse {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
             }
         }
+        .then_with(|| ka.cmp(kb))
     });
     let mut domain: Vec<Value> = scored.into_iter().map(|(key, _)| key).collect();
     if let Some(limit) = sort.limit {
@@ -2817,6 +2891,7 @@ impl PlotTrait for Plot {
 
         // The title sits above the plot, inside the figure's top margin.
         self.paint_title(bounds, &theme, window, cx);
+        self.paint_caption(bounds, &theme, window, cx);
         // The legend sits in the margin its position reserves, inside the
         // figure's bounds (already shrunk to the plot's `height`).
         self.paint_legend(frame.bounds, &theme, window, cx, &facets, &colors);
@@ -2829,6 +2904,14 @@ impl PlotTrait for Plot {
         );
         if x_grid || y_grid {
             crate::frame::paint_grid(&frame, &theme, window, x_grid, y_grid, &grid);
+        }
+        let no_axes = self.no_axes;
+        let (fx_grid, fy_grid) = (
+            (self.scales.fx.grid == Some(true) && !no_axes).then_some(&self.scales.fx),
+            (self.scales.fy.grid == Some(true) && !no_axes).then_some(&self.scales.fy),
+        );
+        if fx_grid.is_some() || fy_grid.is_some() {
+            crate::frame::paint_facet_grid(&frame, &theme, window, &grid, fx_grid, fy_grid);
         }
         // The marks. Every mark shares one set of color scales, so a series
         // keeps its color across marks, and across facets.
@@ -3468,6 +3551,37 @@ impl Plot {
         }
     }
 
+    /// Plot's `caption`, a figcaption below the plot, in the band
+    /// [`Self::insets`] reserves at the figure's bottom.
+    fn paint_caption(
+        &self,
+        bounds: Bounds<Pixels>,
+        theme: &PlotTheme,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(caption) = &self.caption else {
+            return;
+        };
+        let label = Label::new(
+            caption.clone(),
+            theme.label_size,
+            theme.label,
+            FontWeight::NORMAL,
+            gpui::font(theme.font_family.clone()),
+            window,
+        );
+        let band = theme.label_size.as_f32() + 8.;
+        let y = bounds.size.height.as_f32() - band + 4.;
+        label.paint_at(
+            bounds.origin + point(px(0.), px(y)),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+
     fn paint_title(
         &self,
         bounds: Bounds<Pixels>,
@@ -3504,7 +3618,7 @@ impl Plot {
                 window,
             );
             sub.paint_at(
-                bounds.origin + point(px(12.), px(6. + theme.title_size.as_f32() + 4.)),
+                bounds.origin + point(px(12.), px(6. + theme.title_size.as_f32() + 6.)),
                 TextAlign::Left,
                 None,
                 window,

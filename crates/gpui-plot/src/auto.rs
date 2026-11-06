@@ -8,10 +8,11 @@
 //! histogram or a rule. The finer reducer-driven heatmap and density branches
 //! are left to explicit marks, which a caller reaches just as easily.
 
-use gpui::Hsla;
+use gpui::{Hsla, SharedString};
 
 use crate::plot::Plot;
 use crate::table::{Dataset, Table};
+use crate::transform::GroupReducer;
 use crate::value::{PlotKind, Value};
 
 /// Build a plot whose mark is chosen from the shapes of `x` and `y`.
@@ -129,6 +130,426 @@ pub fn build(data: &[Table], x: Option<&str>, y: Option<&str>, color: Option<&st
         }),
         (None, None) => plot,
     }
+}
+
+/// One of `auto`'s dimensions, Plot's `{value, reduce, zero}`.
+#[derive(Clone, Debug, Default)]
+pub struct AutoChannel {
+    /// The field the dimension reads.
+    pub value: Option<SharedString>,
+    /// Plot's `reduce`: `None` leaves Plot's default, `Some(None)` is an
+    /// explicit `reduce: null`.
+    pub reduce: Option<Option<GroupReducer>>,
+    /// Plot's `zero`.
+    pub zero: Option<bool>,
+}
+
+impl AutoChannel {
+    /// A dimension reading `field`.
+    pub fn field(field: impl Into<SharedString>) -> Self {
+        Self {
+            value: Some(field.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Plot's `reduce` for the dimension; `None` is `reduce: null`.
+    pub fn reduce(mut self, reducer: Option<GroupReducer>) -> Self {
+        self.reduce = Some(reducer);
+        self
+    }
+
+    /// Plot's `zero`.
+    pub fn zero(mut self, zero: bool) -> Self {
+        self.zero = Some(zero);
+        self
+    }
+}
+
+/// The mark `auto` draws, Plot's `mark` option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoMark {
+    Dot,
+    Line,
+    Area,
+    Rule,
+    Bar,
+}
+
+/// Plot's `auto` options: `x`, `y`, `color`, `size` and `mark`.
+#[derive(Clone, Debug, Default)]
+pub struct AutoOptions {
+    pub x: AutoChannel,
+    pub y: AutoChannel,
+    /// The color dimension; a `value` of `"count"` (or another reducer
+    /// name) is Plot's `color: "count"` reducer.
+    pub color: AutoChannel,
+    pub size: AutoChannel,
+    pub mark: Option<AutoMark>,
+}
+
+/// Plot's `isZeroReducer`.
+fn is_zero_reducer(reducer: &Option<GroupReducer>) -> bool {
+    matches!(
+        reducer,
+        Some(GroupReducer::Count | GroupReducer::Sum | GroupReducer::Proportion)
+    )
+}
+
+/// A dimension's reducer named by its value, Plot's `color: "count"`.
+fn reducer_name(value: &str) -> Option<GroupReducer> {
+    match value {
+        "count" => Some(GroupReducer::Count),
+        "sum" => Some(GroupReducer::Sum),
+        "mean" => Some(GroupReducer::Mean),
+        "proportion" => Some(GroupReducer::Proportion),
+        _ => None,
+    }
+}
+
+/// Plot's `auto` with its options: the default reducers, mark type and
+/// transform follow Plot's `autoSpec`. The cases it composes from the
+/// library's marks are a rule (`reduce: null`), a binned or grouped line or
+/// area (`y: {reduce}`), and binned bars colored by a count (`color:
+/// "count"` over a quantitative and an ordinal dimension); the rest fall
+/// back to [`build`].
+pub fn build_with(data: &[Table], options: &AutoOptions) -> Plot {
+    let dataset = Dataset::new(data.iter().cloned());
+    let kind = |c: &AutoChannel| c.value.as_deref().and_then(|f| first_kind(&dataset, f));
+    let ordinal = |c: &AutoChannel| kind(c).is_some_and(|k| !k.is_quantitative());
+    let (x_value, y_value) = (options.x.value.clone(), options.y.value.clone());
+    // A color that names a reducer reduces; otherwise it is a field.
+    let color_reduce = match &options.color.reduce {
+        Some(reducer) => reducer.clone(),
+        None => options.color.value.as_deref().and_then(reducer_name),
+    };
+    let color_field = options
+        .color
+        .value
+        .clone()
+        .filter(|_| color_reduce.is_none());
+    let size_value = options.size.value.clone();
+    // Plot's default reducers.
+    let x_reduce = match &options.x.reduce {
+        Some(reducer) => reducer.clone(),
+        None => {
+            let y_reduce_unset = matches!(options.y.reduce, None | Some(None));
+            (y_reduce_unset && x_value.is_none() && size_value.is_none() && y_value.is_some())
+                .then_some(GroupReducer::Count)
+        }
+    };
+    let y_reduce = match &options.y.reduce {
+        Some(reducer) => reducer.clone(),
+        None => (x_reduce.is_none()
+            && y_value.is_none()
+            && size_value.is_none()
+            && x_value.is_some())
+        .then_some(GroupReducer::Count),
+    };
+    let size_reduce = (size_value.is_none()
+        && color_reduce.is_none()
+        && x_reduce.is_none()
+        && y_reduce.is_none()
+        && (x_value.is_none() || ordinal(&options.x))
+        && (y_value.is_none() || ordinal(&options.y)))
+    .then_some(GroupReducer::Count);
+    let monotonic =
+        |c: &AutoChannel| c.value.as_deref().is_some_and(|f| monotonic_x(&dataset, f));
+    let mark = options.mark.unwrap_or(
+        if size_value.is_some() || size_reduce.is_some() {
+            AutoMark::Dot
+        } else if is_zero_reducer(&x_reduce)
+            || is_zero_reducer(&y_reduce)
+            || color_reduce.is_some()
+        {
+            AutoMark::Bar
+        } else if x_value.is_some() && y_value.is_some() {
+            if ordinal(&options.x)
+                || ordinal(&options.y)
+                || (x_reduce.is_none()
+                    && y_reduce.is_none()
+                    && !monotonic(&options.x)
+                    && !monotonic(&options.y))
+            {
+                AutoMark::Dot
+            } else {
+                AutoMark::Line
+            }
+        } else {
+            AutoMark::Rule
+        },
+    );
+    let plot = Plot::new(data.iter().cloned());
+    let fallback = || {
+        build(
+            data,
+            x_value.as_deref(),
+            y_value.as_deref(),
+            options.color.value.as_deref(),
+        )
+    };
+    match mark {
+        // `reduce: null` on the only other dimension: a rule per value.
+        AutoMark::Rule if x_reduce.is_none() && y_reduce.is_none() => {
+            let color = color_field.clone();
+            match (&x_value, &y_value) {
+                (Some(x), None) => plot.rule_x(|m| {
+                    let m = m.x(x.as_ref());
+                    match &color {
+                        Some(c) => m.stroke(c.as_ref()),
+                        None => m,
+                    }
+                }),
+                (None, Some(y)) => plot.rule_y(|m| {
+                    let m = m.y(y.as_ref());
+                    match &color {
+                        Some(c) => m.stroke(c.as_ref()),
+                        None => m,
+                    }
+                }),
+                _ => fallback(),
+            }
+        }
+        // A line or area reducing y over x: Plot's `binX` (or `groupX` for
+        // an ordinal x).
+        AutoMark::Line | AutoMark::Area
+            if y_reduce.is_some()
+                && x_reduce.is_none()
+                && x_value.is_some()
+                && y_value.is_some() =>
+        {
+            let x = x_value.clone().unwrap_or_default();
+            let read = y_value.clone().unwrap_or_default();
+            let reducer = y_reduce.clone().unwrap_or(GroupReducer::Count);
+            let by_x = ordinal(&options.x);
+            let color = color_field.clone();
+            let kind_of = if mark == AutoMark::Line {
+                crate::mark::MarkKind::LineY
+            } else {
+                crate::mark::MarkKind::AreaY
+            };
+            // Dates bin on calendar intervals.
+            if kind(&options.x) == Some(PlotKind::Date)
+                && let Some(rows) = bin_dates(data, &x, &read, color.as_deref(), &reducer)
+            {
+                let mut m = crate::mark::Mark::new(kind_of).x("$x").y("$y");
+                m = match &color {
+                    Some(c) if mark == AutoMark::Line => m.stroke(c.as_ref()),
+                    Some(c) => m.fill(c.as_ref()),
+                    None => m,
+                };
+                return Plot::new(rows)
+                    .mark(m)
+                    .x(|o| o.label(x.as_ref()))
+                    .y(|o| o.label(read.as_ref()));
+            }
+            let configure = |m: crate::mark::Mark| -> crate::mark::Mark {
+                // The value reads through an accessor so the bin lays its
+                // edges over x alone, Plot's one-dimensional `binX`.
+                let field = read.clone();
+                let value = crate::table::Channel::Accessor(std::rc::Rc::new(
+                    move |row: &Table| row.value(&field),
+                ));
+                let m = m.x(x.as_ref()).y(value);
+                let m = if by_x {
+                    m.group_x().group_output("y", reducer.clone())
+                } else {
+                    m.bin(crate::transform::Thresholds::default())
+                        .bin_output("y", reducer.clone())
+                };
+                match &color {
+                    Some(c) if mark == AutoMark::Line => m.stroke(c.as_ref()),
+                    Some(c) => m.fill(c.as_ref()),
+                    None => m,
+                }
+            };
+            let kind = if mark == AutoMark::Line {
+                crate::mark::MarkKind::LineY
+            } else {
+                crate::mark::MarkKind::AreaY
+            };
+            plot.mark(configure(crate::mark::Mark::new(kind)))
+        }
+        // Bars colored by a count over a quantitative and an ordinal
+        // dimension: Plot's `barX(binX({fill: "count"}, {x, y}))`, and its
+        // transpose.
+        AutoMark::Bar
+            if color_reduce.is_some()
+                && x_reduce.is_none()
+                && y_reduce.is_none()
+                && x_value.is_some()
+                && y_value.is_some()
+                && (ordinal(&options.x) != ordinal(&options.y)) =>
+        {
+            let horizontal = ordinal(&options.y);
+            let (value, category) = if horizontal {
+                (x_value.clone(), y_value.clone())
+            } else {
+                (y_value.clone(), x_value.clone())
+            };
+            let (Some(value), Some(category)) = (value, category) else {
+                return fallback();
+            };
+            let numbers: Vec<f64> = data
+                .iter()
+                .filter_map(|row| row.value(&value).as_number())
+                .collect();
+            let Some(edges) = crate::transform::BinEdges::of(
+                &numbers,
+                crate::transform::Thresholds::default(),
+            ) else {
+                return fallback();
+            };
+            let reducer = color_reduce.clone().unwrap_or(GroupReducer::Count);
+            // One row per category and bin.
+            let mut cells: Vec<(Value, usize, Vec<Table>)> = Vec::new();
+            for row in data {
+                let Some(v) = row.value(&value).as_number().filter(|v| v.is_finite()) else {
+                    continue;
+                };
+                let key = row.value(&category);
+                let slot = edges.slot(v);
+                match cells.iter_mut().find(|(k, s, _)| *k == key && *s == slot) {
+                    Some((_, _, members)) => members.push(row.clone()),
+                    None => cells.push((key, slot, vec![row.clone()])),
+                }
+            }
+            let rows: Vec<Table> = cells
+                .into_iter()
+                .map(|(key, slot, members)| {
+                    let (lo, hi) = edges.bounds(slot);
+                    let values: Vec<Value> = members.iter().map(|m| m.value(&value)).collect();
+                    let refs: Vec<&Table> = members.iter().collect();
+                    Table::empty()
+                        .with(category.as_ref(), key)
+                        .with("$lo", Value::Number(lo))
+                        .with("$hi", Value::Number(hi))
+                        .with("count", reducer.reduce(&values, &refs))
+                })
+                .collect();
+            let plot = Plot::new(rows);
+            if horizontal {
+                plot.bar_x(|m| m.x1("$lo").x2("$hi").y(category.as_ref()).fill("count").inset(0.5))
+                    .x(|x| x.label(value.as_ref()))
+            } else {
+                plot.bar_y(|m| m.y1("$lo").y2("$hi").x(category.as_ref()).fill("count").inset(0.5))
+                    .y(|y| y.label(value.as_ref()))
+            }
+        }
+        _ => fallback(),
+    }
+}
+
+/// Plot's `binX` over dates for a line or area: d3's `utcTickInterval` for
+/// the Scott bin count picks a calendar interval (days, weeks, months or
+/// years), each bin reduces its y values, and its x is the bin's middle.
+/// Returns the binned rows, with `$x` and `$y` fields and the color field.
+fn bin_dates(
+    data: &[Table],
+    x: &str,
+    y: &str,
+    z: Option<&str>,
+    reducer: &GroupReducer,
+) -> Option<Vec<Table>> {
+    use chrono::{Datelike, TimeZone, Utc};
+    let millis: Vec<f64> = data
+        .iter()
+        .filter_map(|row| row.value(x).as_date().map(|d| d.timestamp_millis() as f64))
+        .collect();
+    let edges = crate::transform::BinEdges::of(&millis, crate::transform::Thresholds::default())?;
+    let (lo, hi) = millis
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    // The Scott count, as the numeric edges lay it, then d3's interval for it.
+    let count = edges.count.max(1) as f64;
+    let target = (hi - lo) / count;
+    const DAY: f64 = 86_400_000.;
+    const YEAR: f64 = DAY * 365.;
+    // d3's `tickIntervals` from a day up, as (duration, unit, step).
+    let intervals: [(f64, char, i64); 6] = [
+        (DAY, 'd', 1),
+        (2. * DAY, 'd', 2),
+        (7. * DAY, 'w', 1),
+        (30. * DAY, 'm', 1),
+        (90. * DAY, 'm', 3),
+        (YEAR, 'y', 1),
+    ];
+    let (unit, step) = if target > YEAR {
+        let step = crate::ticks::tick_increment_step(lo / YEAR, hi / YEAR, count).max(1.);
+        ('y', step as i64)
+    } else {
+        // d3 bisects on the target and takes the nearer neighbour.
+        let i = intervals.iter().position(|(d, _, _)| *d >= target).unwrap_or(5);
+        let pick = if i > 0 && target / intervals[i - 1].0 < intervals[i].0 / target {
+            i - 1
+        } else {
+            i
+        };
+        (intervals[pick].1, intervals[pick].2)
+    };
+    let floor = |t: chrono::DateTime<Utc>| -> chrono::DateTime<Utc> {
+        let date = t.date_naive();
+        let floored = match unit {
+            'y' => {
+                let year = date.year() - date.year().rem_euclid(step as i32);
+                chrono::NaiveDate::from_ymd_opt(year, 1, 1)
+            }
+            'm' => {
+                let month0 = date.month0() as i64 - (date.month0() as i64).rem_euclid(step);
+                chrono::NaiveDate::from_ymd_opt(date.year(), month0 as u32 + 1, 1)
+            }
+            'w' => Some(date - chrono::Duration::days(date.weekday().num_days_from_sunday() as i64)),
+            _ => {
+                let days = date.num_days_from_ce() as i64;
+                Some(date - chrono::Duration::days(days.rem_euclid(step)))
+            }
+        }
+        .unwrap_or(date);
+        Utc.from_utc_datetime(&floored.and_hms_opt(0, 0, 0).unwrap_or_default())
+    };
+    let offset = |t: chrono::DateTime<Utc>| -> chrono::DateTime<Utc> {
+        let date = t.date_naive();
+        let next = match unit {
+            'y' => chrono::NaiveDate::from_ymd_opt(date.year() + step as i32, 1, 1),
+            'm' => date.checked_add_months(chrono::Months::new(step as u32)),
+            'w' => Some(date + chrono::Duration::days(7 * step)),
+            _ => Some(date + chrono::Duration::days(step)),
+        }
+        .unwrap_or(date);
+        Utc.from_utc_datetime(&next.and_hms_opt(0, 0, 0).unwrap_or_default())
+    };
+    // Group by series, then by bin start, in the series' first-seen order.
+    let mut groups: Vec<(Value, i64, Vec<Table>)> = Vec::new();
+    for row in data {
+        let Some(date) = row.value(x).as_date() else {
+            continue;
+        };
+        let start = floor(date).timestamp_millis();
+        let key = z.map(|z| row.value(z)).unwrap_or(Value::Null);
+        match groups.iter_mut().find(|(k, s, _)| *k == key && *s == start) {
+            Some((_, _, members)) => members.push(row.clone()),
+            None => groups.push((key, start, vec![row.clone()])),
+        }
+    }
+    groups.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    Some(
+        groups
+            .into_iter()
+            .map(|(key, start, members)| {
+                let begin = Utc.timestamp_millis_opt(start).single().unwrap_or_default();
+                let end = offset(begin).timestamp_millis();
+                let values: Vec<Value> = members.iter().map(|m| m.value(y)).collect();
+                let refs: Vec<&Table> = members.iter().collect();
+                let mut row = Table::empty()
+                    .with("$x", Value::date_from_millis((start + end) / 2))
+                    .with("$y", reducer.reduce(&values, &refs));
+                if let Some(z) = z {
+                    row = row.with(z, key);
+                }
+                row
+            })
+            .collect(),
+    )
 }
 
 /// A heatmap of two quantitative fields: bin each axis into a grid of cells

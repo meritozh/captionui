@@ -136,14 +136,6 @@ fn draw_axis(prepared: &PreparedMark, ctx: &mut DrawContext<'_>, x: bool) {
             stroke_color(prepared, ctx, index),
             opacity * prepared.mark.style.stroke_opacity,
         );
-        let label = Label::new(
-            tick.label.clone(),
-            size,
-            fill,
-            FontWeight::NORMAL,
-            font.clone(),
-            ctx.window,
-        );
         if x {
             let top = anchor == AxisAnchor::Top;
             let edge = match placed {
@@ -163,18 +155,34 @@ fn draw_axis(prepared: &PreparedMark, ctx: &mut DrawContext<'_>, x: bool) {
             }
             if !tick.label.is_empty() && fill.a > 0. {
                 let offset = tick_size.max(0.) + tick_padding;
-                let ty = if top {
-                    edge - px(offset) - label.height
-                } else {
-                    edge + px(offset)
-                };
-                paint_rotated(
-                    &label,
-                    point(tx, ty),
-                    TextAlign::Center,
-                    options.tick_rotate,
-                    ctx,
-                );
+                // A time label runs to several lines, Plot's `Jan\n2014`,
+                // stacked away from the axis.
+                let lines: Vec<&str> = tick.label.split('\n').collect();
+                let line_height = size.as_f32() * 1.1;
+                for (i, line) in lines.iter().enumerate() {
+                    let label = Label::new(
+                        gpui::SharedString::from(line.to_string()),
+                        size,
+                        fill,
+                        FontWeight::NORMAL,
+                        font.clone(),
+                        ctx.window,
+                    );
+                    let ty = if top {
+                        edge - px(offset)
+                            - label.height
+                            - px(line_height * (lines.len() - 1 - i) as f32)
+                    } else {
+                        edge + px(offset + line_height * i as f32)
+                    };
+                    paint_rotated(
+                        &label,
+                        point(tx, ty),
+                        TextAlign::Center,
+                        options.tick_rotate,
+                        ctx,
+                    );
+                }
             }
         } else {
             let right = anchor == AxisAnchor::Right;
@@ -194,6 +202,14 @@ fn draw_axis(prepared: &PreparedMark, ctx: &mut DrawContext<'_>, x: bool) {
                 );
             }
             if !tick.label.is_empty() && fill.a > 0. {
+                let label = Label::new(
+                    tick.label.replace('\n', " ").into(),
+                    size,
+                    fill,
+                    FontWeight::NORMAL,
+                    font.clone(),
+                    ctx.window,
+                );
                 let offset = tick_size.max(0.) + tick_padding;
                 let origin = point(edge + px(offset * direction), ty - label.height / 2.);
                 let align = if right {

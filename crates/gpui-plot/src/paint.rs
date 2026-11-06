@@ -248,6 +248,7 @@ pub fn size_f32(width: f32, height: f32) -> Size<Pixels> {
     size(px(width), px(height))
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

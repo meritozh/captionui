@@ -88,7 +88,6 @@ fn color_values(facets: &[Vec<PreparedMark>]) -> Vec<Value> {
             );
         }
     }
-    values.retain(|value| !value.is_null());
     values
 }
 
@@ -98,6 +97,11 @@ pub fn color_scale(
     values: &[Value],
     options: &ScaleOptions,
 ) -> Option<ColorScale> {
+    // Plot's ordinal domain keeps null, sorted last; the quantitative
+    // scales leave it unknown.
+    let has_null = values.iter().any(Value::is_null);
+    let defined: Vec<Value> = values.iter().filter(|v| !v.is_null()).cloned().collect();
+    let values = defined.as_slice();
     let explicit: Option<Vec<Value>> = options.domain.clone();
     let sample = explicit.as_ref().map_or(values, |domain| domain.as_slice());
     if sample.is_empty() && options.r#type.is_none() {
@@ -111,7 +115,14 @@ pub fn color_scale(
         .as_deref()
         .is_some_and(crate::css::is_diverging);
     let temporal = sample.iter().any(|v| matches!(v, Value::Date(_)));
-    let kind = options.r#type.unwrap_or(if !quantitative {
+    // Plot's `inferScaleType`: a domain (or range) given with other than
+    // two values is ordinal, whatever its values.
+    let listed = options
+        .domain
+        .as_ref()
+        .map(Vec::len)
+        .or(options.colors.as_ref().map(Vec::len));
+    let kind = options.r#type.unwrap_or(if !quantitative || listed.is_some_and(|n| n != 2) {
         ScaleType::Categorical
     } else if temporal {
         ScaleType::Utc
@@ -129,6 +140,9 @@ pub fn color_scale(
                 None => {
                     let mut keys = crate::scale::dedup(values.iter().map(Value::key));
                     keys.sort();
+                    if has_null {
+                        keys.push(Value::Null.key());
+                    }
                     keys
                 }
             };

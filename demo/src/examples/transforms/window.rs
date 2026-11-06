@@ -67,9 +67,6 @@ fn e02() -> Plot {
 
 /// `Plot.windowY({k: 28, anchor: "end", strict}, {x: "date", y: "low"})`,
 /// with the docs' default `strict` of `true`.
-///
-/// Gap: the window's `strict` option is missing; the first 27 days average
-/// the partial window instead of being left undefined.
 fn e03() -> Plot {
     Plot::plot()
         .y(temperature_axis)
@@ -78,7 +75,8 @@ fn e03() -> Plot {
             line(data::sftemp())
                 .x("date")
                 .y("low")
-                .window(28, WindowReducer::Mean, Anchor::End),
+                .window(28, WindowReducer::Mean, Anchor::End)
+                .window_strict(true),
         )
 }
 
@@ -111,20 +109,16 @@ fn e04() -> Plot {
 /// computed up front into a `change` field the stroke reads.
 fn e05() -> Plot {
     let bls = data::bls_metro_unemployment();
-    let mut previous: Vec<(Value, f64)> = Vec::new();
-    let changed = Dataset::new(bls.rows().iter().map(|d| {
+    // Plot's `window({k: 2, reduce: "difference"})` anchors in the middle,
+    // `(k - 1) >> 1 = 0` before each value: a value's change is the next
+    // value less it, and each division's last value has none.
+    let rows = bls.rows();
+    let changed = Dataset::new(rows.iter().enumerate().map(|(i, d)| {
         let division = d.value("division");
-        let value = d.num("unemployment");
-        let change = match previous.iter_mut().find(|(k, _)| *k == division) {
-            Some((_, last)) => {
-                let change = value - *last;
-                *last = value;
-                Value::number(change)
-            }
-            None => {
-                previous.push((division, value));
-                Value::Null
-            }
+        let next = rows[i + 1..].iter().find(|n| n.value("division") == division);
+        let change = match next {
+            Some(next) => Value::number(next.num("unemployment") - d.num("unemployment")),
+            None => Value::Null,
         };
         d.clone().with("change", change)
     }));

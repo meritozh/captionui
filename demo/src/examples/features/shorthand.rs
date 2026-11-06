@@ -1,7 +1,7 @@
 //! Shorthand: `features/shorthand.md`.
 
 use crate::prelude::*;
-use gpui_plot::Dodge;
+use gpui_plot::{Dodge, DodgeAnchor};
 
 pub fn examples() -> Vec<Example> {
     let builds: [fn() -> Plot; 20] = [
@@ -173,7 +173,13 @@ fn e13() -> Plot {
 
 /// `Plot.dotX(numbers, Plot.dodgeY()).plot()`
 fn e14() -> Plot {
-    dot_x(numbers()).dodge(Dodge::default()).plot()
+    // Plot's dodgeY packs from the bottom by default.
+    dot_x(numbers())
+        .dodge(Dodge {
+            anchor: DodgeAnchor::End,
+            ..Dodge::default()
+        })
+        .plot()
 }
 
 /// `Plot.line(timeSeries).plot()`

@@ -90,7 +90,7 @@ fn main() {
 
     let mut cx = context();
     // Tall enough for the tallest example; each capture is trimmed to its own.
-    let window_height = 1400.;
+    let window_height = 2400.;
     let (handle, entity) = cx
         .update(|cx| {
             gpui_kit::open_window(
