@@ -819,6 +819,9 @@ pub struct MarkStyle {
     pub multiple: Option<usize>,
     /// Whether the mark clips to the plot area, Plot's `clip`.
     pub clip: bool,
+    /// Whether the mark clips to the projected sphere, Plot's
+    /// `clip: "sphere"`.
+    pub clip_sphere: bool,
     /// Plot's `markerStart`, `markerMid` and `markerEnd`.
     pub markers: [Option<Marker>; 3],
     /// A difference mark's `positiveFill` and `negativeFill`.
@@ -1046,6 +1049,7 @@ impl Default for MarkStyle {
             inset: None,
             mix_blend_mode: None,
             clip: false,
+            clip_sphere: false,
             markers: [None; 3],
             positive_fill: None,
             negative_fill: None,
@@ -2442,6 +2446,12 @@ impl Mark {
         self
     }
 
+    /// Clip the mark to the projected sphere, Plot's `clip: "sphere"`.
+    pub fn clip_sphere(mut self) -> Self {
+        self.style.clip_sphere = true;
+        self
+    }
+
     /// Shrink a rect or bar by `pixels` on every side, Plot's `inset`. A
     /// binned rect defaults to half a pixel along its binned axes, so
     /// adjacent bins read apart; `inset(0.)` closes the gap.
@@ -3043,6 +3053,12 @@ macro_rules! mark_builder {
             /// Clip the mark to the plot area, Plot's `clip: true`.
             pub fn clip(mut self, clip: bool) -> Self {
                 self.0 = self.0.clip(clip);
+                self
+            }
+
+            /// See [`Mark::clip_sphere`].
+            pub fn clip_sphere(mut self) -> Self {
+                self.0 = self.0.clip_sphere();
                 self
             }
 

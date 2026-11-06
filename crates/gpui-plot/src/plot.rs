@@ -3065,10 +3065,16 @@ impl Plot {
             &self.x_domain_values(facets),
             &self.y_domain_values(facets),
         );
-        frame.projection = self
-            .projection
-            .as_ref()
-            .map(|p| p.fit(frame.layout[0] as f64, frame.layout[1] as f64));
+        // Plot's projection `inset` defaults to the plot's own `inset`.
+        frame.projection = self.projection.as_ref().map(|p| {
+            if p.inset == 0. && self.frame_options.inset != 0. {
+                p.clone()
+                    .inset(self.frame_options.inset)
+                    .fit(frame.layout[0] as f64, frame.layout[1] as f64)
+            } else {
+                p.fit(frame.layout[0] as f64, frame.layout[1] as f64)
+            }
+        });
         frame
     }
 }

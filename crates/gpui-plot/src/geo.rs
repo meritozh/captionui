@@ -9,6 +9,8 @@
 //! to the frame. Lines are resampled along great circles so long edges bend
 //! as they should.
 
+mod clip;
+
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::rc::Rc;
 
@@ -19,6 +21,8 @@ use crate::value::Value;
 
 const RADIANS: f64 = PI / 180.;
 const DEGREES: f64 = 180. / PI;
+/// Plot's default projection `precision`, pixels.
+const PRECISION: f64 = 0.15;
 
 /// A GeoJSON geometry, in degrees: `[longitude, latitude]` positions.
 #[derive(Clone, Debug, PartialEq)]
@@ -599,15 +603,14 @@ impl Raw {
         })
     }
 
-    /// The clip angle of an azimuthal projection, radians, else `None` for an
-    /// antimeridian cut.
+    /// d3's default `clipAngle` of an azimuthal projection, degrees, else
+    /// `None` for an antimeridian cut.
     fn clip_angle(self) -> Option<f64> {
         match self {
-            Raw::Orthographic => Some(FRAC_PI_2),
-            Raw::Stereographic => Some(142. * RADIANS),
-            Raw::Gnomonic => Some(60. * RADIANS),
-            Raw::AzimuthalEqualArea => Some(180. * RADIANS - 1e-3),
-            Raw::AzimuthalEquidistant => Some(180. * RADIANS - 1e-3),
+            Raw::Orthographic => Some(90. + 1e-6),
+            Raw::Stereographic => Some(142.),
+            Raw::Gnomonic => Some(60.),
+            Raw::AzimuthalEqualArea | Raw::AzimuthalEquidistant => Some(180. - 1e-3),
             _ => None,
         }
     }
@@ -643,6 +646,9 @@ pub struct GeoProjection {
     /// d3's `center`, degrees: the (rotated) point the projection places at
     /// the frame's middle.
     pub center: [f64; 2],
+    /// Plot's numeric projection `clip`, d3's `clipAngle`, degrees: a
+    /// small-circle clip in place of the projection's default.
+    pub clip_angle: Option<f64>,
 }
 
 impl GeoProjection {
@@ -712,7 +718,14 @@ impl GeoProjection {
             inset: 0.,
             parallels: None,
             center: [0., 0.],
+            clip_angle: None,
         }
+    }
+
+    /// Plot's numeric projection `clip`, d3's `clipAngle`, degrees.
+    pub fn clip_angle(mut self, angle: f64) -> Self {
+        self.clip_angle = Some(angle);
+        self
     }
 
     /// d3's `rotate`.
@@ -763,33 +776,40 @@ impl GeoProjection {
     pub fn fit(&self, width: f64, height: f64) -> Fitted {
         let inset = self.inset as f64;
         let (w, h) = ((width - 2. * inset).max(1.), (height - 2. * inset).max(1.));
+        // Plot's `precision: 0.15`, d3's resampling threshold.
+        let delta2 = PRECISION * PRECISION;
         let base = match &self.kind {
             ProjectionKind::D3(_, [kx, ky]) => Fitted {
                 projection: self.clone(),
                 scale: (w / kx).min(h / ky),
                 translate: [w / 2. + inset, h / 2. + inset],
+                delta2,
             },
             ProjectionKind::AlbersUsa => Fitted {
                 projection: self.clone(),
                 scale: (w / 0.7463).min(h / 0.4673),
                 translate: [w / 2. + inset, h / 2. + inset],
+                delta2,
             },
             _ => Fitted {
                 projection: self.clone(),
                 scale: 1.,
                 translate: [inset, inset],
+                delta2,
             },
         };
         let Some(domain) = &self.domain else {
             return base;
         };
-        // Plot fits the domain's projected bounds into the frame.
-        let unit = Fitted {
-            scale: 1.,
-            translate: [0., 0.],
+        // Plot fits the domain's bounds, as the projection draws them before
+        // its insets, into the frame, then scales and translates the
+        // projection's output: the resampling happens before that scale.
+        let t0 = [base.translate[0] - inset, base.translate[1] - inset];
+        let unfit = Fitted {
+            translate: t0,
             ..base.clone()
         };
-        let Some([[x0, y0], [x1, y1]]) = unit.bounds(domain) else {
+        let Some([[x0, y0], [x1, y1]]) = unfit.bounds(domain) else {
             return base;
         };
         let k = (w / (x1 - x0)).min(h / (y1 - y0));
@@ -797,11 +817,12 @@ impl GeoProjection {
             return base;
         }
         Fitted {
-            scale: k,
+            scale: k * base.scale,
             translate: [
-                inset + (w - k * (x0 + x1)) / 2.,
-                inset + (h - k * (y0 + y1)) / 2.,
+                k * t0[0] + inset + (w - k * (x0 + x1)) / 2.,
+                k * t0[1] + inset + (h - k * (y0 + y1)) / 2.,
             ],
+            delta2: delta2 * k * k,
             ..base
         }
     }
@@ -813,6 +834,8 @@ pub struct Fitted {
     pub projection: GeoProjection,
     pub scale: f64,
     pub translate: [f64; 2],
+    /// d3's squared resampling precision, in these pixels.
+    delta2: f64,
 }
 
 impl Fitted {
@@ -840,6 +863,18 @@ impl Fitted {
         )
     }
 
+    /// The projection's pre-clip: its `clipAngle`, else d3's default for
+    /// the raw projection, else the antimeridian cut.
+    fn clip(&self) -> Option<clip::Clip> {
+        let ProjectionKind::D3(raw, _) = &self.projection.kind else {
+            return None;
+        };
+        Some(match self.projection.clip_angle.or(raw.clip_angle()) {
+            Some(angle) if angle != 0. => clip::Clip::Circle(angle * RADIANS),
+            _ => clip::Clip::Antimeridian,
+        })
+    }
+
     /// The raw point for a degree position after rotation, or `None` when it
     /// falls outside the projection's clip.
     fn raw(&self, lon: f64, lat: f64) -> Option<[f64; 2]> {
@@ -849,9 +884,7 @@ impl Fitted {
             ProjectionKind::AlbersUsa => albers_usa(lon, lat),
             ProjectionKind::D3(raw, _) => {
                 let (l, f) = self.rotate_point(lon * RADIANS, lat * RADIANS);
-                if let Some(angle) = raw.clip_angle()
-                    && f.cos() * l.cos() < angle.cos() - 1e-9
-                {
+                if !self.clip()?.visible(l, f) {
                     return None;
                 }
                 raw.forward(l, f)
@@ -898,284 +931,107 @@ impl Fitted {
         ]
     }
 
+    /// A rotated, clipped point (radians) in frame pixels: d3's
+    /// `projectTransform`. Mercator's infinite poles are held to its square,
+    /// as d3's Mercator clip extent holds them.
+    fn transform(&self, l: f64, f: f64) -> [f64; 2] {
+        let ProjectionKind::D3(raw, _) = &self.projection.kind else {
+            return [f64::NAN; 2];
+        };
+        match raw.forward(l, f) {
+            Some([x, y]) if matches!(raw, Raw::Mercator | Raw::TransverseMercator) => {
+                self.to_px([x.clamp(-PI, PI), y.clamp(-PI, PI)])
+            }
+            Some(p) => self.to_px(p),
+            None => [f64::NAN; 2],
+        }
+    }
+
     /// The projected paths of a geometry: closed rings (for fills) and open
-    /// lines, in frame pixels. Edges are resampled along great circles, lines
-    /// break where they leave the projection's clip, and rings that cross the
-    /// antimeridian are cut along it.
+    /// lines, in frame pixels, as d3's `geoPath` streams them: rotated,
+    /// clipped at the antimeridian or the clip circle (polygons closed along
+    /// the clip edge), then resampled adaptively to Plot's precision.
     pub fn paths(&self, geometry: &Geometry) -> Vec<(Vec<[f64; 2]>, bool)> {
         let mut out = Vec::new();
-        self.collect(geometry, &mut out);
+        match self.clip() {
+            Some(clip) => self.stream(clip, geometry, &mut out),
+            None => self.collect_planar(geometry, &mut out),
+        }
         out
     }
 
-    fn collect(&self, geometry: &Geometry, out: &mut Vec<(Vec<[f64; 2]>, bool)>) {
+    fn stream(&self, clip: clip::Clip, geometry: &Geometry, out: &mut Vec<(Vec<[f64; 2]>, bool)>) {
+        let rotate = |ps: &[[f64; 2]]| -> Vec<[f64; 2]> {
+            ps.iter()
+                .map(|p| {
+                    let (l, f) = self.rotate_point(p[0] * RADIANS, p[1] * RADIANS);
+                    [l, f]
+                })
+                .collect()
+        };
+        // d3 streams a ring without its closing position.
+        let open = |ring: &Vec<[f64; 2]>| -> Vec<[f64; 2]> {
+            let n = ring.len();
+            let closed = n > 1 && ring[0] == ring[n - 1];
+            rotate(&ring[..if closed { n - 1 } else { n }])
+        };
+        let polygon = |rings: &[Vec<[f64; 2]>], out: &mut Vec<(Vec<[f64; 2]>, bool)>| {
+            let rings: Vec<Vec<[f64; 2]>> = rings.iter().map(open).collect();
+            clip.polygon(&rings, &mut Resample::new(self, true, out));
+        };
         match geometry {
             Geometry::Point(_) | Geometry::MultiPoint(_) => {}
-            Geometry::LineString(ps) => self.line(ps, out),
-            Geometry::MultiLineString(ls) => ls.iter().for_each(|l| self.line(l, out)),
-            Geometry::Polygon(rings) => rings.iter().for_each(|r| self.ring(r, out)),
-            Geometry::MultiPolygon(polys) => polys.iter().flatten().for_each(|r| self.ring(r, out)),
-            Geometry::Collection(gs) => gs.iter().for_each(|g| self.collect(g, out)),
-            Geometry::Sphere => {
-                if let Some(outline) = self.sphere() {
-                    out.push((outline, true));
+            Geometry::LineString(ps) => clip.line(&rotate(ps), &mut Resample::new(self, false, out)),
+            Geometry::MultiLineString(ls) => {
+                for l in ls {
+                    clip.line(&rotate(l), &mut Resample::new(self, false, out));
                 }
             }
+            Geometry::Polygon(rings) => polygon(rings, out),
+            Geometry::MultiPolygon(polys) => polys.iter().for_each(|rings| polygon(rings, out)),
+            Geometry::Collection(gs) => gs.iter().for_each(|g| self.stream(clip, g, out)),
+            Geometry::Sphere => clip.sphere(&mut Resample::new(self, true, out)),
         }
     }
 
-    /// The globe's outline in pixels: the clip circle of an azimuthal
-    /// projection, else the boundary of the raw domain.
+    /// The paths of a planar projection (`identity`, `reflect-y`) or Albers
+    /// USA: each position projected, lines broken where a point drops out.
+    fn collect_planar(&self, geometry: &Geometry, out: &mut Vec<(Vec<[f64; 2]>, bool)>) {
+        let line = |ps: &[[f64; 2]], closed: bool, out: &mut Vec<(Vec<[f64; 2]>, bool)>| {
+            let mut current = Vec::new();
+            for p in ps {
+                match self.project(p[0], p[1]) {
+                    Some(xy) => current.push(xy),
+                    None if closed => {}
+                    None => {
+                        if current.len() >= 2 {
+                            out.push((std::mem::take(&mut current), false));
+                        }
+                        current.clear();
+                    }
+                }
+            }
+            if current.len() >= if closed { 3 } else { 2 } {
+                out.push((current, closed));
+            }
+        };
+        match geometry {
+            Geometry::Point(_) | Geometry::MultiPoint(_) | Geometry::Sphere => {}
+            Geometry::LineString(ps) => line(ps, false, out),
+            Geometry::MultiLineString(ls) => ls.iter().for_each(|l| line(l, false, out)),
+            Geometry::Polygon(rings) => rings.iter().for_each(|r| line(r, true, out)),
+            Geometry::MultiPolygon(polys) => polys.iter().flatten().for_each(|r| line(r, true, out)),
+            Geometry::Collection(gs) => gs.iter().for_each(|g| self.collect_planar(g, out)),
+        }
+    }
+
+    /// The globe's outline in pixels, d3's `geoPath` of the sphere: the clip
+    /// circle of an azimuthal projection, else the antimeridian and poles.
     pub fn sphere(&self) -> Option<Vec<[f64; 2]>> {
-        let to_px = |p: [f64; 2]| self.to_px(p);
-        match &self.projection.kind {
-            ProjectionKind::D3(raw, _) => {
-                if let Some(angle) = raw.clip_angle() {
-                    // The small circle at the clip angle, in raw space.
-                    let points = (0..=180)
-                        .filter_map(|i| {
-                            let a = TAU * i as f64 / 180.;
-                            // A point at distance `angle` from the centre,
-                            // in the projection's own (unrotated) frame.
-                            let (s, c) = (angle.sin(), angle.cos());
-                            let (x, y, z) = (c, s * a.cos(), s * a.sin());
-                            raw.forward(y.atan2(x), z.clamp(-1., 1.).asin()).map(to_px)
-                        })
-                        .collect();
-                    return Some(points);
-                }
-                let mut boundary = Vec::new();
-                let e = 1e-6;
-                for i in 0..=90 {
-                    let f = -FRAC_PI_2 + e + (PI - 2. * e) * i as f64 / 90.;
-                    boundary.push(raw.forward(PI - e, f));
-                }
-                for i in 0..=90 {
-                    let f = FRAC_PI_2 - e - (PI - 2. * e) * i as f64 / 90.;
-                    boundary.push(raw.forward(-PI + e, f));
-                }
-                // Mercator's poles are infinite: clip to its square.
-                let points: Vec<[f64; 2]> = boundary
-                    .into_iter()
-                    .flatten()
-                    .map(|[x, y]| [x, y.clamp(-PI, PI)])
-                    .map(to_px)
-                    .collect();
-                Some(points)
-            }
-            _ => None,
-        }
-    }
-
-    /// Resample a line along great circles, in degrees.
-    fn resample(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
-        let mut out = Vec::with_capacity(points.len());
-        for w in points.windows(2) {
-            out.push(w[0]);
-            let (a, b) = (w[0], w[1]);
-            let (l0, f0, l1, f1) = (
-                a[0] * RADIANS,
-                a[1] * RADIANS,
-                b[0] * RADIANS,
-                b[1] * RADIANS,
-            );
-            let d = 2.
-                * (((f1 - f0) / 2.).sin().powi(2)
-                    + f0.cos() * f1.cos() * ((l1 - l0) / 2.).sin().powi(2))
-                .sqrt()
-                .clamp(-1., 1.)
-                .asin();
-            let steps = (d / (2. * RADIANS)).floor() as usize;
-            if steps > 0 && d.sin().abs() > 1e-12 {
-                for i in 1..=steps {
-                    let t = i as f64 / (steps + 1) as f64;
-                    let (ka, kb) = (((1. - t) * d).sin() / d.sin(), (t * d).sin() / d.sin());
-                    let x = ka * f0.cos() * l0.cos() + kb * f1.cos() * l1.cos();
-                    let y = ka * f0.cos() * l0.sin() + kb * f1.cos() * l1.sin();
-                    let z = ka * f0.sin() + kb * f1.sin();
-                    out.push([
-                        y.atan2(x) * DEGREES,
-                        z.atan2((x * x + y * y).sqrt()) * DEGREES,
-                    ]);
-                }
-            }
-        }
-        if let Some(last) = points.last() {
-            out.push(*last);
-        }
-        out
-    }
-
-    /// The rotated longitude of a degree position, for the antimeridian cut.
-    fn rotated_lon(&self, p: [f64; 2]) -> f64 {
-        match &self.projection.kind {
-            ProjectionKind::D3(..) => self.rotate_point(p[0] * RADIANS, p[1] * RADIANS).0,
-            _ => p[0] * RADIANS,
-        }
-    }
-
-    fn cuts_antimeridian(&self) -> bool {
-        matches!(&self.projection.kind, ProjectionKind::D3(raw, _) if raw.clip_angle().is_none())
-    }
-
-    fn line(&self, points: &[[f64; 2]], out: &mut Vec<(Vec<[f64; 2]>, bool)>) {
-        let points = if matches!(self.projection.kind, ProjectionKind::D3(..)) {
-            Self::resample(points)
-        } else {
-            points.to_vec()
-        };
-        let mut current: Vec<[f64; 2]> = Vec::new();
-        let mut last_lon: Option<f64> = None;
-        for p in points {
-            let lon = self.rotated_lon(p);
-            let jump = self.cuts_antimeridian() && last_lon.is_some_and(|l| (lon - l).abs() > PI);
-            last_lon = Some(lon);
-            match self.project(p[0], p[1]) {
-                Some(xy) if !jump => current.push(xy),
-                Some(xy) => {
-                    if current.len() >= 2 {
-                        out.push((std::mem::take(&mut current), false));
-                    }
-                    current = vec![xy];
-                }
-                None => {
-                    if current.len() >= 2 {
-                        out.push((std::mem::take(&mut current), false));
-                    }
-                    current.clear();
-                }
-            }
-        }
-        if current.len() >= 2 {
-            out.push((current, false));
-        }
-    }
-
-    fn ring(&self, ring: &[[f64; 2]], out: &mut Vec<(Vec<[f64; 2]>, bool)>) {
-        if ring.len() < 3 {
-            return;
-        }
-        let points = if matches!(self.projection.kind, ProjectionKind::D3(..)) {
-            Self::resample(ring)
-        } else {
-            ring.to_vec()
-        };
-        if let ProjectionKind::D3(raw, _) = &self.projection.kind
-            && raw.clip_angle().is_some()
-        {
-            // A small-circle clip: points over the horizon are pulled onto it,
-            // so a ring cut by the horizon fills up to the globe's edge.
-            let projected: Vec<[f64; 2]> = points
-                .iter()
-                .filter_map(|p| self.project(p[0], p[1]).or_else(|| self.horizon(*p)))
-                .collect();
-            if projected.len() >= 3 && points.iter().any(|p| self.project(p[0], p[1]).is_some()) {
-                out.push((projected, true));
-            }
-            return;
-        }
-        if !self.cuts_antimeridian() {
-            let projected: Vec<[f64; 2]> = points
-                .iter()
-                .filter_map(|p| self.project(p[0], p[1]))
-                .collect();
-            if projected.len() >= 3 {
-                out.push((projected, true));
-            }
-            return;
-        }
-        // Cut the ring where its rotated longitude jumps across ±180°.
-        let lons: Vec<f64> = points.iter().map(|p| self.rotated_lon(*p)).collect();
-        let crossings: Vec<usize> = (1..points.len())
-            .filter(|&i| (lons[i] - lons[i - 1]).abs() > PI)
-            .collect();
-        if crossings.is_empty() {
-            let projected: Vec<[f64; 2]> = points
-                .iter()
-                .filter_map(|p| self.project(p[0], p[1]))
-                .collect();
-            if projected.len() >= 3 {
-                out.push((projected, true));
-            }
-            return;
-        }
-        // Split into pieces between crossings, each bounded by the antimeridian
-        // on one side; a ring around a pole crosses an odd number of times and
-        // closes along the frame's edge through that pole.
-        let n = points.len();
-        let start = crossings[0];
-        let mut pieces: Vec<Vec<usize>> = Vec::new();
-        let mut piece = Vec::new();
-        for k in 0..n {
-            let i = (start + k) % n;
-            if k > 0 && crossings.contains(&i) {
-                pieces.push(std::mem::take(&mut piece));
-            }
-            piece.push(i);
-        }
-        pieces.push(piece);
-        let polar = crossings.len() % 2 == 1;
-        let mean_lat = ring.iter().map(|p| p[1]).sum::<f64>() / ring.len() as f64;
-        let to_px = |l: f64, f: f64| -> Option<[f64; 2]> {
-            let ProjectionKind::D3(raw, _) = &self.projection.kind else {
-                return None;
-            };
-            let [x, y] = raw.forward(l, f.clamp(-FRAC_PI_2 + 1e-6, FRAC_PI_2 - 1e-6))?;
-            Some(self.to_px([x, y.clamp(-PI, PI)]))
-        };
-        if polar {
-            // One piece spanning every longitude: close it through the pole.
-            let mut all: Vec<[f64; 2]> = Vec::new();
-            for piece in &pieces {
-                all.extend(
-                    piece
-                        .iter()
-                        .filter_map(|&i| self.project(points[i][0], points[i][1])),
-                );
-            }
-            let pole = if mean_lat < 0. { -FRAC_PI_2 } else { FRAC_PI_2 };
-            let first_l = lons[pieces[0][0]];
-            let last_l = lons[*pieces.last().and_then(|p| p.last()).unwrap_or(&0)];
-            let side = |l: f64| if l > 0. { PI - 1e-6 } else { -PI + 1e-6 };
-            all.extend(to_px(side(last_l), pole));
-            all.extend(to_px(side(first_l), pole));
-            if all.len() >= 3 {
-                out.push((all, true));
-            }
-            return;
-        }
-        // Group the pieces by the side of the antimeridian they sit on.
-        let mut sides: [Vec<[f64; 2]>; 2] = [Vec::new(), Vec::new()];
-        for piece in pieces {
-            let mean = piece.iter().map(|&i| lons[i]).sum::<f64>() / piece.len().max(1) as f64;
-            let side = usize::from(mean > 0.);
-            sides[side].extend(
-                piece
-                    .iter()
-                    .filter_map(|&i| self.project(points[i][0], points[i][1])),
-            );
-        }
-        for side in sides {
-            if side.len() >= 3 {
-                out.push((side, true));
-            }
-        }
-    }
-
-    /// Where a point beyond the horizon meets it, along the great circle from
-    /// the projection's centre.
-    fn horizon(&self, p: [f64; 2]) -> Option<[f64; 2]> {
-        let ProjectionKind::D3(raw, _) = &self.projection.kind else {
-            return None;
-        };
-        let angle = raw.clip_angle()?;
-        let (l, f) = self.rotate_point(p[0] * RADIANS, p[1] * RADIANS);
-        let (y, z) = (f.cos() * l.sin(), f.sin());
-        let r = (y * y + z * z).sqrt().max(1e-12);
-        let (s, c) = (angle.sin(), angle.cos());
-        let (hx, hy, hz) = (c, s * y / r, s * z / r);
-        let [px_, py_] = raw.forward(hy.atan2(hx), hz.clamp(-1., 1.).asin())?;
-        Some(self.to_px([px_, py_]))
+        let clip = self.clip()?;
+        let mut out = Vec::new();
+        clip.sphere(&mut Resample::new(self, true, &mut out));
+        out.into_iter().next().map(|(ring, _)| ring)
     }
 
     /// The projected bounds of a geometry, `[[x0, y0], [x1, y1]]`.
@@ -1247,6 +1103,104 @@ impl Fitted {
             projected.iter().map(|p| p[0]).sum::<f64>() / n,
             projected.iter().map(|p| p[1]).sum::<f64>() / n,
         ])
+    }
+}
+
+/// d3's `resample` at the end of the projection stream: each clipped line
+/// projected, with points added along great circles wherever the projected
+/// path strays from the straight segment by more than the precision, then
+/// collected as paths (closed when streamed as a polygon's rings).
+struct Resample<'a> {
+    fitted: &'a Fitted,
+    ring: bool,
+    out: &'a mut Vec<(Vec<[f64; 2]>, bool)>,
+    current: Vec<[f64; 2]>,
+    /// The previous point: pixels, longitude and unit vector.
+    previous: Option<ResamplePoint>,
+    first: Option<ResamplePoint>,
+}
+
+type ResamplePoint = ([f64; 2], f64, [f64; 3]);
+
+impl<'a> Resample<'a> {
+    fn new(fitted: &'a Fitted, ring: bool, out: &'a mut Vec<(Vec<[f64; 2]>, bool)>) -> Self {
+        Self {
+            fitted,
+            ring,
+            out,
+            current: Vec::new(),
+            previous: None,
+            first: None,
+        }
+    }
+
+    /// d3's `resampleLineTo`.
+    fn line_to(&mut self, (p0, l0, c0): ResamplePoint, (p1, l1, c1): ResamplePoint, depth: u32) {
+        // cos 30°, d3's minimum angular distance.
+        const COS_MIN_DISTANCE: f64 = 0.866_025_403_784_438_6;
+        let delta2 = self.fitted.delta2;
+        let (dx, dy) = (p1[0] - p0[0], p1[1] - p0[1]);
+        let d2 = dx * dx + dy * dy;
+        if !(d2 > 4. * delta2 && depth > 0) {
+            return;
+        }
+        let depth = depth - 1;
+        let (a, b, c) = (c0[0] + c1[0], c0[1] + c1[1], c0[2] + c1[2]);
+        let m = (a * a + b * b + c * c).sqrt();
+        let c = c / m;
+        let phi2 = c.clamp(-1., 1.).asin();
+        let lambda2 = if (c.abs() - 1.).abs() < 1e-6 || (l0 - l1).abs() < 1e-6 {
+            (l0 + l1) / 2.
+        } else {
+            b.atan2(a)
+        };
+        let p2 = self.fitted.transform(lambda2, phi2);
+        let (dx2, dy2) = (p2[0] - p0[0], p2[1] - p0[1]);
+        let dz = dy * dx2 - dx * dy2;
+        if dz * dz / d2 > delta2
+            || ((dx * dx2 + dy * dy2) / d2 - 0.5).abs() > 0.3
+            || c0[0] * c1[0] + c0[1] * c1[1] + c0[2] * c1[2] < COS_MIN_DISTANCE
+        {
+            let mid = (p2, lambda2, [a / m, b / m, c]);
+            self.line_to((p0, l0, c0), mid, depth);
+            self.current.push(p2);
+            self.line_to(mid, (p1, l1, c1), depth);
+        }
+    }
+}
+
+impl clip::Sink for Resample<'_> {
+    fn point(&mut self, l: f64, f: f64, _: u8) {
+        let p = (self.fitted.transform(l, f), l, clip::cartesian([l, f]));
+        if let Some(previous) = self.previous {
+            self.line_to(previous, p, 16);
+        }
+        self.current.push(p.0);
+        self.previous = Some(p);
+        if self.first.is_none() {
+            self.first = Some(p);
+        }
+    }
+
+    fn line_start(&mut self) {
+        self.current.clear();
+        self.previous = None;
+        self.first = None;
+    }
+
+    fn line_end(&mut self) {
+        if self.ring
+            && let (Some(previous), Some(first)) = (self.previous, self.first)
+        {
+            self.line_to(previous, first, 16);
+        }
+        let mut path = std::mem::take(&mut self.current);
+        path.retain(|p| p[0].is_finite() && p[1].is_finite());
+        if path.len() >= 2 {
+            self.out.push((path, self.ring));
+        }
+        self.previous = None;
+        self.first = None;
     }
 }
 

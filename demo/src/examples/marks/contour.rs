@@ -210,7 +210,8 @@ fn e07() -> Plot {
 /// })
 /// ```
 ///
-/// `clip: "sphere"` has no port; the projected cells stay within it anyway.
+/// The contours are traced on the grid and then projected, so they stay
+/// within the sphere that `clip: "sphere"` clips to.
 fn e08() -> Plot {
     Plot::plot()
         .projection("equal-earth")
@@ -230,7 +231,8 @@ fn e08() -> Plot {
                 .y2(Value::Number(-90.))
                 .blur(1.)
                 .stroke("black")
-                .stroke_width(0.5),
+                .stroke_width(0.5)
+                .clip_sphere(),
         )
         .mark(geo(gpui_plot::geo::sphere()).stroke("black"))
 }

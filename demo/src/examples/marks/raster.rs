@@ -283,9 +283,6 @@ fn e12() -> Plot {
 ///   ]
 /// })
 /// ```
-///
-/// `clip: "sphere"` has no port; `interpolate` on a dense grid does nothing
-/// here, as the grid is already full.
 fn e13() -> Plot {
     Plot::plot()
         .projection("equal-earth")
@@ -303,7 +300,8 @@ fn e13() -> Plot {
                 .y1(Value::Number(90.))
                 .x2(Value::Number(180.))
                 .y2(Value::Number(-90.))
-                .interpolate("barycentric"),
+                .interpolate("barycentric")
+                .clip_sphere(),
         )
         .mark(geo(gpui_plot::geo::sphere()).stroke("black"))
 }
