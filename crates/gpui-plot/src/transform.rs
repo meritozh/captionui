@@ -717,6 +717,20 @@ pub enum WindowReducer {
     Change,
     /// The percent change from the previous value.
     PercentChange,
+    /// The sample standard deviation, Plot's `"deviation"`.
+    Deviation,
+    /// The sample variance, Plot's `"variance"`.
+    Variance,
+    /// The most common value, Plot's `"mode"`.
+    Mode,
+    /// The last value over the first, Plot's `"ratio"`.
+    Ratio,
+    /// The window's first value, Plot's `"first"`.
+    First,
+    /// The window's last value, Plot's `"last"`.
+    Last,
+    /// The window's `p`th percentile, Plot's `"p25"`, `"p75"` and so on.
+    Percentile(u8),
 }
 
 /// A window transform over a numeric field, Plot's `Plot.windowY`.
@@ -761,12 +775,11 @@ pub fn window_values(
         Anchor::End => k - 1,
     };
     let mut output: Vec<Option<f64>> = vec![None; n];
-    // The window starting at `i` (which may sit before the series).
-    let window = |i: isize| -> Vec<Option<f64>> {
-        let lo = i.max(0) as usize;
-        let hi = ((i + k as isize).max(0) as usize).min(n);
-        if lo >= hi { Vec::new() } else { values[lo..hi].to_vec() }
-    };
+    // d3's reducers skip missing values: Plot's `firstNumber`/`lastNumber`.
+    let first_number =
+        |slice: &[Option<f64>]| slice.iter().flatten().copied().find(|v| !v.is_nan());
+    let last_number =
+        |slice: &[Option<f64>]| slice.iter().rev().flatten().copied().find(|v| !v.is_nan());
     let reduce = |slice: &[Option<f64>]| -> Option<f64> {
         let defined: Vec<f64> = slice.iter().filter_map(|v| *v).filter(|v| !v.is_nan()).collect();
         match reducer {
@@ -775,26 +788,33 @@ pub fn window_values(
             }
             // A non-strict sum counts a missing value as zero.
             WindowReducer::Sum => Some(defined.iter().sum::<f64>()),
-            WindowReducer::Median => {
-                if defined.is_empty() {
-                    return None;
-                }
-                let mut sorted = defined.clone();
-                sorted.sort_by(f64::total_cmp);
-                let mid = sorted.len() / 2;
-                Some(if sorted.len().is_multiple_of(2) {
-                    (sorted[mid - 1] + sorted[mid]) / 2.
-                } else {
-                    sorted[mid]
-                })
-            }
+            WindowReducer::Median => d3_quantile(&defined, 0.5),
+            WindowReducer::Percentile(p) => d3_quantile(&defined, f64::from(p) / 100.),
             WindowReducer::Min => defined.iter().copied().reduce(f64::min),
             WindowReducer::Max => defined.iter().copied().reduce(f64::max),
-            WindowReducer::Difference => {
-                let first = slice.iter().find_map(|v| *v)?;
-                let last = slice.iter().rev().find_map(|v| *v)?;
-                Some(last - first)
+            WindowReducer::Variance => d3_variance(&defined),
+            WindowReducer::Deviation => d3_variance(&defined).map(f64::sqrt),
+            // d3's `mode`: the most frequent value, the first seen on a tie.
+            WindowReducer::Mode => {
+                let mut counts: Vec<(f64, usize)> = Vec::new();
+                for v in &defined {
+                    match counts.iter_mut().find(|(value, _)| value == v) {
+                        Some((_, count)) => *count += 1,
+                        None => counts.push((*v, 1)),
+                    }
+                }
+                let mut best: Option<(f64, usize)> = None;
+                for (value, count) in counts {
+                    if best.is_none_or(|(_, most)| count > most) {
+                        best = Some((value, count));
+                    }
+                }
+                best.map(|(value, _)| value)
             }
+            WindowReducer::Difference => Some(last_number(slice)? - first_number(slice)?),
+            WindowReducer::Ratio => Some(last_number(slice)? / first_number(slice)?),
+            WindowReducer::First => first_number(slice),
+            WindowReducer::Last => last_number(slice),
             _ => None,
         }
     };
@@ -827,40 +847,332 @@ pub fn window_values(
                 };
             }
         }
-        // Plot's strict difference takes the windows that fit, short one.
-        WindowReducer::Difference if strict => {
+        // Plot's strict `difference`, `ratio`, `first` and `last` read the
+        // window's two ends, over the windows that fit, short one.
+        WindowReducer::Difference
+        | WindowReducer::Ratio
+        | WindowReducer::First
+        | WindowReducer::Last
+            if strict =>
+        {
             for i in 0..n.saturating_sub(k) {
-                output[i + s] = match (values[i], values[i + k - 1]) {
-                    (Some(a), Some(b)) => Some(b - a),
-                    _ => None,
+                let (a, b) = (values[i], values[i + k - 1]);
+                output[i + s] = match reducer {
+                    WindowReducer::First => a,
+                    WindowReducer::Last => b,
+                    _ => match (a, b) {
+                        (Some(a), Some(b)) if reducer == WindowReducer::Ratio => Some(b / a),
+                        (Some(a), Some(b)) => Some(b - a),
+                        _ => None,
+                    },
                 };
             }
         }
-        // Plot's non-strict difference stops where the window would start
-        // past `n - k`.
-        WindowReducer::Difference => {
+        // Plot's non-strict `difference` (and its kin) stops where the
+        // window would start past `n - k`.
+        WindowReducer::Difference
+        | WindowReducer::Ratio
+        | WindowReducer::First
+        | WindowReducer::Last => {
             let end = n as isize - k as isize + s as isize + 1;
             for i in -(s as isize)..end {
-                output[(i + s as isize) as usize] = reduce(&window(i));
+                let lo = i.max(0) as usize;
+                let hi = ((i + k as isize).max(0) as usize).min(n);
+                output[(i + s as isize) as usize] =
+                    reduce(if lo < hi { &values[lo..hi] } else { &[] });
             }
         }
-        _ if strict => {
-            for i in 0..(n + 1).saturating_sub(k) {
-                let slice = &values[i..i + k];
-                output[i + s] = if slice.iter().all(|v| v.is_some_and(|v| !v.is_nan())) {
-                    reduce(slice)
-                } else {
-                    None
-                };
+        _ => output = window_map(values, k, anchor, strict, reduce),
+    }
+    output
+}
+
+/// Plot's window over one series with a reducer of the window's values (its
+/// `reduceArray`): each value's window of `k` starts `s` before it, as in
+/// [`window_values`], and is truncated at the series' ends unless `strict`,
+/// when only full windows of defined values give one.
+pub fn window_map(
+    values: &[Option<f64>],
+    k: usize,
+    anchor: Anchor,
+    strict: bool,
+    reduce: impl Fn(&[Option<f64>]) -> Option<f64>,
+) -> Vec<Option<f64>> {
+    let n = values.len();
+    let k = k.max(1);
+    let s = match anchor {
+        Anchor::Middle => (k - 1) >> 1,
+        Anchor::Start => 0,
+        Anchor::End => k - 1,
+    };
+    let mut output: Vec<Option<f64>> = vec![None; n];
+    if strict {
+        for i in 0..(n + 1).saturating_sub(k) {
+            let slice = &values[i..i + k];
+            if slice.iter().all(|v| v.is_some_and(|v| !v.is_nan())) {
+                output[i + s] = reduce(slice);
             }
         }
-        _ => {
-            for (p, out) in output.iter_mut().enumerate() {
-                *out = reduce(&window(p as isize - s as isize));
-            }
+    } else {
+        for (p, out) in output.iter_mut().enumerate() {
+            let lo = p.saturating_sub(s);
+            let hi = (p + k - s).min(n);
+            *out = reduce(&values[lo..hi]);
         }
     }
     output
+}
+
+/// A map method, the mapper of Plot's `mapX`, `mapY` and `map`: it maps
+/// each series of a channel's values (each `z` group of each facet) to as
+/// many new values.
+#[derive(Clone)]
+pub enum Mapper {
+    /// The running total, Plot's `"cumsum"`.
+    Cumsum,
+    /// Each value's rank in its series, from zero, Plot's `"rank"` (d3's
+    /// `rank`: tied values share the lowest rank; a missing value has none).
+    Rank,
+    /// Each value's rank as a fraction of its series' defined values less
+    /// one, Plot's `"quantile"`.
+    Quantile,
+    /// A moving window, Plot's `Plot.window({k, reduce, anchor, strict})`.
+    Window {
+        /// The window's size, Plot's `k`.
+        k: usize,
+        /// How the window's values reduce, Plot's `reduce`.
+        reduce: WindowReducer,
+        /// Where the window sits around its value, Plot's `anchor`.
+        anchor: Anchor,
+        /// Whether a short or incomplete window gives no value, Plot's
+        /// `strict`.
+        strict: bool,
+    },
+    /// A Bollinger band's edge, Plot's `Plot.bollinger({n, k, anchor,
+    /// strict})`: the mean of the window of `n` values plus `k` sample
+    /// standard deviations.
+    Bollinger {
+        /// The window's size, Plot's `n`.
+        n: usize,
+        /// How many deviations from the mean, Plot's `k`.
+        k: f64,
+        /// Where the window sits around its value, Plot's `anchor`.
+        anchor: Anchor,
+        /// Whether a short or incomplete window gives no value, Plot's
+        /// `strict`.
+        strict: bool,
+    },
+    /// A custom mapper over one series' values, Plot's `(values) => …`
+    /// function or `{mapIndex}` object; it returns as many values.
+    #[allow(clippy::type_complexity)]
+    Function(std::rc::Rc<dyn Fn(&[Value]) -> Vec<Value>>),
+}
+
+impl std::fmt::Debug for Mapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mapper::Cumsum => f.write_str("Cumsum"),
+            Mapper::Rank => f.write_str("Rank"),
+            Mapper::Quantile => f.write_str("Quantile"),
+            Mapper::Window {
+                k,
+                reduce,
+                anchor,
+                strict,
+            } => f
+                .debug_struct("Window")
+                .field("k", k)
+                .field("reduce", reduce)
+                .field("anchor", anchor)
+                .field("strict", strict)
+                .finish(),
+            Mapper::Bollinger {
+                n,
+                k,
+                anchor,
+                strict,
+            } => f
+                .debug_struct("Bollinger")
+                .field("n", n)
+                .field("k", k)
+                .field("anchor", anchor)
+                .field("strict", strict)
+                .finish(),
+            Mapper::Function(_) => f.write_str("Function(..)"),
+        }
+    }
+}
+
+impl Mapper {
+    /// Plot's `Plot.window({k, reduce})`, anchored in the middle and not
+    /// strict, Plot's defaults.
+    pub fn window(k: usize, reduce: WindowReducer) -> Self {
+        Mapper::Window {
+            k,
+            reduce,
+            anchor: Anchor::Middle,
+            strict: false,
+        }
+    }
+
+    /// Plot's `Plot.bollinger({n, k})`, anchored at the end and strict,
+    /// Plot's defaults (Plot's own default `n` is 20, and `k` 0).
+    pub fn bollinger(n: usize, k: f64) -> Self {
+        Mapper::Bollinger {
+            n,
+            k,
+            anchor: Anchor::End,
+            strict: true,
+        }
+    }
+
+    /// A custom mapper, Plot's `{mapIndex(I, S, T)}` over one series.
+    pub fn function(map: impl Fn(&[Value]) -> Vec<Value> + 'static) -> Self {
+        Mapper::Function(std::rc::Rc::new(map))
+    }
+
+    /// Set a window's or band's `anchor`.
+    pub fn anchor(mut self, anchor: Anchor) -> Self {
+        if let Mapper::Window { anchor: a, .. } | Mapper::Bollinger { anchor: a, .. } = &mut self {
+            *a = anchor;
+        }
+        self
+    }
+
+    /// Set a window's or band's `strict`.
+    pub fn strict(mut self, strict: bool) -> Self {
+        if let Mapper::Window { strict: s, .. } | Mapper::Bollinger { strict: s, .. } = &mut self {
+            *s = strict;
+        }
+        self
+    }
+}
+
+/// Map one series of values, Plot's `mapIndex(I, S, T)`.
+pub fn map_values(values: &[Value], mapper: &Mapper) -> Vec<Value> {
+    // JavaScript's `+v`: a missing value is NaN.
+    let numbers = || -> Vec<Option<f64>> {
+        values
+            .iter()
+            .map(|v| v.as_number().filter(|n| !n.is_nan()))
+            .collect()
+    };
+    let to_values = |out: Vec<Option<f64>>| -> Vec<Value> {
+        out.into_iter()
+            .map(|v| v.map_or(Value::Null, Value::number))
+            .collect()
+    };
+    match mapper {
+        // `sum += S[i]`: a null adds nothing; anything else that is not a
+        // number poisons the rest of the sum.
+        Mapper::Cumsum => {
+            let mut sum = 0.;
+            values
+                .iter()
+                .map(|v| {
+                    sum += match v {
+                        Value::Null => 0.,
+                        v => v.as_number().unwrap_or(f64::NAN),
+                    };
+                    Value::number(sum)
+                })
+                .collect()
+        }
+        Mapper::Rank => to_values(d3_rank(values)),
+        // `rank(I, f).map((r) => r / n)`, with `n` d3's `count` (the values
+        // that are numbers) less one.
+        Mapper::Quantile => {
+            let n = values
+                .iter()
+                .filter(|v| v.as_number().is_some_and(|n| !n.is_nan()))
+                .count() as f64
+                - 1.;
+            to_values(
+                d3_rank(values)
+                    .into_iter()
+                    .map(|r| r.map(|r| r / n))
+                    .collect(),
+            )
+        }
+        Mapper::Window {
+            k,
+            reduce,
+            anchor,
+            strict,
+        } => to_values(window_values(&numbers(), *k, *reduce, *anchor, *strict)),
+        // `window({k: n, reduce: (Y) => mean(Y) + k * (deviation(Y) || 0)})`.
+        Mapper::Bollinger {
+            n,
+            k,
+            anchor,
+            strict,
+        } => to_values(window_map(&numbers(), *n, *anchor, *strict, |slice| {
+            let defined: Vec<f64> = slice
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|v| !v.is_nan())
+                .collect();
+            if defined.is_empty() {
+                return None;
+            }
+            let mean = defined.iter().sum::<f64>() / defined.len() as f64;
+            Some(mean + k * d3_variance(&defined).map_or(0., f64::sqrt))
+        })),
+        Mapper::Function(map) => {
+            let mut out = map(values);
+            out.resize(values.len(), Value::Null);
+            out
+        }
+    }
+}
+
+/// d3's `rank`: each value's index in the ascending order of the defined
+/// values, tied values sharing the lowest; a missing value has none.
+fn d3_rank(values: &[Value]) -> Vec<Option<f64>> {
+    let defined = |v: &Value| !v.is_null() && !matches!(v, Value::Number(n) if n.is_nan());
+    let mut order: Vec<usize> = (0..values.len()).filter(|&i| defined(&values[i])).collect();
+    order.sort_by(|&a, &b| values[a].cmp(&values[b]));
+    let mut ranks = vec![None; values.len()];
+    let mut previous: Option<(usize, usize)> = None;
+    for (position, &index) in order.iter().enumerate() {
+        let rank = match previous {
+            Some((last, rank)) if values[last] == values[index] => rank,
+            _ => position,
+        };
+        ranks[index] = Some(rank as f64);
+        previous = Some((index, rank));
+    }
+    ranks
+}
+
+/// d3's `quantile` over defined values: the R-7 interpolation of the
+/// sorted values.
+fn d3_quantile(values: &[f64], p: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let n = sorted.len();
+    if p <= 0. || n < 2 {
+        return Some(sorted[0]);
+    }
+    if p >= 1. {
+        return Some(sorted[n - 1]);
+    }
+    let i = (n - 1) as f64 * p;
+    let i0 = i.floor() as usize;
+    Some(sorted[i0] + (sorted[i0 + 1] - sorted[i0]) * (i - i0 as f64))
+}
+
+/// d3's `variance`: the sample variance, missing for fewer than two values.
+fn d3_variance(values: &[f64]) -> Option<f64> {
+    if values.len() < 2 {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    Some(values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64)
 }
 
 /// Where a window sits when it cannot be centered on its point, Plot's
@@ -1268,6 +1580,81 @@ mod tests {
             .filter_map(Value::as_number)
             .collect();
         assert_eq!(values, vec![0.5, 1., 2., 3., 3.5]);
+    }
+
+    fn numbers(values: &[Value]) -> Vec<Option<f64>> {
+        values.iter().map(Value::as_number).collect()
+    }
+
+    #[test]
+    fn map_rank_and_quantile_follow_d3() {
+        // d3.rank([3, 1, null, 3, 2]) is [2, 0, NaN, 2, 1]; the quantile
+        // divides by the four numbers less one.
+        let values = [
+            Value::Number(3.),
+            Value::Number(1.),
+            Value::Null,
+            Value::Number(3.),
+            Value::Number(2.),
+        ];
+        assert_eq!(
+            numbers(&map_values(&values, &Mapper::Rank)),
+            vec![Some(2.), Some(0.), None, Some(2.), Some(1.)]
+        );
+        assert_eq!(
+            numbers(&map_values(&values, &Mapper::Quantile)),
+            vec![Some(2. / 3.), Some(0.), None, Some(2. / 3.), Some(1. / 3.)]
+        );
+        assert_eq!(
+            numbers(&map_values(&values, &Mapper::Cumsum)),
+            vec![Some(3.), Some(4.), Some(4.), Some(7.), Some(9.)]
+        );
+    }
+
+    #[test]
+    fn map_bollinger_is_a_strict_trailing_window() {
+        let values: Vec<Value> = [1., 2., 3., 4.].map(Value::Number).to_vec();
+        // n = 3, k = 1: mean plus the sample deviation (1) of each window.
+        assert_eq!(
+            numbers(&map_values(&values, &Mapper::bollinger(3, 1.))),
+            vec![None, None, Some(3.), Some(4.)]
+        );
+        assert_eq!(
+            numbers(&map_values(
+                &values,
+                &Mapper::bollinger(3, 0.)
+                    .anchor(Anchor::Middle)
+                    .strict(false)
+            )),
+            vec![Some(1.5), Some(2.), Some(3.), Some(3.5)]
+        );
+    }
+
+    #[test]
+    fn window_reducers_match_plot() {
+        let values: Vec<Option<f64>> = [1., 2., 4., 8.].map(Some).to_vec();
+        let run = |reducer| window_values(&values, 2, reducer, Anchor::Middle, false);
+        // Plot's non-strict difference and ratio stop one short of the end.
+        assert_eq!(
+            run(WindowReducer::Difference),
+            vec![Some(1.), Some(2.), Some(4.), None]
+        );
+        assert_eq!(
+            run(WindowReducer::Ratio),
+            vec![Some(2.), Some(2.), Some(2.), None]
+        );
+        assert_eq!(
+            run(WindowReducer::Last),
+            vec![Some(2.), Some(4.), Some(8.), None]
+        );
+        assert_eq!(
+            run(WindowReducer::Percentile(50)),
+            vec![Some(1.5), Some(3.), Some(6.), Some(8.)]
+        );
+        assert_eq!(
+            run(WindowReducer::Variance),
+            vec![Some(0.5), Some(2.), Some(8.), None]
+        );
     }
 
     #[test]

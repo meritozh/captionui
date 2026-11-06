@@ -5,7 +5,7 @@
 //! which is what Plot's `lineY` with an `x` draws.
 
 use crate::prelude::*;
-use gpui_plot::{Anchor, WindowReducer};
+use gpui_plot::{Anchor, Mapper, WindowReducer};
 
 pub fn examples() -> Vec<Example> {
     vec![
@@ -103,34 +103,17 @@ fn e04() -> Plot {
 
 /// Each metro division's unemployment, colored by its month-over-month
 /// change: `Plot.map({stroke: Plot.window({k: 2, reduce: "difference"})}, {…, z: "division", stroke: "unemployment"})`.
-///
-/// Gap: `Plot.map` with a window mapper on a color channel, and a window
-/// restarting per `z` series, are missing; each division's difference is
-/// computed up front into a `change` field the stroke reads.
 fn e05() -> Plot {
-    let bls = data::bls_metro_unemployment();
-    // Plot's `window({k: 2, reduce: "difference"})` anchors in the middle,
-    // `(k - 1) >> 1 = 0` before each value: a value's change is the next
-    // value less it, and each division's last value has none.
-    let rows = bls.rows();
-    let changed = Dataset::new(rows.iter().enumerate().map(|(i, d)| {
-        let division = d.value("division");
-        let next = rows[i + 1..].iter().find(|n| n.value("division") == division);
-        let change = match next {
-            Some(next) => Value::number(next.num("unemployment") - d.num("unemployment")),
-            None => Value::Null,
-        };
-        d.clone().with("change", change)
-    }));
     Plot::plot()
         .y(|y| y.grid(true))
         .color(|c| c.scheme("BuYlRd").domain([-0.5, 0.5]))
         .mark(rule_y([0.]))
         .mark(
-            line(changed)
+            line(data::bls_metro_unemployment())
                 .x("date")
                 .y("unemployment")
                 .z("division")
-                .stroke("change"),
+                .stroke("unemployment")
+                .map_channel("stroke", Mapper::window(2, WindowReducer::Difference)),
         )
 }

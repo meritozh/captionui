@@ -63,8 +63,8 @@ pub mod tree;
 pub mod value;
 
 pub use mark::{
-    Axis, BlendMode, GroupConfig, GroupOutput, Interval, MapConfig, MapReducer, SelectConfig,
-    ShiftConfig, Sweep,
+    Axis, BlendMode, GroupConfig, GroupOutput, Interval, MapConfig, MapReducer, MapTarget,
+    SelectConfig, ShiftConfig, Sweep,
 };
 pub use scale::{
     BandScale, ColorRange, ColorScale, ContinuousScale, OrdinalScale, PointScale, PositionScale,
@@ -73,7 +73,7 @@ pub use scale::{
 pub use style::{ColorChannel, NumberChannel, Symbol};
 pub use table::{Channel, Dataset, IntoChannel, Table};
 pub use transform::{
-    Anchor, Bin, Dodge, DodgeAnchor, GroupReducer, Reducer, Select, Selector, StackOffset,
+    Anchor, Bin, Dodge, DodgeAnchor, GroupReducer, Mapper, Reducer, Select, Selector, StackOffset,
     StackedPoint, StackedSeries, Thresholds, WindowReducer,
 };
 pub use value::{PlotKind, Value};
