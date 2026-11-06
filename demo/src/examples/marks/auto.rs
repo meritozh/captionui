@@ -5,6 +5,7 @@
 //! `zero`, `fx`/`fy`) are noted where an example drops them.
 
 use crate::prelude::*;
+use gpui_plot::auto::{AutoChannel, AutoMark, AutoOptions};
 
 pub fn examples() -> Vec<Example> {
     vec![
@@ -55,8 +56,14 @@ fn e04() -> Plot {
 
 /// `Plot.auto(penguins, {x: "body_mass_g", y: {reduce: null}}).plot()`
 fn e05() -> Plot {
-    // `y: {reduce: null}` is the barcode form of `auto`.
-    Plot::barcode(data::penguins(), "body_mass_g")
+    Plot::auto_with(
+        data::penguins(),
+        AutoOptions {
+            x: AutoChannel::field("body_mass_g"),
+            y: AutoChannel::default().reduce(None),
+            ..AutoOptions::default()
+        },
+    )
 }
 
 /// `Plot.auto(olympians, {x: "weight", y: "height", color: "count"}).plot()`
@@ -71,11 +78,14 @@ fn e06() -> Plot {
 
 /// `Plot.auto(olympians, {x: "weight", y: "sex", color: "count"}).plot()`
 fn e07() -> Plot {
-    Plot::auto(
+    Plot::auto_with(
         data::olympians(),
-        Some("weight"),
-        Some("sex"),
-        Some("count"),
+        AutoOptions {
+            x: AutoChannel::field("weight"),
+            y: AutoChannel::field("sex"),
+            color: AutoChannel::field("count"),
+            ..AutoOptions::default()
+        },
     )
 }
 
@@ -105,14 +115,17 @@ fn e10() -> Plot {
     )
 }
 
+/// `Plot.auto(olympians, {x: "date_of_birth", y: {value: "height", reduce: "mean"}, color: "sex", mark: "line"})`
 fn e11() -> Plot {
-    // `y: {value: "height", reduce: "mean"}` and `mark: "line"` are not
-    // options yet: this is the auto plot of the raw heights.
-    Plot::auto(
+    Plot::auto_with(
         data::olympians(),
-        Some("date_of_birth"),
-        Some("height"),
-        Some("sex"),
+        AutoOptions {
+            x: AutoChannel::field("date_of_birth"),
+            y: AutoChannel::field("height").reduce(Some(GroupReducer::Mean)),
+            color: AutoChannel::field("sex"),
+            mark: Some(AutoMark::Line),
+            ..AutoOptions::default()
+        },
     )
     .color(|c| c.legend(true))
 }

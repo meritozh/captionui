@@ -789,6 +789,8 @@ pub struct MarkStyle {
     pub dy: f32,
     /// The bend of an arrow, in degrees, Plot's `bend`.
     pub bend: f32,
+    /// Which way an arrow bends, Plot's `sweep`.
+    pub sweep: Sweep,
     /// The angle between an arrow's wings, in degrees, Plot's `headAngle`.
     pub head_angle: f32,
     /// The length of an arrow's wings, in pixels, Plot's `headLength`.
@@ -1028,6 +1030,7 @@ impl Default for MarkStyle {
             dx: 0.,
             dy: 0.,
             bend: 0.,
+            sweep: Sweep::Positive,
             head_angle: 60.,
             head_length: 8.,
             length: 12.,
@@ -1133,6 +1136,9 @@ pub struct Mark {
     pub group: Option<GroupConfig>,
     /// A window transform applied to the mark's value, Plot's `window`.
     pub window: Option<(usize, WindowReducer, Anchor)>,
+    /// Plot's window `strict`: a window short of `k` values, or holding a
+    /// missing one, gives no value.
+    pub window_strict: bool,
     /// A numeric transform of the mark's value, Plot's `normalize`.
     pub normalize: bool,
     /// How the mark dodges its points into a beeswarm, Plot's `dodgeX`/`dodgeY`.
@@ -1208,6 +1214,48 @@ pub struct RowFilter(pub std::rc::Rc<dyn Fn(&crate::table::Table) -> bool>);
 impl std::fmt::Debug for RowFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("RowFilter(..)")
+    }
+}
+
+/// Which way an arrow's bend turns, Plot's `sweep`: always one way, or by
+/// the order of its ends along x or y (in pixels).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sweep {
+    /// Plot's default `1`: the bend as given.
+    #[default]
+    Positive,
+    /// `-1`: the bend reversed.
+    Negative,
+    /// `"+x"`: the bend's sign is `ascending(x1, x2)`.
+    PlusX,
+    /// `"-x"`: `descending(x1, x2)`.
+    MinusX,
+    /// `"+y"`: `ascending(y1, y2)`.
+    PlusY,
+    /// `"-y"`: `descending(y1, y2)`.
+    MinusY,
+}
+
+impl Sweep {
+    /// The sign the bend takes for an arrow between two pixel points.
+    pub fn sign(self, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+        let ascending = |a: f32, b: f32| -> f32 {
+            if a < b {
+                -1.
+            } else if a > b {
+                1.
+            } else {
+                0.
+            }
+        };
+        match self {
+            Sweep::Positive => 1.,
+            Sweep::Negative => -1.,
+            Sweep::PlusX => ascending(x1, x2),
+            Sweep::MinusX => -ascending(x1, x2),
+            Sweep::PlusY => ascending(y1, y2),
+            Sweep::MinusY => -ascending(y1, y2),
+        }
     }
 }
 
@@ -1578,6 +1626,7 @@ impl Mark {
             reduce: None,
             group: None,
             window: None,
+            window_strict: false,
             normalize: false,
             dodge: None,
             title: None,
@@ -1682,6 +1731,12 @@ impl Mark {
             && self.channels.z.is_none()
         {
             self.channels.z = Some(crate::table::Channel::Field(field.clone()));
+            self.implied_z = true;
+        } else if let ColorChannel::Value(accessor) = color
+            && self.channels.z.is_none()
+        {
+            // An accessor is a channel too: `stroke: (d) => d.sensor`.
+            self.channels.z = Some(crate::table::Channel::Accessor(accessor.clone()));
             self.implied_z = true;
         }
     }
@@ -1894,10 +1949,13 @@ impl Mark {
     /// channel, the largest value per domain value; `"-x"` or `reverse`
     /// sorts descending.
     pub fn sort_domain(mut self, scale: &str, by: &str, reverse: bool) -> Self {
-        let (by, descending) = match by.strip_prefix('-') {
+        let (by, negate) = match by.strip_prefix('-') {
             Some(by) => (by, true),
             None => (by, false),
         };
+        // Plot's `channelDomain`: `width` and `height` sort descending by
+        // default, every other channel ascending.
+        let descending = negate != matches!(by, "width" | "height");
         self.domain_sort.push(DomainSort {
             scale: scale.to_string().into(),
             by: by.to_string().into(),
@@ -2548,6 +2606,12 @@ impl Mark {
         self
     }
 
+    /// Make the mark's window strict, Plot's `strict: true`.
+    pub fn window_strict(mut self, strict: bool) -> Self {
+        self.window_strict = strict;
+        self
+    }
+
     /// Apply a window transform to the mark's value, Plot's `window`.
     pub fn window(mut self, k: usize, reducer: WindowReducer, anchor: Anchor) -> Self {
         self.window = Some((k, reducer, anchor));
@@ -2630,6 +2694,12 @@ impl Mark {
     /// Curve an arrow by `bend` degrees, Plot's `bend`.
     pub fn bend(mut self, degrees: f32) -> Self {
         self.style.bend = degrees;
+        self
+    }
+
+    /// Turn an arrow's bend by the order of its ends, Plot's `sweep`.
+    pub fn sweep(mut self, sweep: Sweep) -> Self {
+        self.style.sweep = sweep;
         self
     }
 
@@ -3511,6 +3581,12 @@ macro_rules! mark_builder {
                 self
             }
 
+            /// Make the mark's window strict, Plot's `strict: true`.
+            pub fn window_strict(mut self, strict: bool) -> Self {
+                self.0 = self.0.window_strict(strict);
+                self
+            }
+
             /// Normalize the mark's value.
             pub fn normalize(mut self) -> Self {
                 self.0 = self.0.normalize();
@@ -3570,6 +3646,12 @@ macro_rules! mark_builder {
             /// Curve an arrow by `bend` degrees, Plot's `bend`.
             pub fn bend(mut self, degrees: f32) -> Self {
                 self.0 = self.0.bend(degrees);
+                self
+            }
+
+            /// Turn an arrow's bend by the order of its ends, Plot's `sweep`.
+            pub fn sweep(mut self, sweep: crate::mark::Sweep) -> Self {
+                self.0 = self.0.sweep(sweep);
                 self
             }
 
@@ -4219,11 +4301,16 @@ pub fn expand_box(mark: Mark) -> Vec<Mark> {
         m.fx = mark.fx.clone();
         m.fy = mark.fy.clone();
         m.filter = mark.filter.clone();
+        // Plot's box passes its missing category on as an explicit
+        // `null`, so no part reads its values on the category axis.
+        let across = category
+            .clone()
+            .or(Some(crate::table::Channel::Constant(crate::value::Value::Null)));
         if vertical {
-            m.channels.x = category.clone();
+            m.channels.x = across;
             m.channels.y = value.clone();
         } else {
-            m.channels.y = category.clone();
+            m.channels.y = across;
             m.channels.x = value.clone();
         }
         m.channels.z = category.clone();

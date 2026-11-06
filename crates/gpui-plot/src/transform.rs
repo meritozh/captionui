@@ -730,76 +730,137 @@ pub fn window(
     reducer: WindowReducer,
     anchor: Anchor,
 ) -> Dataset {
-    let values: Vec<Value> = data.values(field);
-    let numbers: Vec<Option<f64>> = values.iter().map(Value::as_number).collect();
-    let k = k.max(1);
-    let mut output = Vec::with_capacity(numbers.len());
-
-    for index in 0..numbers.len() {
-        let (start, end) = window_bounds(index, numbers.len(), k, anchor);
-        let slice: Vec<f64> = numbers[start..end].iter().filter_map(|v| *v).collect();
-        let result = match reducer {
-            WindowReducer::Mean => {
-                (!slice.is_empty()).then(|| slice.iter().sum::<f64>() / slice.len() as f64)
-            }
-            WindowReducer::Sum => (!slice.is_empty()).then(|| slice.iter().sum::<f64>()),
-            WindowReducer::Median => {
-                if slice.is_empty() {
-                    None
-                } else {
-                    let mut sorted = slice.clone();
-                    sorted.sort_by(f64::total_cmp);
-                    let mid = sorted.len() / 2;
-                    Some(if sorted.len().is_multiple_of(2) {
-                        (sorted[mid - 1] + sorted[mid]) / 2.
-                    } else {
-                        sorted[mid]
-                    })
-                }
-            }
-            WindowReducer::Min => slice.iter().copied().reduce(f64::min),
-            WindowReducer::Max => slice.iter().copied().reduce(f64::max),
-            WindowReducer::CumulativeMean => {
-                let slice: Vec<f64> = numbers[..=index].iter().filter_map(|v| *v).collect();
-                (!slice.is_empty()).then(|| slice.iter().sum::<f64>() / slice.len() as f64)
-            }
-            WindowReducer::Difference => {
-                let current = numbers[index];
-                let previous = index.checked_sub(1).and_then(|i| numbers[i]);
-                match (current, previous) {
-                    (Some(current), Some(previous)) => Some(current - previous),
-                    _ => None,
-                }
-            }
-            WindowReducer::Change => {
-                let current = numbers[index];
-                let first = numbers.iter().find_map(|v| *v);
-                match (current, first) {
-                    (Some(current), Some(first)) => Some(current - first),
-                    _ => None,
-                }
-            }
-            WindowReducer::PercentChange => {
-                let current = numbers[index];
-                let previous = index.checked_sub(1).and_then(|i| numbers[i]);
-                match (current, previous) {
-                    (Some(current), Some(previous)) if previous != 0. => {
-                        Some((current - previous) / previous)
-                    }
-                    _ => None,
-                }
-            }
-        };
-        output.push(result.map(Value::Number).unwrap_or(Value::Null));
-    }
-
+    let numbers: Vec<Option<f64>> = data.values(field).iter().map(Value::as_number).collect();
+    let output = window_values(&numbers, k, reducer, anchor, false);
     Dataset::new(
         data.rows()
             .iter()
             .cloned()
             .zip(output)
-            .map(|(row, value)| row.with(field, value)),
+            .map(|(row, value)| row.with(field, value.map(Value::Number).unwrap_or(Value::Null))),
     )
+}
+
+/// Plot's window `mapIndex` over one series: each value's window of `k`
+/// starts `s` before it — `(k - 1) >> 1` for `middle`, 0 for `start`,
+/// `k - 1` for `end` — and is truncated at the series' ends unless
+/// `strict`, when a short window, or one holding a missing value, gives
+/// none.
+pub fn window_values(
+    values: &[Option<f64>],
+    k: usize,
+    reducer: WindowReducer,
+    anchor: Anchor,
+    strict: bool,
+) -> Vec<Option<f64>> {
+    let n = values.len();
+    let k = k.max(1);
+    let s = match anchor {
+        Anchor::Middle => (k - 1) >> 1,
+        Anchor::Start => 0,
+        Anchor::End => k - 1,
+    };
+    let mut output: Vec<Option<f64>> = vec![None; n];
+    // The window starting at `i` (which may sit before the series).
+    let window = |i: isize| -> Vec<Option<f64>> {
+        let lo = i.max(0) as usize;
+        let hi = ((i + k as isize).max(0) as usize).min(n);
+        if lo >= hi { Vec::new() } else { values[lo..hi].to_vec() }
+    };
+    let reduce = |slice: &[Option<f64>]| -> Option<f64> {
+        let defined: Vec<f64> = slice.iter().filter_map(|v| *v).filter(|v| !v.is_nan()).collect();
+        match reducer {
+            WindowReducer::Mean => {
+                (!defined.is_empty()).then(|| defined.iter().sum::<f64>() / defined.len() as f64)
+            }
+            // A non-strict sum counts a missing value as zero.
+            WindowReducer::Sum => Some(defined.iter().sum::<f64>()),
+            WindowReducer::Median => {
+                if defined.is_empty() {
+                    return None;
+                }
+                let mut sorted = defined.clone();
+                sorted.sort_by(f64::total_cmp);
+                let mid = sorted.len() / 2;
+                Some(if sorted.len().is_multiple_of(2) {
+                    (sorted[mid - 1] + sorted[mid]) / 2.
+                } else {
+                    sorted[mid]
+                })
+            }
+            WindowReducer::Min => defined.iter().copied().reduce(f64::min),
+            WindowReducer::Max => defined.iter().copied().reduce(f64::max),
+            WindowReducer::Difference => {
+                let first = slice.iter().find_map(|v| *v)?;
+                let last = slice.iter().rev().find_map(|v| *v)?;
+                Some(last - first)
+            }
+            _ => None,
+        }
+    };
+    match reducer {
+        // Not Plot window reducers: running reductions over the series.
+        WindowReducer::CumulativeMean => {
+            let (mut sum, mut count) = (0., 0usize);
+            for (index, value) in values.iter().enumerate() {
+                if let Some(v) = value {
+                    sum += v;
+                    count += 1;
+                }
+                output[index] = (count > 0).then(|| sum / count as f64);
+            }
+        }
+        WindowReducer::Change => {
+            let first = values.iter().find_map(|v| *v);
+            for (index, value) in values.iter().enumerate() {
+                output[index] = match (value, first) {
+                    (Some(v), Some(f)) => Some(v - f),
+                    _ => None,
+                };
+            }
+        }
+        WindowReducer::PercentChange => {
+            for index in 1..n {
+                output[index] = match (values[index], values[index - 1]) {
+                    (Some(v), Some(p)) if p != 0. => Some((v - p) / p),
+                    _ => None,
+                };
+            }
+        }
+        // Plot's strict difference takes the windows that fit, short one.
+        WindowReducer::Difference if strict => {
+            for i in 0..n.saturating_sub(k) {
+                output[i + s] = match (values[i], values[i + k - 1]) {
+                    (Some(a), Some(b)) => Some(b - a),
+                    _ => None,
+                };
+            }
+        }
+        // Plot's non-strict difference stops where the window would start
+        // past `n - k`.
+        WindowReducer::Difference => {
+            let end = n as isize - k as isize + s as isize + 1;
+            for i in -(s as isize)..end {
+                output[(i + s as isize) as usize] = reduce(&window(i));
+            }
+        }
+        _ if strict => {
+            for i in 0..(n + 1).saturating_sub(k) {
+                let slice = &values[i..i + k];
+                output[i + s] = if slice.iter().all(|v| v.is_some_and(|v| !v.is_nan())) {
+                    reduce(slice)
+                } else {
+                    None
+                };
+            }
+        }
+        _ => {
+            for (p, out) in output.iter_mut().enumerate() {
+                *out = reduce(&window(p as isize - s as isize));
+            }
+        }
+    }
+    output
 }
 
 /// Where a window sits when it cannot be centered on its point, Plot's
@@ -813,20 +874,6 @@ pub enum Anchor {
     Start,
     /// The window ends at the point.
     End,
-}
-
-fn window_bounds(index: usize, len: usize, k: usize, anchor: Anchor) -> (usize, usize) {
-    // A centered window reaches `left` back and `right` forward, so a window of
-    // three takes one neighbor on each side and one at the ends takes only what
-    // the data has — d3's partial rolling window.
-    let left = k / 2;
-    let right = k.saturating_sub(left + 1);
-    let (start, end) = match anchor {
-        Anchor::Middle => (index.saturating_sub(left), (index + right + 1).min(len)),
-        Anchor::Start => (index, (index + k).min(len)),
-        Anchor::End => (index.saturating_sub(k.saturating_sub(1)), index + 1),
-    };
-    (start, end)
 }
 
 /// Normalize a numeric field to `0..=1` across the dataset, Plot's
@@ -924,93 +971,96 @@ pub fn dodge(
     config: Dodge,
     extent: [f32; 2],
 ) -> Dataset {
-    let mut placed: Vec<f32> = vec![f32::NAN; data.rows().len()];
-
-    // Points already placed, as (low, high, offset) along the varying axis.
-    let mut occupied: Vec<(f32, f32, f32)> = Vec::new();
-    let (start, end) = (extent[0].min(extent[1]), extent[0].max(extent[1]));
-
-    for (index, position) in positions.iter().enumerate() {
-        let Some(position) = *position else {
-            continue;
-        };
-        let radius = config.radius;
-        let padding = config.padding;
-        let low = position - radius;
-        let high = position + radius;
-
-        // Candidate offsets: the baseline first, then the two places a circle
-        // can sit tangent to each already-placed circle that could overlap.
-        let mut candidates = vec![0.0_f32];
-        let mut neighbours = Vec::new();
-        for &(other_low, other_high, other_offset) in &occupied {
-            if other_high + padding < low - padding || other_low - padding > high + padding {
-                continue;
-            }
-            let centre = (other_low + other_high) / 2.;
-            let dx = position - centre;
-            let dr = 2. * radius + padding;
-            if dr * dr < dx * dx {
-                continue;
-            }
-            let dy = (dr * dr - dx * dx).sqrt();
-            candidates.push(other_offset - dy);
-            candidates.push(other_offset + dy);
-            neighbours.push((centre, other_offset));
-        }
-
-        // A `Start` or `End` dodge packs away from its baseline only; an
-        // offset below zero would put the circle outside the frame.
-        if config.anchor != DodgeAnchor::Middle {
-            candidates.retain(|candidate| *candidate >= -1e-3);
-        }
-        // Nearest first, so the packed shape stays compact.
-        candidates.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
-
-        // Take the first candidate that does not overlap anything placed.
-        let needed = 2. * radius + padding;
-        let mut chosen = candidates[0];
-        'outer: for &candidate in &candidates {
-            for &(centre, other_offset) in &neighbours {
-                let gap = (candidate - other_offset).abs();
-                let across = (position - centre).abs();
-                if (gap * gap + across * across).sqrt() < needed - 1e-3 {
-                    continue 'outer;
-                }
-            }
-            chosen = candidate;
-            break;
-        }
-
-        placed[index] = chosen;
-        occupied.push((low, high, chosen));
-    }
-
-    // The packed offsets are already positions on the axis: the caller passes
-    // the extent in the axis's own coordinates, and `Start` packs from its low
-    // end, `End` from its high end, `Middle` outward from its centre.
+    let radii = vec![config.radius; positions.len()];
+    let order: Vec<usize> = (0..positions.len()).collect();
+    let placed = dodge_positions(positions, &radii, &order, config.anchor, config.padding, extent);
     let rows: Vec<Table> = data
         .rows()
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let offset = placed[index];
-            if offset.is_nan() {
-                return row.clone();
-            }
-            // Plot lifts a baseline-anchored pack by a radius and the padding,
-            // so the first row sits inside the frame.
-            let baseline = config.radius + config.padding;
-            let value = match config.anchor {
-                DodgeAnchor::Start => start + offset + baseline,
-                DodgeAnchor::End => end - offset - baseline,
-                DodgeAnchor::Middle => (start + end) / 2. + offset,
-            };
-            row.clone().with(output, Value::Number(value as f64))
+        .zip(placed)
+        .map(|(row, placed)| match placed {
+            Some(value) => row.clone().with(output, Value::Number(value as f64)),
+            None => row.clone(),
         })
         .collect();
-
     Dataset::new(rows)
+}
+
+/// Plot's dodge in pixels: each point, taken in `order`, sits at the
+/// nearest offset from the anchor where its circle of `radii[i]` clears
+/// every circle already placed by `padding`. Returns each point's position
+/// across the packed axis, in the coordinates of `extent`; a point without
+/// a position, or with no positive radius, gets none.
+pub fn dodge_positions(
+    positions: &[Option<f32>],
+    radii: &[f32],
+    order: &[usize],
+    anchor: DodgeAnchor,
+    padding: f32,
+    extent: [f32; 2],
+) -> Vec<Option<f32>> {
+    let (start, end) = (extent[0].min(extent[1]), extent[0].max(extent[1]));
+    // Plot's anchors: a direction away from the baseline, and the baseline.
+    let (ky, ty) = match anchor {
+        DodgeAnchor::Start => (1., start),
+        DodgeAnchor::End => (-1., end),
+        DodgeAnchor::Middle => (0., (start + end) / 2.),
+    };
+    let mut y: Vec<f32> = vec![f32::NAN; positions.len()];
+    let mut out: Vec<Option<f32>> = vec![None; positions.len()];
+    // The placed circles, as (low, high, index) along the varying axis.
+    let mut placed: Vec<(f32, f32, usize)> = Vec::new();
+    let mut intervals: Vec<f32> = Vec::new();
+    for &i in order {
+        let Some(x) = positions.get(i).copied().flatten().filter(|x| x.is_finite()) else {
+            continue;
+        };
+        let ri = radii.get(i).copied().unwrap_or(0.);
+        if ri.is_nan() || ri <= 0. {
+            continue;
+        }
+        // The baseline sits a radius and the padding in from the anchor.
+        let y0 = if ky != 0. { ri + padding } else { 0. };
+        let (l, h) = (x - ri, x + ri);
+        intervals.clear();
+        intervals.extend([0., 0.]);
+        for &(lj, hj, j) in &placed {
+            if hj < l - padding || lj > h + padding {
+                continue;
+            }
+            let xj = positions[j].unwrap_or(f32::NAN);
+            let yj = y[j] - y0;
+            let dx = x - xj;
+            let dr = padding + ri + radii[j];
+            let dy = (dr * dr - dx * dx).max(0.).sqrt();
+            intervals.push(yj - dy);
+            intervals.push(yj + dy);
+        }
+        let mut candidates: Vec<f32> = intervals.clone();
+        if ky != 0. {
+            candidates.retain(|c| *c >= 0.);
+            candidates.sort_by(f32::total_cmp);
+        } else {
+            candidates.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
+        }
+        'candidates: for candidate in candidates {
+            for pair in intervals.chunks(2) {
+                if pair[0] + 1e-6 < candidate && candidate < pair[1] - 1e-6 {
+                    continue 'candidates;
+                }
+            }
+            y[i] = candidate + y0;
+            break;
+        }
+        placed.push((l, h, i));
+    }
+    let ky = if ky == 0. { 1. } else { ky };
+    for (i, value) in y.iter().enumerate() {
+        if value.is_finite() {
+            out[i] = Some(value * ky + ty);
+        }
+    }
+    out
 }
 
 /// Which row of a group a [`Select`] keeps, Plot's `select` options.
@@ -1262,7 +1312,7 @@ mod tests {
             .collect();
         assert_eq!(offsets.len(), 3);
         // The dodge writes the cross-axis coordinate, not the along-axis one:
-        // the first point sits a radius and the padding off the baseline, as
+        // the first point sits a radius and the padding off the anchor, as
         // Plot's does, and the others are pushed off it by at least a
         // diameter so that no two overlap.
         assert_eq!(offsets[0], 5.);
@@ -1287,7 +1337,7 @@ mod tests {
             .filter_map(Value::as_number)
             .collect();
         // Far enough apart that every point fits where it already is, so each
-        // sits on the first row, a radius and the padding off the baseline.
+        // keeps the baseline, a radius and the padding off the anchor.
         assert_eq!(offsets, vec![4., 4., 4.]);
     }
 

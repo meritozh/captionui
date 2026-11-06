@@ -20,7 +20,9 @@ fn e01() -> Plot {
     Plot::plot().mark(rule_y([0.])).mark(
         line_y(data::normal_samples(600, "y", 42))
             .map("y", "cumsum", MapReducer::Sum)
-            .y("cumsum"),
+            // Plot's `y: d3.randomNormal()` is a function, so the axis has
+            // no label.
+            .y(Channel::number(|d| d.num("cumsum"))),
     )
 }
 
@@ -84,7 +86,8 @@ fn e03() -> Plot {
         if i + 1 >= n {
             let window = &closes[i + 1 - n..=i];
             let mean = window.iter().sum::<f64>() / n as f64;
-            let variance = window.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+            // d3's `deviation`: the sample standard deviation.
+            let variance = window.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
             let deviation = variance.sqrt();
             row = row
                 .with("mean", Value::Number(mean))
@@ -93,8 +96,10 @@ fn e03() -> Plot {
         }
         row
     }));
+    // Plot's map outputs carry their input's label, so every channel here
+    // reads "Close".
     Plot::plot()
-        .y(|y| y.grid(true))
+        .y(|y| y.grid(true).label("Close"))
         .mark(
             area_y(banded.clone())
                 .x("Date")

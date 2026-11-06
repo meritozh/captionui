@@ -431,6 +431,16 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
             ((length / if is_x { 80. } else { 35. }).round() as usize).max(1)
         }
     };
+    // The count d3 actually reads: Plot passes `length / tickSpacing`
+    // through unrounded.
+    let tick_density = match plot.ticks {
+        Some(Ticks::Count(count)) => count as f64,
+        _ if options.tick_count > 0 => options.tick_count as f64,
+        _ => {
+            let length = (range[1] - range[0]).abs();
+            (length as f64 / if is_x { 80. } else { 35. }).max(f64::MIN_POSITIVE)
+        }
+    };
     let label = |value: &crate::value::Value, default: gpui::SharedString| -> gpui::SharedString {
         match &plot.tick_format {
             Some(format) => {
@@ -500,18 +510,36 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
                 let factor = if percent { 100. } else { 1. };
                 let shown = [domain[0] * factor, domain[1] * factor];
                 let log = transform == Transform::Log;
+                let base = plot.base.unwrap_or(10.);
+                let explicit_ticks = explicit.is_some();
                 let ticks = explicit.unwrap_or_else(|| {
                     if log {
-                        crate::ticks::d3_log_ticks(domain[0], domain[1], tick_count)
+                        crate::ticks::d3_log_ticks_base(domain[0], domain[1], tick_density, base)
                     } else if percent {
-                        crate::ticks::linear_ticks(shown, tick_count, Transform::Linear)
+                        crate::ticks::linear_ticks_fractional(shown, tick_density)
                             .into_iter()
                             .map(|t| t / factor)
                             .collect()
                     } else {
-                        scale.ticks(tick_count)
+                        crate::ticks::linear_ticks_fractional(domain, tick_density)
                     }
                 });
+                // Plot labels integer years 1500–2500 with `String`, not
+                // the scale's tick format, so 1992 reads `1992`.
+                let years = plot.tick_format.is_none()
+                    && ticks.iter().any(|t| t.is_finite())
+                    && ticks.iter().filter(|t| t.is_finite()).all(|t| {
+                        t.fract() == 0. && (1500. ..=2500.).contains(t)
+                    });
+                // d3's log `tickFormat` divides by the tick total at its
+                // default count of ten, and reads Plot's count unless the
+                // ticks were given outright.
+                let log_count = if explicit_ticks { 10. } else { tick_density };
+                let log_total = if log {
+                    crate::ticks::d3_log_ticks_base(domain[0], domain[1], 10., base).len()
+                } else {
+                    0
+                };
                 let spec = match &plot.tick_format {
                     Some(crate::options::TickFormat::Spec(spec)) => Some(spec.to_string()),
                     _ => None,
@@ -519,17 +547,29 @@ fn resolve_axis(values: &[crate::value::Value], options: &AxisOptions) -> Axis {
                 let custom = matches!(plot.tick_format, Some(crate::options::TickFormat::Fn(_)));
                 // d3's tick formats: the precision follows the tick step, and
                 // a log scale labels only the multiples the count has room for.
-                let linear_format =
-                    crate::format::tick_format(shown[0], shown[1], tick_count, spec.as_deref());
-                let total = ticks.len();
+                let linear_format = crate::format::tick_format_fractional(
+                    shown[0],
+                    shown[1],
+                    tick_density,
+                    spec.as_deref(),
+                );
                 ticks
                     .into_iter()
                     .filter_map(|tick| {
                         let value = crate::value::Value::Number(tick);
                         let text: gpui::SharedString = if custom {
                             label(&value, gpui::SharedString::default())
-                        } else if log && spec.is_none() {
-                            crate::ticks::d3_log_tick_label(tick, tick_count, total, None).into()
+                        } else if years {
+                            format!("{tick}").into()
+                        } else if log {
+                            crate::ticks::d3_log_tick_label_base(
+                                tick,
+                                log_count,
+                                log_total,
+                                base,
+                                spec.as_deref(),
+                            )
+                            .into()
                         } else {
                             linear_format.format(tick * factor).into()
                         };
@@ -796,6 +836,55 @@ pub(crate) fn paint_grid(
     }
 }
 
+/// Which of `count` facet ticks an axis labels: every one, unless the facet
+/// scale has an `interval`, when Plot takes every nth value of the domain to
+/// come close to one tick per `spacing` pixels (35 down fy, 80 across fx).
+fn facet_tick_stride(
+    options: Option<&crate::options::ScaleOptions>,
+    count: usize,
+    length: f32,
+    spacing: f32,
+) -> usize {
+    if options.is_none_or(|o| o.interval.is_none()) {
+        return 1;
+    }
+    let ticks = length / spacing;
+    ((count as f32 / ticks).round() as usize).max(1)
+}
+
+/// Plot's facet grid, `fx: {grid: true}` or `fy: {grid: true}`: a rule
+/// through the middle of each facet band, across the whole plot, as the
+/// unfaceted `axisFx`/`axisFy` grid draws it.
+pub(crate) fn paint_facet_grid(
+    frame: &Frame,
+    theme: &PlotTheme,
+    window: &mut Window,
+    grid: &Grid,
+    fx_grid: Option<&crate::options::ScaleOptions>,
+    fy_grid: Option<&crate::options::ScaleOptions>,
+) {
+    let plot = frame.plot;
+    let width = theme.line_width.as_f32();
+    if let (Some(fy), Some(_)) = (&grid.fy, fy_grid) {
+        let stride = facet_tick_stride(fy_grid, fy.len(), plot.size.height.as_f32(), 35.);
+        for index in (0..fy.len()).step_by(stride) {
+            let (start, height) = band(index, fy.len(), plot.size.height.as_f32());
+            let y = plot.origin.y + px(start + height / 2.);
+            let line = [point(plot.origin.x, y), point(plot.origin.x + plot.size.width, y)];
+            paint::paint_stroke(&line, width, theme.grid, window);
+        }
+    }
+    if let (Some(fx), Some(_)) = (&grid.fx, fx_grid) {
+        let stride = facet_tick_stride(fx_grid, fx.len(), plot.size.width.as_f32(), 80.);
+        for index in (0..fx.len()).step_by(stride) {
+            let (start, band_width) = band(index, fx.len(), plot.size.width.as_f32());
+            let x = plot.origin.x + px(start + band_width / 2.);
+            let line = [point(x, plot.origin.y), point(x, plot.origin.y + plot.size.height)];
+            paint::paint_stroke(&line, width, theme.grid, window);
+        }
+    }
+}
+
 /// How one axis draws, Plot's axis options.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AxisStyle {
@@ -1056,8 +1145,55 @@ pub(crate) fn paint_facet_labels(
 
     if let (Some(fx), Some(_)) = (&grid.fx, fx_options) {
         let labels = format(fx_options, fx);
-        for (index, text) in labels.into_iter().enumerate() {
+        let stride = facet_tick_stride(fx_options, fx.len(), plot.size.width.as_f32(), 80.);
+        let options = fx_options.expect("fx options");
+        let anchor = if fx_bottom {
+            crate::options::AxisAnchor::Bottom
+        } else {
+            crate::options::AxisAnchor::Top
+        };
+        let style = AxisStyle::new(anchor, options);
+        // A facet axis draws no ticks unless asked, Plot's `tickSize: 0`.
+        let tick_size = options.tick_size.unwrap_or(0.);
+        let edge = if fx_bottom {
+            plot.origin.y + plot.size.height
+        } else {
+            plot.origin.y
+        };
+        let direction = if fx_bottom { 1. } else { -1. };
+        for (index, text) in labels.into_iter().enumerate().step_by(stride) {
             let (start, width) = band(index, fx.len(), plot.size.width.as_f32());
+            let tx = plot.origin.x + px(start + width / 2.);
+            if tick_size > 0. {
+                paint::paint_stroke(
+                    &[point(tx, edge), point(tx, edge + px(tick_size * direction))],
+                    theme.line_width.as_f32(),
+                    color,
+                    window,
+                );
+            }
+            // Plot's `tickRotate`, as the x axis turns its labels.
+            if style.tick_rotate.abs() >= 10. {
+                let offset = tick_size.max(0.) + style.tick_padding;
+                let ty = edge + px(offset * direction);
+                let align = if (style.tick_rotate < 0.) ^ fx_bottom {
+                    TextAlign::Left
+                } else {
+                    TextAlign::Right
+                };
+                paint::paint_rotated_text(
+                    &text,
+                    theme.label_size.as_f32(),
+                    color,
+                    &theme.font_family,
+                    point(tx, ty),
+                    style.tick_rotate,
+                    align,
+                    window,
+                    cx,
+                );
+                continue;
+            }
             let label = Label::new(
                 text,
                 theme.label_size,
@@ -1085,7 +1221,8 @@ pub(crate) fn paint_facet_labels(
 
     if let (Some(fy), Some(_)) = (&grid.fy, fy_options) {
         let labels = format(fy_options, fy);
-        for (index, text) in labels.into_iter().enumerate() {
+        let stride = facet_tick_stride(fy_options, fy.len(), plot.size.height.as_f32(), 35.);
+        for (index, text) in labels.into_iter().enumerate().step_by(stride) {
             let (start, height) = band(index, fy.len(), plot.size.height.as_f32());
             let label = Label::new(
                 text,

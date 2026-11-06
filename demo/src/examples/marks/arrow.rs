@@ -202,8 +202,7 @@ fn e03() -> Plot {
                 .x(Value::Number(0.))
                 .y1("source")
                 .y2("target")
-                // `sweep: "-y"` has no equivalent; the bend alone curves
-                // each arc by its own direction.
+                .sweep(gpui_plot::Sweep::MinusY)
                 .bend(90.)
                 .head_length(0.)
                 .stroke("samegroup")

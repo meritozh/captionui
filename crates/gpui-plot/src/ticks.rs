@@ -30,7 +30,20 @@ pub fn linear_ticks(domain: [f64; 2], count: usize, transform: Transform) -> Vec
         return log_ticks(lo, hi, count);
     }
 
-    nice_linear_ticks(lo, hi, count)
+    nice_linear_ticks(lo, hi, count as f64)
+}
+
+/// d3's `ticks(lo, hi, count)` for a fractional count, the way Plot passes
+/// its `tickSpacing` density (`width / 80`) straight through to d3.
+pub fn linear_ticks_fractional(domain: [f64; 2], count: f64) -> Vec<f64> {
+    let [lo, hi] = domain;
+    if !lo.is_finite() || !hi.is_finite() {
+        return vec![];
+    }
+    if lo == hi {
+        return vec![lo];
+    }
+    nice_linear_ticks(lo, hi, count.max(f64::MIN_POSITIVE))
 }
 
 /// Round values spaced by a nice step, the linear-scale tick layout.
@@ -38,7 +51,7 @@ pub fn linear_ticks(domain: [f64; 2], count: usize, transform: Transform) -> Vec
 /// Each tick is `i * step` for a whole `i`, rather than a running sum, so a
 /// step below one ulp of the domain cannot stall the loop and rounding error
 /// does not accumulate across the axis.
-fn nice_linear_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
+fn nice_linear_ticks(lo: f64, hi: f64, count: f64) -> Vec<f64> {
     /// More ticks than any axis can label; a bound against degenerate input.
     const MAX_TICKS: f64 = 1_000.;
     let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
@@ -47,7 +60,7 @@ fn nice_linear_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
         return vec![lo, hi];
     }
     // d3's `tickIncrement`: the span over the count.
-    let step = nice_step(span / count as f64);
+    let step = nice_step(span / count);
     if !step.is_finite() || step <= 0. {
         return vec![lo];
     }
@@ -82,7 +95,7 @@ fn log_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
     // 1800..2600 labels 2000, 2200, 2400 rather than a lone 2000. A domain
     // like 10..100 holds both of its decades, so it labels them.
     if inner_last - inner_first < 1 {
-        let mut ticks = nice_linear_ticks(lo, hi, count);
+        let mut ticks = nice_linear_ticks(lo, hi, count as f64);
         ticks.retain(|tick| *tick >= lo * (1. - 1e-12) && *tick <= hi * (1. + 1e-12));
         return ticks;
     }
@@ -142,32 +155,40 @@ fn round_tick(value: f64, step: f64) -> f64 {
 
 /// d3's tick step for `count` ticks over `[start, stop]`, as `ticks` lays
 /// them out.
-pub fn tick_increment_step(start: f64, stop: f64, count: usize) -> f64 {
+pub fn tick_increment_step(start: f64, stop: f64, count: f64) -> f64 {
     let span = (stop - start).abs();
-    if span == 0. || !span.is_finite() {
+    if span == 0. || !span.is_finite() || count.is_nan() || count <= 0. {
         return 1.;
     }
-    nice_step(span / count.max(1) as f64)
+    nice_step(span / count)
 }
 
-/// d3's `log.ticks(count)`: every multiple 1–9 of each decade when the
-/// domain spans fewer decades than the count, else powers of ten.
+/// d3's `log.ticks(count)` in base 10.
 pub fn d3_log_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
+    d3_log_ticks_base(lo, hi, count as f64, 10.)
+}
+
+/// d3's `log.base(base).ticks(count)`: every multiple `1..base` of each
+/// power when the domain spans fewer powers than the count, else powers
+/// stepped as d3's linear ticks step their logarithms.
+pub fn d3_log_ticks_base(lo: f64, hi: f64, count: f64, base: f64) -> Vec<f64> {
     let (u, v) = (lo.min(hi), lo.max(hi));
-    if u <= 0. || !v.is_finite() {
+    if u <= 0. || !v.is_finite() || base.is_nan() || base <= 0. || base == 1. {
         return Vec::new();
     }
-    let (i, j) = (u.log10(), v.log10());
-    let n = count.max(1) as f64;
+    let logs = |x: f64| if base == 10. { x.log10() } else { x.ln() / base.ln() };
+    let pows = |e: f64| if base == 10. { 10f64.powf(e) } else { base.powf(e) };
+    let (i, j) = (logs(u), logs(v));
+    let n = count;
     let mut z = Vec::new();
-    if j - i < n {
+    if base.fract() == 0. && j - i < n {
         let (i0, j0) = (i.floor() as i32, j.ceil() as i32);
         for e in i0..=j0 {
-            for k in 1..10 {
+            for k in 1..base as i64 {
                 let t = if e < 0 {
-                    k as f64 / 10f64.powi(-e)
+                    k as f64 / pows(-e as f64)
                 } else {
-                    k as f64 * 10f64.powi(e)
+                    k as f64 * pows(e as f64)
                 };
                 if t < u * (1. - 1e-12) {
                     continue;
@@ -179,17 +200,13 @@ pub fn d3_log_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
             }
         }
         if (z.len() as f64) * 2. < n {
-            z = nice_linear_ticks(u, v, count);
+            z = nice_linear_ticks(u, v, n);
         }
     } else {
-        let step = nice_step((j - i) / n.min(j - i).max(1.));
-        let first = (i / step).ceil();
-        let last = (j / step).floor();
-        let mut e = first;
-        while e <= last {
-            z.push(10f64.powf(e * step));
-            e += 1.;
-        }
+        z = nice_linear_ticks(i, j, n.min(j - i))
+            .into_iter()
+            .map(pows)
+            .collect();
     }
     z
 }
@@ -202,14 +219,31 @@ pub fn d3_log_tick_label(
     tick_total: usize,
     spec: Option<&str>,
 ) -> String {
-    let k = (10. * count as f64 / tick_total.max(1) as f64).max(1.);
-    let mut i = value / 10f64.powf(value.log10().round());
-    if i * 10. < 10. - 0.5 {
-        i *= 10.;
+    d3_log_tick_label_base(value, count as f64, tick_total, 10., spec)
+}
+
+/// d3's `log.base(base).tickFormat(count, specifier)`. `default_total` is
+/// the length of `scale.ticks()` at d3's default count of ten, which d3
+/// divides the count by; the specifier defaults to `s` in base 10, else `,`.
+pub fn d3_log_tick_label_base(
+    value: f64,
+    count: f64,
+    default_total: usize,
+    base: f64,
+    spec: Option<&str>,
+) -> String {
+    let logs = |x: f64| if base == 10. { x.log10() } else { x.ln() / base.ln() };
+    let k = (base * count / default_total.max(1) as f64).max(1.);
+    let mut i = value / base.powf(logs(value).round());
+    if i * base < base - 0.5 {
+        i *= base;
     }
     if i <= k + 1e-9 {
-        let mut format = crate::format::NumberFormat::parse(spec.unwrap_or("s"));
-        format.trim_if_unset();
+        let default = if base == 10. { "s" } else { "," };
+        let mut format = crate::format::NumberFormat::parse(spec.unwrap_or(default));
+        if base.fract() == 0. {
+            format.trim_if_unset();
+        }
         format.format(value)
     } else {
         String::new()

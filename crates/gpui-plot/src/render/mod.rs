@@ -35,6 +35,10 @@ pub struct PreparedMark {
     /// Whether a dodge packed this mark's rows along x, so its offsets are
     /// vertical; meaningless when the mark does not dodge.
     pub dodge_along_x: bool,
+    /// The x and y channel values of the rows the mark's `filter` dropped:
+    /// Plot filters the index a mark draws, but infers its scales from the
+    /// channels over all the data.
+    pub filtered_domain: [Vec<Value>; 2],
 }
 
 /// One datum's resolved channels.
@@ -347,8 +351,12 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
                 .with("$box:y", value)
         }));
     }
+    let mut dropped: Vec<Table> = Vec::new();
     if let Some(keep) = &mark.filter {
-        source = Dataset::new(source.rows().iter().filter(|row| (keep.0)(row)).cloned());
+        let (kept, out): (Vec<Table>, Vec<Table>) =
+            source.rows().iter().cloned().partition(|row| (keep.0)(row));
+        source = Dataset::new(kept);
+        dropped = out;
     }
     if let Some(config) = mark.select.as_ref().filter(|config| config.axis.is_none()) {
         let group = config.group.as_deref().map(|field| field.to_string());
@@ -475,7 +483,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
 
     // Windows and normalization rewrite the value the mark draws, so they run
     // before the shapes read it.
-    apply_window(data, mark, &mut rows);
+    apply_window(mark, &mut rows);
     if mark.normalize {
         normalize_rows(&mut rows);
     }
@@ -526,12 +534,39 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // Statistical marks summarize their category themselves, so they keep the
     // raw rows and group at draw time.
 
+    // A filtered row's channels still feed the scales, unless a transform
+    // (a bin, a group, a stack) writes that channel from the kept rows.
+    let mut filtered_domain: [Vec<Value>; 2] = [Vec::new(), Vec::new()];
+    if !dropped.is_empty() && mark.bin.is_none() && mark.group.is_none() && mark.stack.is_none() {
+        let stacked = stack::effective_stack(mark).map(|spec| spec.axis);
+        for (index, table) in dropped.iter().enumerate() {
+            let row = resolve_row(table, index, &mark.channels, mark);
+            if stacked != Some(Axis::X) {
+                filtered_domain[0].extend(
+                    [Some(row.x.clone()), row.x1.clone(), row.x2.clone()]
+                        .into_iter()
+                        .flatten()
+                        .filter(|v| !v.is_null()),
+                );
+            }
+            if stacked != Some(Axis::Y) {
+                filtered_domain[1].extend(
+                    [Some(row.y.clone()), row.y1.clone(), row.y2.clone()]
+                        .into_iter()
+                        .flatten()
+                        .filter(|v| !v.is_null()),
+                );
+            }
+        }
+    }
+
     PreparedMark {
         mark: mark.clone(),
         raster: dense_raster(mark, &source_rows_for_raster),
         density_max: None,
         rows,
         dodge_along_x: false,
+        filtered_domain,
     }
 }
 
@@ -939,6 +974,14 @@ pub fn apply_dodge(prepared: &mut [PreparedMark], frame: &Frame) {
         } else {
             (&frame.y.scale, frame.plot.size.width.as_f32())
         };
+        // Plot's dodge with an `r` channel sorts the dots by descending
+        // radius, unless the mark sorts them itself, so the big ones pack
+        // first (and draw beneath the small ones).
+        let varying = mark.rows.iter().any(|row| row.r.is_some());
+        if varying && mark.mark.sort.is_none() {
+            mark.rows
+                .sort_by(|a, b| b.r.unwrap_or(0.).total_cmp(&a.r.unwrap_or(0.)));
+        }
         let positions: Vec<Option<f32>> = mark
             .rows
             .iter()
@@ -950,16 +993,24 @@ pub fn apply_dodge(prepared: &mut [PreparedMark], frame: &Frame) {
                 }
             })
             .collect();
-        let extent = [0., extent];
-        let packed = transform::dodge(
-            &Dataset::new(mark.rows.iter().map(|row| row.row.clone())),
+        // Each dot's own radius, else the dodge's `r`, else the mark's.
+        let constant = if config.radius != transform::Dodge::default().radius {
+            config.radius
+        } else {
+            mark.mark.style.radius
+        };
+        let radii: Vec<f32> = mark.rows.iter().map(|row| row.r.unwrap_or(constant)).collect();
+        let order: Vec<usize> = (0..positions.len()).collect();
+        let packed = transform::dodge_positions(
             &positions,
-            "dodge",
-            config,
-            extent,
+            &radii,
+            &order,
+            config.anchor,
+            config.padding,
+            [0., extent],
         );
-        for (row, packed_row) in mark.rows.iter_mut().zip(packed.rows()) {
-            row.dodge_offset = packed_row.number("dodge").map(|value| value as f32);
+        for (row, packed) in mark.rows.iter_mut().zip(packed) {
+            row.dodge_offset = packed;
         }
         mark.dodge_along_x = along_x;
     }
@@ -1246,30 +1297,48 @@ fn apply_sort(rows: &mut [PreparedRow], mark: &Mark) {
     }
 }
 
-fn apply_window(data: &Dataset, mark: &Mark, rows: &mut [PreparedRow]) {
+fn apply_window(mark: &Mark, rows: &mut [PreparedRow]) {
     let Some((k, reducer, anchor)) = mark.window else {
         return;
     };
-    // The window rewrites a field in place, so it runs over the whole dataset
-    // and then the resolved rows read the rewritten value back.
-    let field = match mark.channels.y.as_ref().or(mark.channels.x.as_ref()) {
-        Some(crate::table::Channel::Field(field)) => field.clone(),
-        _ => return,
+    // Plot's `windowX` maps x, `windowY` y: the axis an X mark varies on,
+    // else y.
+    let on_x = mark.kind.category().single_axis == Some(Axis::X);
+    let read = |row: &PreparedRow| -> Option<f64> {
+        if on_x { row.x.as_number() } else { row.y.as_number() }
     };
-    let smoothed = transform::window(data, &field, k, reducer, anchor);
-    for (prepared, row) in rows.iter_mut().zip(smoothed.rows()) {
-        let value = row.value(&field);
-        if mark.channels.y.as_ref().is_some_and(is_field(&field)) {
-            prepared.y = value.clone();
-        }
-        if mark.channels.x.as_ref().is_some_and(is_field(&field)) {
-            prepared.x = value;
+    // A window restarts with each `z` series, as Plot's map groups by z.
+    let mut series: Vec<(Option<crate::value::ValueKey>, Vec<usize>)> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let key = row.z.as_ref().map(Value::key);
+        match series.iter_mut().find(|(existing, _)| *existing == key) {
+            Some((_, members)) => members.push(index),
+            None => series.push((key, vec![index])),
         }
     }
-}
-
-fn is_field(field: &SharedString) -> impl Fn(&crate::table::Channel) -> bool + '_ {
-    move |channel| matches!(channel, crate::table::Channel::Field(name) if name == field)
+    // An interval end grown from the value (a bar's or area's) follows it.
+    let derived = if on_x {
+        mark.channels.x1.is_none() && mark.channels.x2.is_none()
+    } else {
+        mark.channels.y1.is_none() && mark.channels.y2.is_none()
+    };
+    for (_, members) in series {
+        let values: Vec<Option<f64>> = members.iter().map(|&i| read(&rows[i])).collect();
+        let mapped = transform::window_values(&values, k, reducer, anchor, mark.window_strict);
+        for (&i, value) in members.iter().zip(mapped) {
+            let row = &mut rows[i];
+            let value = value.map(Value::Number).unwrap_or(Value::Null);
+            let (slot, end) = if on_x {
+                (&mut row.x, &mut row.x2)
+            } else {
+                (&mut row.y, &mut row.y2)
+            };
+            if derived && end.as_ref() == Some(slot) {
+                *end = (!value.is_null()).then(|| value.clone());
+            }
+            *slot = value;
+        }
+    }
 }
 
 fn normalize_rows(rows: &mut [PreparedRow]) {

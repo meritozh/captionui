@@ -209,6 +209,16 @@ impl NumberFormat {
 /// `",f"`, with its precision filled in from the tick step when it names
 /// none, so `"+f"` over ticks a fifth apart labels `+0.2`, not `+0.200000`.
 pub fn tick_format(start: f64, stop: f64, count: usize, spec: Option<&str>) -> NumberFormat {
+    tick_format_fractional(start, stop, count as f64, spec)
+}
+
+/// [`tick_format`] for a fractional count, as Plot's `tickSpacing` gives.
+pub fn tick_format_fractional(
+    start: f64,
+    stop: f64,
+    count: f64,
+    spec: Option<&str>,
+) -> NumberFormat {
     let step = crate::ticks::tick_increment_step(start, stop, count);
     let mut format = NumberFormat::parse(spec.unwrap_or(",f"));
     if format.precision.is_none() {

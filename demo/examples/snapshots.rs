@@ -93,7 +93,7 @@ fn main() {
     let window_height = selected
         .iter()
         .map(|example| height_of(example) + PAD * 2.)
-        .fold(1400., f32::max);
+        .fold(2400., f32::max);
     let (handle, entity) = cx
         .update(|cx| {
             gpui_kit::open_window(
