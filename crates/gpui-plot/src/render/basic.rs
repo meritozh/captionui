@@ -3344,12 +3344,22 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         }
         hasher.finish()
     };
+    // Each entry holds its grid, so the grid's address in the key can't be
+    // reused by another grid while the entry lives.
+    type Entry = (
+        u64,
+        std::rc::Rc<crate::raster::RasterGrid>,
+        std::sync::Arc<gpui::RenderImage>,
+    );
     thread_local! {
-        static PROJECTED: std::cell::RefCell<Vec<(u64, std::sync::Arc<gpui::RenderImage>)>> =
+        static PROJECTED: std::cell::RefCell<Vec<Entry>> =
             const { std::cell::RefCell::new(Vec::new()) };
     }
     let cached = PROJECTED.with_borrow(|images| {
-        images.iter().find(|(k, _)| *k == key).map(|(_, i)| i.clone())
+        images
+            .iter()
+            .find(|(k, g, _)| *k == key && std::rc::Rc::ptr_eq(g, &grid))
+            .map(|(_, _, i)| i.clone())
     });
     let image = match cached {
         Some(image) => image,
@@ -3394,7 +3404,7 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             }
             let image = crate::image_from_rgba(dw as u32, dh as u32, rgba);
             PROJECTED.with_borrow_mut(|images| {
-                images.insert(0, (key, image.clone()));
+                images.insert(0, (key, grid.clone(), image.clone()));
                 images.truncate(8);
             });
             image
