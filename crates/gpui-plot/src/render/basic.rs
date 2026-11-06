@@ -3263,10 +3263,6 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             px(ctx.frame.y.scale.position(&Value::Number(y))?),
         ))
     };
-    let (dx, dy) = (
-        (grid.x2 - grid.x1) / grid.width as f64,
-        (grid.y2 - grid.y1) / grid.height as f64,
-    );
     let _ = row;
     let cell_color = |value: &Value, ctx: &DrawContext<'_>| -> Option<Hsla> {
         if value.is_null() {
@@ -3302,49 +3298,227 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         });
         return;
     }
-    ctx.clipped(|ctx| {
-        for j in 0..grid.height {
-            for i in 0..grid.width {
-                let value = &grid.values[j * grid.width + i];
-                if value.is_null() {
-                    continue;
+    // Projected, Plot projects each sample to the frame and fills a grid
+    // laid over the whole frame from them (by the mark's `interpolate`,
+    // placing each sample in its pixel by default), drawn as one image;
+    // `clip: "sphere"` masks it to the projected globe.
+    let Some(projection) = ctx.frame.projection.as_ref() else {
+        return;
+    };
+    let (pw, ph) = (
+        ctx.frame.plot.size.width.as_f32() as f64,
+        ctx.frame.plot.size.height.as_f32() as f64,
+    );
+    let spec = prepared.mark.raster.clone().unwrap_or_default();
+    let size = spec
+        .size
+        .unwrap_or(((pw.round() as usize).max(1), (ph.round() as usize).max(1)));
+    let how = spec.interpolate.unwrap_or(crate::raster::Interpolate::None);
+    let sphere = if prepared.mark.style.clip_sphere {
+        projection.sphere()
+    } else {
+        None
+    };
+    let scale = ctx.window.scale_factor();
+    let device = (
+        (pw * scale as f64).round().clamp(1., 4096.) as usize,
+        (ph * scale as f64).round().clamp(1., 4096.) as usize,
+    );
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (std::rc::Rc::as_ptr(&grid) as usize, size, how as u8, device).hash(&mut hasher);
+        (opacity.to_bits(), sphere.is_some()).hash(&mut hasher);
+        // The projection's fit, by where it puts a few points.
+        for (x, y) in [(0., 0.), (90., 45.), (-120., -30.)] {
+            projection
+                .project(x, y)
+                .map(|p| p.map(f64::to_bits))
+                .hash(&mut hasher);
+        }
+        let n = grid.values.len();
+        for k in (0..n).step_by((n / 31).max(1)) {
+            cell_color(&grid.values[k], ctx)
+                .map(|c| [c.h, c.s, c.l, c.a].map(f32::to_bits))
+                .hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+    thread_local! {
+        static PROJECTED: std::cell::RefCell<Vec<(u64, std::sync::Arc<gpui::RenderImage>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let cached = PROJECTED.with_borrow(|images| {
+        images.iter().find(|(k, _)| *k == key).map(|(_, i)| i.clone())
+    });
+    let image = match cached {
+        Some(image) => image,
+        None => {
+            let pixels = projected_raster(&grid, projection, size, [pw, ph], how);
+            let (dw, dh) = device;
+            let mut rgba = vec![0u8; dw * dh * 4];
+            for y in 0..dh {
+                let py_ = (y as f64 + 0.5) / scale as f64;
+                // The sphere's spans on this row, even-odd.
+                let spans = sphere.as_ref().map(|ring| {
+                    let mut xs: Vec<f64> = (0..ring.len())
+                        .filter_map(|k| {
+                            let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+                            ((a[1] <= py_) != (b[1] <= py_))
+                                .then(|| a[0] + (py_ - a[1]) / (b[1] - a[1]) * (b[0] - a[0]))
+                        })
+                        .collect();
+                    xs.sort_by(f64::total_cmp);
+                    xs
+                });
+                let sy = ((py_ / ph * size.1 as f64) as usize).min(size.1 - 1);
+                for x in 0..dw {
+                    let px_ = (x as f64 + 0.5) / scale as f64;
+                    if let Some(xs) = &spans
+                        && xs.iter().filter(|&&e| e <= px_).count() % 2 == 0
+                    {
+                        continue;
+                    }
+                    let sx = ((px_ / pw * size.0 as f64) as usize).min(size.0 - 1);
+                    let Some(c) = cell_color(&pixels.values[sy * size.0 + sx], ctx) else {
+                        continue;
+                    };
+                    let c = gpui::Rgba::from(c);
+                    let k = (y * dw + x) * 4;
+                    // GPUI's images are BGRA.
+                    rgba[k] = (c.b * 255.).round() as u8;
+                    rgba[k + 1] = (c.g * 255.).round() as u8;
+                    rgba[k + 2] = (c.r * 255.).round() as u8;
+                    rgba[k + 3] = ((c.a * opacity).clamp(0., 1.) * 255.).round() as u8;
                 }
-                let color = match value.as_text().and_then(|t| crate::css::parse(t)) {
-                    Some(c) => c,
-                    None => match ctx.colors.scale.as_ref().and_then(|s| s.color(value)) {
-                        Some(c) => c,
-                        None => continue,
-                    },
-                };
-                let x0 = grid.x1 + i as f64 * dx;
-                let y0 = grid.y1 + j as f64 * dy;
-                let corners = [
-                    place(x0, y0, ctx),
-                    place(x0 + dx, y0, ctx),
-                    place(x0 + dx, y0 + dy, ctx),
-                    place(x0, y0 + dy, ctx),
-                ];
-                let Some(corners) = corners.into_iter().collect::<Option<Vec<_>>>() else {
-                    continue;
-                };
-                let color = paint::alpha(color, opacity);
-                if ctx.frame.projection.is_some() {
-                    let points: Vec<Point<Pixels>> =
-                        corners.into_iter().map(|p| ctx.absolute(p)).collect();
-                    paint::paint_fill(&points, color, ctx.window);
-                } else {
-                    // Overlap by a hair so neighbouring cells leave no seam.
-                    let (a, b) = (ctx.absolute(corners[0]), ctx.absolute(corners[2]));
-                    let rect = paint::rect_between(a, b);
-                    let rect = gpui::Bounds::new(
-                        rect.origin - point(px(0.25), px(0.25)),
-                        rect.size + gpui::size(px(0.5), px(0.5)),
-                    );
-                    paint::paint_rect(rect, 0., color, ctx.window);
+            }
+            let image = crate::image_from_rgba(dw as u32, dh as u32, rgba);
+            PROJECTED.with_borrow_mut(|images| {
+                images.insert(0, (key, image.clone()));
+                images.truncate(8);
+            });
+            image
+        }
+    };
+    let bounds = ctx.frame.plot;
+    ctx.clipped(|ctx| {
+        let _ = ctx
+            .window
+            .paint_image(bounds, bounds, Default::default(), image, 0, false);
+    });
+}
+
+/// A raster's grid resampled into frame pixels through a projection, Plot's
+/// way: each cell's centre projected onto a `size` grid over the frame,
+/// then interpolated there. Plot triangulates the projected samples for
+/// `barycentric`; a dense grid's samples are a regular lattice, so its own
+/// cells, split in two, stand in for that triangulation.
+fn projected_raster(
+    grid: &crate::raster::RasterGrid,
+    projection: &crate::geo::Fitted,
+    size: (usize, usize),
+    [pw, ph]: [f64; 2],
+    how: crate::raster::Interpolate,
+) -> crate::raster::RasterGrid {
+    let (w, h) = size;
+    let at = |i: usize, j: usize| -> Option<([f64; 2], f64)> {
+        let value = grid.values[j * grid.width + i].as_number()?;
+        if !value.is_finite() {
+            return None;
+        }
+        let (x, y) = grid.center(i, j);
+        let [px_, py_] = projection.project(x, y)?;
+        Some(([px_ / pw * w as f64, py_ / ph * h as f64], value))
+    };
+    if how != crate::raster::Interpolate::Barycentric {
+        let samples: Vec<(f64, f64, Value)> = (0..grid.height)
+            .flat_map(|j| (0..grid.width).map(move |i| (i, j)))
+            .filter_map(|(i, j)| {
+                let value = &grid.values[j * grid.width + i];
+                if value.is_null() || value.as_number().is_some_and(f64::is_nan) {
+                    return None;
+                }
+                let (x, y) = grid.center(i, j);
+                let [px_, py_] = projection.project(x, y)?;
+                Some((px_, py_, value.clone()))
+            })
+            .collect();
+        return crate::raster::RasterGrid::from_samples(&samples, w, h, [0., 0., pw, ph], how);
+    }
+    let points: Vec<Option<([f64; 2], f64)>> = (0..grid.height)
+        .flat_map(|j| (0..grid.width).map(move |i| (i, j)))
+        .map(|(i, j)| at(i, j))
+        .collect();
+    let mut values = vec![f64::NAN; w * h];
+    let mut fill = |[a, b, c]: [([f64; 2], f64); 3]| {
+        let det = (b.0[1] - c.0[1]) * (a.0[0] - c.0[0]) + (c.0[0] - b.0[0]) * (a.0[1] - c.0[1]);
+        if det.abs() < 1e-12 {
+            return;
+        }
+        let xs = [a.0[0], b.0[0], c.0[0]];
+        let ys = [a.0[1], b.0[1], c.0[1]];
+        let (x0, x1) = (xs.iter().copied().fold(f64::MAX, f64::min), xs.iter().copied().fold(f64::MIN, f64::max));
+        let (y0, y1) = (ys.iter().copied().fold(f64::MAX, f64::min), ys.iter().copied().fold(f64::MIN, f64::max));
+        // A cell torn across the antimeridian spans the frame: not a
+        // triangle of the projected lattice.
+        if x1 - x0 > w as f64 / 4. || y1 - y0 > h as f64 / 4. {
+            return;
+        }
+        let (i0, i1) = ((x0 - 0.5).ceil().max(0.) as usize, (x1 - 0.5).floor().min(w as f64 - 1.));
+        let (j0, j1) = ((y0 - 0.5).ceil().max(0.) as usize, (y1 - 0.5).floor().min(h as f64 - 1.));
+        if i1 < 0. || j1 < 0. {
+            return;
+        }
+        for j in j0..=j1 as usize {
+            for i in i0..=i1 as usize {
+                let (px_, py_) = (i as f64 + 0.5, j as f64 + 0.5);
+                let l1 = ((b.0[1] - c.0[1]) * (px_ - c.0[0]) + (c.0[0] - b.0[0]) * (py_ - c.0[1])) / det;
+                let l2 = ((c.0[1] - a.0[1]) * (px_ - c.0[0]) + (a.0[0] - c.0[0]) * (py_ - c.0[1])) / det;
+                let l3 = 1. - l1 - l2;
+                if l1 >= -1e-9 && l2 >= -1e-9 && l3 >= -1e-9 {
+                    values[j * w + i] = l1 * a.1 + l2 * b.1 + l3 * c.1;
                 }
             }
         }
-    });
+    };
+    for j in 0..grid.height.saturating_sub(1) {
+        for i in 0..grid.width.saturating_sub(1) {
+            let k = j * grid.width + i;
+            let (p00, p10, p01, p11) = (points[k], points[k + 1], points[k + grid.width], points[k + grid.width + 1]);
+            if let (Some(a), Some(b), Some(c)) = (p00, p10, p11) {
+                fill([a, b, c]);
+            }
+            if let (Some(a), Some(b), Some(c)) = (p00, p11, p01) {
+                fill([a, b, c]);
+            }
+        }
+    }
+    let mut out = crate::raster::RasterGrid::from_values(
+        values.iter().map(|&v| if v.is_nan() { Value::Null } else { Value::number(v) }).collect(),
+        w,
+        h,
+        [0., 0., pw, ph],
+    );
+    // Plot extrapolates beyond the samples' hull from its edge; the nearest
+    // sample stands in for that.
+    let samples: Vec<(f64, f64, Value)> = points
+        .iter()
+        .flatten()
+        .map(|(p, v)| (p[0] / w as f64 * pw, p[1] / h as f64 * ph, Value::number(*v)))
+        .collect();
+    let nearest = crate::raster::RasterGrid::from_samples(
+        &samples,
+        w,
+        h,
+        [0., 0., pw, ph],
+        crate::raster::Interpolate::Nearest,
+    );
+    for (k, v) in out.values.iter_mut().enumerate() {
+        if v.is_null() {
+            *v = nearest.values[k].clone();
+        }
+    }
+    out
 }
 
 /// A raster grid as an RGBA image, one pixel per cell (top row first), kept

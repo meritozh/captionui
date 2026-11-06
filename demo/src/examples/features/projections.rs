@@ -95,11 +95,11 @@ fn e04() -> Plot {
         .mark(frame())
 }
 
-/// Gap: a custom projection function is not supported, nor d3's
-/// `clipAngle`. The docs' `d3.geoAzimuthalEquidistant().rotate([0, 90])
-/// .scale(width)` puts a circle of half a radian around the pole at the
-/// frame's edge, so fitting the domain to that circle gives the same scale
-/// and translate; only the clip at 40° (just inside the corners) is lost.
+/// Gap: a custom projection function is not supported. The docs'
+/// `d3.geoAzimuthalEquidistant().rotate([0, 90]).scale(width)` puts a
+/// circle of half a radian around the pole at the frame's edge, so fitting
+/// the domain to that circle gives the same scale and translate, and
+/// `clip_angle` is d3's `clipAngle`.
 fn e05() -> Plot {
     // That circle is the parallel half a radian from the south pole.
     let lat = -90. + 0.5_f64.to_degrees();
@@ -112,7 +112,8 @@ fn e05() -> Plot {
         .projection(
             projection("azimuthal-equidistant")
                 .rotate([0., 90., 0.])
-                .domain(edge),
+                .domain(edge)
+                .clip_angle(40.),
         )
         .mark(geo(geo::graticule()).stroke_opacity(0.1))
         .mark(geo(data::land()).fill("currentColor"))
