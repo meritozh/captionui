@@ -26,8 +26,8 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::*;
 
-use gpui_plot::RetainedPlot;
 use crate::examples::{self, Example};
+use gpui_plot::RetainedPlot;
 
 /// The width every chart is drawn at, the docs' default.
 const WIDTH: f32 = 640.;

@@ -22,7 +22,10 @@ fn main() {
         if filter.as_ref().is_some_and(|f| !id.contains(f.as_str())) {
             continue;
         }
-        let runs: usize = std::env::var("BENCH_RUNS").ok().and_then(|r| r.parse().ok()).unwrap_or(3);
+        let runs: usize = std::env::var("BENCH_RUNS")
+            .ok()
+            .and_then(|r| r.parse().ok())
+            .unwrap_or(3);
         let start = Instant::now();
         for _ in 0..runs {
             let _ = (example.build)();
@@ -34,7 +37,12 @@ fn main() {
             let _ = plot.natural_height(640.);
         }
         let pipeline = start.elapsed().as_secs_f64() * 1e3 / runs as f64;
-        timings.push((id.to_string(), format!("{}/{}", example.section, example.page), build, pipeline));
+        timings.push((
+            id.to_string(),
+            format!("{}/{}", example.section, example.page),
+            build,
+            pipeline,
+        ));
     }
     timings.sort_by(|a, b| (b.2 + b.3).total_cmp(&(a.2 + a.3)));
     println!("slowest examples (ms: build, pipeline):");

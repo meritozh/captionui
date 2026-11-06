@@ -11,8 +11,7 @@
 use std::time::Instant;
 
 use gpui_kit::{
-    IntoElement, ParentElement, Render, Styled, TestAppContext, VisualTestContext,
-    div, point, px,
+    IntoElement, ParentElement, Render, Styled, TestAppContext, VisualTestContext, div, point, px,
 };
 use gpui_plot_demo::docs::Docs;
 use gpui_plot_demo::examples::{self, Example};
@@ -87,7 +86,9 @@ fn main() {
     let first = start.elapsed().as_secs_f64() * 1e3;
     let (mean, worst) = sweep(window, moves);
     println!("{page} ({n} charts)");
-    println!("  rebuilt every frame: first frame {first:7.1} ms, pointer move mean {mean:7.1} ms, worst {worst:7.1} ms");
+    println!(
+        "  rebuilt every frame: first frame {first:7.1} ms, pointer move mean {mean:7.1} ms, worst {worst:7.1} ms"
+    );
 
     // The docs view: one cached view per chart, each resolved once.
     let start = Instant::now();
@@ -107,5 +108,7 @@ fn main() {
     }
     let built = start.elapsed().as_secs_f64() * 1e3;
     let (mean, worst) = sweep(window, moves);
-    println!("  retained + cached:   first frame {first:7.1} ms, charts built in {built:7.1} ms, pointer move mean {mean:7.1} ms, worst {worst:7.1} ms");
+    println!(
+        "  retained + cached:   first frame {first:7.1} ms, charts built in {built:7.1} ms, pointer move mean {mean:7.1} ms, worst {worst:7.1} ms"
+    );
 }
