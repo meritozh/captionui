@@ -550,6 +550,16 @@ impl Plot {
         chart + extras
     }
 
+    /// Move what `prepaint` resolved by `delta`, for a plot drawn again at
+    /// the same size somewhere else (a scrolled list): the pipeline and the
+    /// scales are in plot-local pixels, only the frame's bounds are absolute.
+    pub(crate) fn translate_prepared(&mut self, delta: Point<Pixels>) {
+        if let Some(frame) = &mut self.frame_cache {
+            frame.bounds.origin += delta;
+            frame.plot.origin += delta;
+        }
+    }
+
     /// A copy of the plot's options and marks, without its caches.
     fn clone_options(&self) -> Plot {
         Plot {

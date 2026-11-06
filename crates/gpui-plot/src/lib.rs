@@ -51,6 +51,7 @@ pub mod paint;
 pub mod plot;
 pub mod projection;
 pub mod raster;
+mod retained;
 pub mod render;
 pub mod scale;
 pub mod schemes;
@@ -83,6 +84,7 @@ pub use options::{
     AxisAnchor, LabelAnchor, ScaleOptions, ScaleTransform, ScaleType, TickFormat, Ticks,
 };
 pub use plot::{Interaction, LegendPosition, Plot, PlotTitle};
+pub use retained::RetainedPlot;
 pub use projection::{Equirectangular, Mercator, Projection, centroid, geojson_rings};
 
 /// Build a [`gpui::RenderImage`] from RGBA pixels, for an `image` mark.

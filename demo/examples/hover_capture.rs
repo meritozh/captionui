@@ -51,6 +51,58 @@ fn main() {
     let mut cx = VisualTestAppContext::new(platform);
     cx.update(gpui_kit::init);
 
+    // `HOVER_PAGE=marks/dot` hovers the docs window itself instead, on that
+    // page, with every chart built: its charts are cached views, so this
+    // checks the hover still draws through them.
+    if let Ok(page) = std::env::var("HOVER_PAGE") {
+        let (section, name) = page.split_once('/').expect("HOVER_PAGE is section/page");
+        let docs = cx.new(|_| {
+            let mut docs = gpui_plot_demo::docs::Docs::new();
+            let index = docs.page_index(section, name).expect("no such page");
+            docs.select(index);
+            docs
+        });
+        let window: AnyWindowHandle = cx
+            .open_offscreen_window(size(px(1000.), px(900.)), {
+                let docs = docs.clone();
+                move |_, _| docs
+            })
+            .expect("open offscreen window")
+            .into();
+        // Tests have no frame loop: deliver frames by hand, so the charts are
+        // built by the docs' own next-frame scheduling and animations run.
+        let frames = |cx: &mut VisualTestAppContext, n: usize| {
+            for _ in 0..n {
+                cx.update_window(window, |_, window, cx| {
+                    window.simulate_next_frame(cx);
+                })
+                .unwrap();
+                cx.advance_clock(std::time::Duration::from_millis(16));
+                cx.run_until_parked();
+            }
+        };
+        frames(&mut cx, 90);
+        assert!(cx.read(|cx| docs.read(cx).is_built()), "charts not built");
+        for (x, y) in [(300., 420.), (360., 440.), (420., 460.), (450., 470.)] {
+            cx.simulate_mouse_move(
+                window,
+                gpui_kit::point(px(x), px(y)),
+                Option::<gpui_kit::MouseButton>::None,
+                Default::default(),
+            );
+            cx.run_until_parked();
+            frames(&mut cx, 30);
+        }
+        match cx.capture_screenshot(window) {
+            Ok(image) => {
+                image.save("demo/snapshots/hover-capture.png").unwrap();
+                println!("saved demo/snapshots/hover-capture.png");
+            }
+            Err(e) => eprintln!("capture_screenshot failed: {e}"),
+        }
+        return;
+    }
+
     // A stacked bar chart: the pointer should pick a bar anywhere inside its
     // body, not just at its top where the anchor point sits. `HOVER_EXAMPLE`
     // picks another example by id.

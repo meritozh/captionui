@@ -11,7 +11,7 @@ use gpui_kit::component::{ActiveTheme, Theme};
 use crate::scale::ColorRange;
 
 /// The tokens a plot draws with.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlotTheme {
     /// The plot's background.
     pub background: Hsla,

@@ -3,6 +3,7 @@
 //! the snapshot renderer and the interaction tests.
 
 pub mod data;
+pub mod docs;
 pub mod examples;
 
 /// What every example file uses.

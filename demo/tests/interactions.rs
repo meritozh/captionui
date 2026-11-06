@@ -9,9 +9,10 @@
 use gpui_kit::{IntoElement, ParentElement, Render, Styled, TestAppContext, div, px};
 use gpui_plot_demo::examples;
 
-/// A window holding one plot, sized like the gallery.
+/// A window holding one plot, sized like the gallery, kept across frames as
+/// the docs window keeps it.
 struct Host {
-    build: fn() -> gpui_plot::Plot,
+    plot: gpui_plot::RetainedPlot,
 }
 
 impl Render for Host {
@@ -20,7 +21,7 @@ impl Render for Host {
         _window: &mut gpui_kit::Window,
         _cx: &mut gpui_kit::Context<Self>,
     ) -> impl IntoElement {
-        div().size_full().child((self.build)())
+        div().size_full().child(self.plot.clone())
     }
 }
 
@@ -60,8 +61,8 @@ fn sweeping_the_pointer_across_every_example_does_not_error() {
             eprintln!("sweep {}", example.id());
         }
         // Open a window holding just this example's plot.
-        let build = example.build;
-        let (_, window) = cx.add_window_view(|_, _| Host { build });
+        let plot = (example.build)().retained();
+        let (_, window) = cx.add_window_view(|_, _| Host { plot });
 
         // Sweep the pointer across the plot in a grid. Each move re-resolves a
         // hover; crossing a datum draws the crosshair, highlighted dots and
