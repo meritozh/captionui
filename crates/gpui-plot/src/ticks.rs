@@ -168,6 +168,20 @@ pub fn d3_log_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
     d3_log_ticks_base(lo, hi, count as f64, 10.)
 }
 
+/// d3's `logp(base)`: the exact `log10` and `log2` for those bases (so a
+/// power of two is a whole exponent), else the natural log's ratio.
+fn logp(x: f64, base: f64) -> f64 {
+    if base == std::f64::consts::E {
+        x.ln()
+    } else if base == 10. {
+        x.log10()
+    } else if base == 2. {
+        x.log2()
+    } else {
+        x.ln() / base.ln()
+    }
+}
+
 /// d3's `log.base(base).ticks(count)`: every multiple `1..base` of each
 /// power when the domain spans fewer powers than the count, else powers
 /// stepped as d3's linear ticks step their logarithms.
@@ -176,7 +190,7 @@ pub fn d3_log_ticks_base(lo: f64, hi: f64, count: f64, base: f64) -> Vec<f64> {
     if u <= 0. || !v.is_finite() || base.is_nan() || base <= 0. || base == 1. {
         return Vec::new();
     }
-    let logs = |x: f64| if base == 10. { x.log10() } else { x.ln() / base.ln() };
+    let logs = |x: f64| logp(x, base);
     let pows = |e: f64| if base == 10. { 10f64.powf(e) } else { base.powf(e) };
     let (i, j) = (logs(u), logs(v));
     let n = count;
@@ -232,7 +246,7 @@ pub fn d3_log_tick_label_base(
     base: f64,
     spec: Option<&str>,
 ) -> String {
-    let logs = |x: f64| if base == 10. { x.log10() } else { x.ln() / base.ln() };
+    let logs = |x: f64| logp(x, base);
     let k = (base * count / default_total.max(1) as f64).max(1.);
     let mut i = value / base.powf(logs(value).round());
     if i * base < base - 0.5 {
@@ -593,6 +607,17 @@ mod tests {
         // Few ticks per decade: decades only.
         let ticks = linear_ticks([1., 1000.], 4, Transform::Log);
         assert_eq!(ticks, vec![1., 10., 100., 1000.]);
+    }
+
+    #[test]
+    fn base_two_log_ticks_are_powers_of_two() {
+        // d3: `scaleLog().base(2).domain([1, 1e4]).ticks(20)`.
+        let ticks = d3_log_ticks_base(1., 1e4, 20., 2.);
+        let powers: Vec<f64> = (0..14).map(|e| 2f64.powi(e)).collect();
+        assert_eq!(ticks, powers);
+        // Too many powers for the count: d3 steps the exponents linearly.
+        let ticks = d3_log_ticks_base(1., 2f64.powi(40), 5., 2.);
+        assert_eq!(ticks, [0, 10, 20, 30, 40].map(|e| 2f64.powi(e)));
     }
 
     #[test]

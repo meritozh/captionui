@@ -57,10 +57,9 @@ fn shuffled_aapl() -> Dataset {
     Dataset::new(rows)
 }
 
-/// `unemployed` in thousands, standing in for the docs'
-/// `y: {transform: (d) => d / 1000}`.
-fn thousands(d: &Table) -> f64 {
-    d.num("unemployed") / 1000.
+/// The docs' `y: {transform: (d) => d / 1000, label: …}`.
+fn thousands(y: gpui_plot::ScaleOptions) -> gpui_plot::ScaleOptions {
+    y.transform(|d| d / 1000.).label("Unemployed (thousands)")
 }
 
 /// `Plot.areaY(aapl, {x: "Date", y: "Close"}).plot()`
@@ -160,21 +159,21 @@ fn e10() -> Plot {
 
 fn e11() -> Plot {
     Plot::plot()
-        .y(|y| y.label("Unemployed (thousands)"))
+        .y(thousands)
         .mark(
             area_y(data::bls_industry_unemployment())
                 .x("date")
-                .y(Channel::number(thousands))
+                .y("unemployed")
                 .fill("industry"),
         )
         .mark(rule_y([0.]))
 }
 
 fn e12() -> Plot {
-    Plot::plot().y(|y| y.label("Unemployed (thousands)")).mark(
+    Plot::plot().y(thousands).mark(
         area_y(data::bls_industry_unemployment())
             .x("date")
-            .y(Channel::number(thousands))
+            .y("unemployed")
             .fill("industry")
             .stack_offset(Offset::Wiggle),
     )

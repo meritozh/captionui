@@ -48,6 +48,7 @@ fn e02() -> Plot {
     // demo/data, so only the land and the sphere are drawn.
     Plot::plot()
         .projection("equirectangular")
+        .r(|r| r.transform(|r| 10f64.powf(r))) // Richter to amplitude
         .mark(geo(data::land()).fill("currentColor").fill_opacity(0.2))
         .mark(geo(geo::sphere()))
 }
@@ -90,15 +91,18 @@ fn e04() -> Plot {
         .into_iter()
         .chain((10..=170).step_by(10).map(f64::from))
         .collect();
-    // Gap: the color scale has no `transform` (degrees to km), so the stroke
-    // channel converts each radius itself.
     Plot::plot()
         .projection(
             GeoProjection::named("equal-earth")
                 .expect("a projection")
                 .rotate([90., 0., 0.]),
         )
-        .color(|c| c.legend(true).label("Distance from Tonga (km)").zero(true))
+        .color(|c| {
+            c.legend(true)
+                .label("Distance from Tonga (km)")
+                .transform(|d| 111.2 * d) // degrees to km
+                .zero(true)
+        })
         .mark(geo(data::land()))
         .mark(
             geo(radii)
@@ -110,7 +114,7 @@ fn e04() -> Plot {
                     .into_value()
                 })
                 .stroke(ColorChannel::number(|d: &Table| {
-                    111.2 * d.number(gpui_plot::table::VALUE).unwrap_or(0.)
+                    d.number(gpui_plot::table::VALUE).unwrap_or(0.)
                 }))
                 .stroke_width(2.),
         )

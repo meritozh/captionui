@@ -165,16 +165,23 @@ fn count_of(values: &[Value], sex: &str) -> f64 {
     values.iter().filter(|v| v.label() == sex).count() as f64
 }
 
+/// `Math.sign`, which keeps a zero (where Rust's `signum` gives one).
+fn math_sign(d: f64) -> f64 {
+    if d == 0. { d } else { d.signum() }
+}
+
 /// The docs' link chart of each sport's women and men.
-///
-/// Gap: the color scale has no `transform: Math.sign`, so the stroke reducer
-/// returns the sign of the difference itself.
 fn e08() -> Plot {
     Plot::plot()
         .margin_bottom(100.)
         .x(sport_axis)
         .y(|y| y.grid(true).label("Frequency"))
-        .color(|c| c.type_name("categorical").domain([-1., 1.]).unknown("#aaa"))
+        .color(|c| {
+            c.type_name("categorical")
+                .domain([-1., 1.])
+                .unknown("#aaa")
+                .transform(math_sign)
+        })
         .mark(rule_y([0.]))
         .mark(
             link(data::olympians())
@@ -197,8 +204,7 @@ fn e08() -> Plot {
                 .group_output(
                     "stroke",
                     GroupReducer::custom(|values, _| {
-                        let d = count_of(values, "male") - count_of(values, "female");
-                        Value::Number(d.signum() * f64::from(u8::from(d != 0.)))
+                        Value::Number(count_of(values, "male") - count_of(values, "female"))
                     }),
                 ),
         )

@@ -20,25 +20,24 @@ pub fn examples() -> Vec<Example> {
     ]
 }
 
-/// The docs' `x: {transform: (x) => x / 1000}` has no counterpart (a scale's
-/// transform is one of linear, log, pow, sqrt or symlog), so the marks'
-/// `x` channels divide instead.
 fn e01() -> Plot {
-    let thousands = || Channel::number(|d| d.num("vehicles") / 1000.);
     Plot::plot()
         .margin_left(120.)
-        .x(|x| x.label("Vehicles per hour (thousands)"))
+        .x(|x| {
+            x.label("Vehicles per hour (thousands)")
+                .transform(|x| x / 1000.)
+        })
         .y(|y| y.no_label())
         .mark(rule_x([0.]))
         .mark(
             tick_x(data::traffic())
-                .x(thousands())
+                .x("vehicles")
                 .y("location")
                 .stroke_opacity(0.3),
         )
         .mark(
             tick_x(data::traffic())
-                .x(thousands())
+                .x("vehicles")
                 .y("location")
                 .stroke("red")
                 .stroke_width(4.)

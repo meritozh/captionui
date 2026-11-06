@@ -147,6 +147,41 @@ pub enum Ticks {
     Interval(crate::mark::Interval),
 }
 
+/// Plot's scale `transform`: a function of each value a channel bound to the
+/// scale reads, applied once the mark's own transforms have run and before
+/// the scale infers its domain, so the domain, ticks and legend are all in
+/// the transformed units. It maps numbers; any other value passes through.
+#[derive(Clone)]
+pub struct ScaleTransform(Rc<dyn Fn(f64) -> f64>);
+
+impl ScaleTransform {
+    /// The transformed value.
+    pub fn apply(&self, value: &Value) -> Value {
+        match value {
+            Value::Number(n) => Value::Number((self.0)(*n)),
+            other => other.clone(),
+        }
+    }
+
+    /// Transform `value` in place.
+    pub fn apply_mut(&self, value: &mut Value) {
+        if let Value::Number(n) = value {
+            *n = (self.0)(*n);
+        }
+    }
+
+    /// The transformed number.
+    pub fn number(&self, n: f64) -> f64 {
+        (self.0)(n)
+    }
+}
+
+impl std::fmt::Debug for ScaleTransform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ScaleTransform(..)")
+    }
+}
+
 /// One scale's options. Every field is optional: unset means Plot's default.
 #[derive(Clone, Debug, Default)]
 pub struct ScaleOptions {
@@ -196,6 +231,8 @@ pub struct ScaleOptions {
     /// Plot's scale `interval`: an ordinal scale over every step between the
     /// data's extremes, so a missing year still takes its band.
     pub interval: Option<crate::mark::Interval>,
+    /// Plot's scale `transform`.
+    pub transform: Option<ScaleTransform>,
 }
 
 impl ScaleOptions {
@@ -424,6 +461,13 @@ impl ScaleOptions {
     /// Plot's scale `interval`.
     pub fn interval(mut self, interval: impl Into<crate::mark::Interval>) -> Self {
         self.interval = Some(interval.into());
+        self
+    }
+
+    /// Plot's scale `transform: (v) => …`, applied to every channel value
+    /// bound to the scale before its domain is computed.
+    pub fn transform(mut self, f: impl Fn(f64) -> f64 + 'static) -> Self {
+        self.transform = Some(ScaleTransform(Rc::new(f)));
         self
     }
 

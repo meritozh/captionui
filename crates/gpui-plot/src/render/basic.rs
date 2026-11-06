@@ -1966,6 +1966,15 @@ pub fn position_in(
         prepared.mark.kind.is_x_only() && prepared.mark.kind.cross_axis() == CrossAxis::Anchor;
     let only_y =
         prepared.mark.kind.is_y_only() && prepared.mark.kind.cross_axis() == CrossAxis::Anchor;
+    // A row whose x or y channel reads no value (null or NaN) is not drawn,
+    // Plot's filter of undefined channel values; only a mark without the
+    // channel sits at the frame anchor.
+    let channels = &prepared.mark.channels;
+    if (channels.x.is_some() && !only_y && row.x_value().is_null())
+        || (channels.y.is_some() && !only_x && row.y_value().is_null())
+    {
+        return None;
+    }
     let x = if only_y || row.x_value().is_null() {
         anchor_x
     } else {
@@ -3275,7 +3284,7 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         value
             .as_text()
             .and_then(|t| crate::css::parse(t))
-            .or_else(|| ctx.colors.scale.as_ref().and_then(|s| s.color(value)))
+            .or_else(|| ctx.colors.scale_color(value))
     };
     // Unprojected, the grid is an axis-aligned image, as Plot draws it: one
     // pixel per cell, built once and stretched over the grid's extent.
@@ -3652,11 +3661,7 @@ pub fn draw_contour_grid(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                 // the color scale at the threshold.
                 let color = match &prepared.mark.channels.fill {
                     Some(crate::style::ColorChannel::Constant(c)) => Some(*c),
-                    _ => ctx
-                        .colors
-                        .scale
-                        .as_ref()
-                        .and_then(|s| s.color(&Value::Number(threshold))),
+                    _ => ctx.colors.scale_color(&Value::Number(threshold)),
                 };
                 if let Some(color) = color {
                     paint::paint_fill_rings(

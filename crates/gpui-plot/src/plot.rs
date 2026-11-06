@@ -415,13 +415,14 @@ impl Plot {
         let bucketed = self.interval_marks();
         let marks = bucketed.as_deref().unwrap_or(&self.marks);
         let resolved = self.resolve_facet_axes(marks, &grid);
-        let (facets, _) = render::prepare_facets(
+        let (mut facets, _) = render::prepare_facets(
             &self.data,
             resolved.as_deref().unwrap_or(marks),
             &grid,
             self.fx.as_deref(),
             self.fy.as_deref(),
         );
+        self.apply_scale_transforms(&mut facets);
         let [mt, mr, mb, ml] = self.plot_margins(&grid);
         let y_values = self.y_domain_values(&facets);
         let x_values = self.x_domain_values(&facets);
@@ -3262,6 +3263,7 @@ impl PlotTrait for Plot {
             self.fy.as_deref(),
         );
         grid.set_empty(&populated);
+        self.apply_scale_transforms(&mut facets);
         render::apply_quantity_scales(&mut facets, &self.scales.r, &self.scales.opacity);
         render::apply_symbol_scale(&mut facets, &self.scales.symbol);
         let frame = self.resolve_frame(bounds, &theme, window, &facets, &grid);
@@ -3626,6 +3628,12 @@ fn hoverable(mark: &PreparedMark) -> bool {
 }
 
 impl Plot {
+    /// Plot's scale `transform` options, over the resolved marks' channels.
+    fn apply_scale_transforms(&self, facets: &mut [Vec<PreparedMark>]) {
+        let s = &self.scales;
+        render::apply_scale_transforms(facets, &s.x, &s.y, &s.r, &s.opacity);
+    }
+
     /// The plot's color scales over the resolved marks.
     fn plot_colors(
         &self,
@@ -4541,6 +4549,24 @@ mod tests {
         for row in &mark.rows {
             assert!(render::basic::position_in(mark, &frame, row).is_some());
         }
+    }
+
+    #[test]
+    fn a_row_missing_its_channel_value_is_not_placed() {
+        // d3.autoType reads "NaN" as missing; Plot filters the row out
+        // rather than drawing it at the frame's middle.
+        let data = [Value::Number(1.), Value::Null, Value::Number(3.)]
+            .map(|y| Table::empty().with("x", Value::Number(1.)).with("y", y));
+        let plot = Plot::plot().mark(crate::marks::dot(data.to_vec()).x("x").y("y"));
+        let facets = vec![render::prepare(plot.data(), plot.marks())];
+        let frame = frame_for(&plot, &facets);
+        let mark = &facets[0][0];
+        let placed: Vec<bool> = mark
+            .rows
+            .iter()
+            .map(|row| render::basic::position_in(mark, &frame, row).is_some())
+            .collect();
+        assert_eq!(placed, [true, false, true]);
     }
 
     #[test]

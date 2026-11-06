@@ -34,10 +34,17 @@ pub struct PlotColors {
     /// names, with a domain spanning every facet's rows.
     pub continuous: Option<(SharedString, ColorScale)>,
     mark_color: Hsla,
+    /// The color scale's `transform`, which a color channel's values go
+    /// through before the scale, as Plot's `applyScaleTransform`.
+    transform: Option<crate::options::ScaleTransform>,
 }
 
-/// The values a color channel reads across every facet's marks.
-fn color_values(facets: &[Vec<PreparedMark>]) -> Vec<Value> {
+/// The values a color channel reads across every facet's marks, through the
+/// color scale's `transform` when it has one.
+fn color_values(
+    facets: &[Vec<PreparedMark>],
+    transform: Option<&crate::options::ScaleTransform>,
+) -> Vec<Value> {
     let mut values = Vec::new();
     for mark in facets.iter().flatten() {
         // A density's "density" color reads Plot's density units; zero
@@ -54,8 +61,18 @@ fn color_values(facets: &[Vec<PreparedMark>]) -> Vec<Value> {
             continue;
         }
         // A raster's or contour's grid values feed the color scale.
+        let transformed = |value: Value| match transform {
+            Some(t) => t.apply(&value),
+            None => value,
+        };
         if let Some(grid) = &mark.raster {
-            values.extend(grid.values.iter().filter(|v| !v.is_null()).cloned());
+            values.extend(
+                grid.values
+                    .iter()
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .map(transformed),
+            );
             continue;
         }
         if matches!(
@@ -69,7 +86,7 @@ fn color_values(facets: &[Vec<PreparedMark>]) -> Vec<Value> {
                 for i in 0..32 {
                     let x = x1 + (x2 - x1) * (i as f64 + 0.5) / 32.;
                     let y = y1 + (y2 - y1) * (j as f64 + 0.5) / 32.;
-                    values.push(f(x, y));
+                    values.push(transformed(f(x, y)));
                 }
             }
             continue;
@@ -80,6 +97,7 @@ fn color_values(facets: &[Vec<PreparedMark>]) -> Vec<Value> {
                 mark.rows
                     .iter()
                     .filter_map(|row| channel.scaled_value(&row.row))
+                    .map(transformed)
                     .filter(|value| {
                         value
                             .as_text()
@@ -317,7 +335,8 @@ impl PlotColors {
         color: Option<(&SharedString, &ColorRange)>,
         options: &ScaleOptions,
     ) -> Self {
-        let scale = color_scale(theme, &color_values(facets), options);
+        let transform = options.transform.clone();
+        let scale = color_scale(theme, &color_values(facets, transform.as_ref()), options);
         let ordinal = match &scale {
             Some(scale) if scale.is_ordinal() => scale.clone(),
             _ => ColorScale::ordinal(Vec::new(), theme.palette.clone()),
@@ -337,6 +356,7 @@ impl PlotColors {
             ordinal,
             continuous,
             mark_color: theme.mark_color,
+            transform,
         }
     }
 
@@ -354,13 +374,22 @@ impl PlotColors {
                 if let Some(color) = value.as_text().and_then(|t| crate::css::parse(t)) {
                     return color;
                 }
-                self.scale
-                    .as_ref()
-                    .and_then(|scale| scale.color(&value))
+                self.scale_color(&value)
                     .unwrap_or(Hsla::transparent_black())
             }
             ColorChannel::Current => self.mark_color,
             _ => channel.read(row),
+        }
+    }
+
+    /// The color scale's color for a data value, through the scale's
+    /// `transform` first: a raster cell's or contour threshold's value, or a
+    /// color channel's.
+    pub fn scale_color(&self, value: &Value) -> Option<Hsla> {
+        let scale = self.scale.as_ref()?;
+        match &self.transform {
+            Some(t) => scale.color(&t.apply(value)),
+            None => scale.color(value),
         }
     }
 

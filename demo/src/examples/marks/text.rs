@@ -68,23 +68,25 @@ fn e02() -> Plot {
         )
 }
 
-/// The y scale's `transform: (d) => d / 1e6` is applied in the channels.
 fn e03() -> Plot {
-    let millions = |field: &'static str| Channel::number(move |d| d.num(field) / 1e6);
     Plot::plot()
-        .y(|y| y.grid(true).label("Travelers per day (millions)"))
+        .y(|y| {
+            y.grid(true)
+                .label("Travelers per day (millions)")
+                .transform(|d| d / 1e6)
+        })
         .mark(rule_y([0.]))
         .mark(
             line(data::travelers())
                 .x("date")
-                .y(millions("previous"))
+                .y("previous")
                 .stroke_opacity(0.5),
         )
-        .mark(line(data::travelers()).x("date").y(millions("current")))
+        .mark(line(data::travelers()).x("date").y("current"))
         .mark(
             text(data::travelers())
                 .x("date")
-                .y(millions("previous"))
+                .y("previous")
                 .text(Value::text("2019"))
                 .fill_opacity(0.5)
                 .line_anchor(LineAnchor::Bottom)
@@ -94,7 +96,7 @@ fn e03() -> Plot {
         .mark(
             text(data::travelers())
                 .x("date")
-                .y(millions("current"))
+                .y("current")
                 .text(Value::text("2020"))
                 .line_anchor(LineAnchor::Top)
                 .dy(6.)

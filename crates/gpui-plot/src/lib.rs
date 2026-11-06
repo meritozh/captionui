@@ -79,7 +79,9 @@ pub use transform::{
 pub use value::{PlotKind, Value};
 
 pub use frame::{FrameOptions, ScaleKind};
-pub use options::{AxisAnchor, LabelAnchor, ScaleOptions, ScaleType, TickFormat, Ticks};
+pub use options::{
+    AxisAnchor, LabelAnchor, ScaleOptions, ScaleTransform, ScaleType, TickFormat, Ticks,
+};
 pub use plot::{Interaction, LegendPosition, Plot, PlotTitle};
 pub use projection::{Equirectangular, Mercator, Projection, centroid, geojson_rings};
 

@@ -269,19 +269,20 @@ fn e27() -> Plot {
     )
 }
 
-/// The docs convert °F to °C with the y scale's `transform`; a scale takes
-/// no custom transform here, so the channels convert.
+/// `y: {transform: (f) => (f - 32) * (5 / 9)}` converts °F to °C.
 fn e28() -> Plot {
-    let celsius = |f: f64| (f - 32.) * (5. / 9.);
     Plot::plot()
-        .y(|y| y.grid(true).label("Temperature (°C)"))
-        .mark(rule_y([celsius(32.)]))
-        .mark(
-            line_y(data::sftemp())
-                .x("date")
-                .y(Channel::number(move |d| celsius(d.num("high"))))
-                .window(7, WindowReducer::Mean, Anchor::Middle),
-        )
+        .y(|y| {
+            y.grid(true)
+                .label("Temperature (°C)")
+                .transform(|f| (f - 32.) * (5. / 9.))
+        })
+        .mark(rule_y([32.]))
+        .mark(line_y(data::sftemp()).x("date").y("high").window(
+            7,
+            WindowReducer::Mean,
+            Anchor::Middle,
+        ))
 }
 
 /// `Plot.binX({y: "proportion", fill: "x"}, …)`: there is no `proportion`
@@ -302,8 +303,7 @@ fn e29() -> Plot {
         .mark(rule_y([0.]))
 }
 
-/// The page's `intervaled` toggle starts on. The docs scale the volume with
-/// the y scale's `transform: (d) => d / 1e6`; here the channel divides.
+/// The page's `intervaled` toggle starts on.
 fn e30() -> Plot {
     let intervaled = true;
     let aapl = data::aapl();
@@ -318,12 +318,11 @@ fn e30() -> Plot {
                 x
             }
         })
-        .y(|y| y.label("Daily trade volume (millions)"))
-        .mark(
-            bar_y(last40)
-                .x("Date")
-                .y(Channel::number(|d| d.num("Volume") / 1e6)),
-        )
+        .y(|y| {
+            y.transform(|d| d / 1e6)
+                .label("Daily trade volume (millions)")
+        })
+        .mark(bar_y(last40).x("Date").y("Volume"))
         .mark(rule_y([0.]))
 }
 
