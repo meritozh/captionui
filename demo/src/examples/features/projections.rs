@@ -45,12 +45,12 @@ fn geo_circle(center: [f64; 2], radius: f64) -> Geometry {
 }
 
 /// The docs' earthquakes are a live USGS feed with no local copy, so the
-/// dots have no data. Gap: the `r` scale has no `transform` (Richter to
-/// amplitude).
+/// dots have no data.
 fn e01() -> Plot {
     let earthquakes = Dataset::new([]);
     Plot::plot()
         .projection(projection("orthographic").rotate([-LONGITUDE, -30., 0.]))
+        .r(|r| r.transform(|d| 10f64.powf(d))) // convert Richter to amplitude
         .mark(geo(data::land()).fill("currentColor").fill_opacity(0.2))
         .mark(geo(geo::sphere()))
         .mark(

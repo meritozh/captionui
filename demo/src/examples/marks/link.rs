@@ -117,27 +117,32 @@ fn e03() -> Plot {
             .stroke_width(1.5)))
 }
 
-/// The scales' `transform: (d) => d / 1000` is applied in the channels.
 fn e04() -> Plot {
     let ks = || Dataset::values_of([0.6, 0.7, 0.8, 0.9, 1.]);
     let k = |d: &Table| d.num(gpui_plot::table::VALUE);
     Plot::plot()
         .aspect_ratio(1.)
         .margin_right(40.)
-        .x(|x| x.label("Median annual income (men, thousands)"))
-        .y(|y| y.label("Median annual income (women, thousands)"))
+        .x(|x| {
+            x.label("Median annual income (men, thousands)")
+                .transform(|d| d / 1000.)
+        })
+        .y(|y| {
+            y.label("Median annual income (women, thousands)")
+                .transform(|d| d / 1000.)
+        })
         .mark(
             link(ks())
                 .x1(Value::Number(0.))
                 .y1(Value::Number(0.))
-                .x2(Value::Number(102.))
-                .y2(Channel::number(move |d| 102. * k(d)))
+                .x2(Value::Number(102000.))
+                .y2(Channel::number(move |d| 102000. * k(d)))
                 .opacity(move |d: &Table| if k(d) == 1. { 1. } else { 0.2 }),
         )
         .mark(
             text(ks())
-                .x(Value::Number(102.))
-                .y(Channel::number(move |d| 102. * k(d)))
+                .x(Value::Number(102000.))
+                .y(Channel::number(move |d| 102000. * k(d)))
                 .text(move |d: &Table| {
                     let k = k(d);
                     Value::text(if k == 1. {
@@ -149,9 +154,5 @@ fn e04() -> Plot {
                 .text_anchor(TextAnchor::Start)
                 .dx(6.),
         )
-        .mark(
-            dot(data::income_gender())
-                .x(Channel::number(|d| d.num("m") / 1000.))
-                .y(Channel::number(|d| d.num("f") / 1000.)),
-        )
+        .mark(dot(data::income_gender()).x("m").y("f"))
 }

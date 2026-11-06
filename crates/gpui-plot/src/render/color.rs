@@ -34,10 +34,17 @@ pub struct PlotColors {
     /// names, with a domain spanning every facet's rows.
     pub continuous: Option<(SharedString, ColorScale)>,
     mark_color: Hsla,
+    /// The color scale's `transform`, which a color channel's values go
+    /// through before the scale, as Plot's `applyScaleTransform`.
+    transform: Option<crate::options::ScaleTransform>,
 }
 
-/// The values a color channel reads across every facet's marks.
-fn color_values(facets: &[Vec<PreparedMark>]) -> Vec<Value> {
+/// The values a color channel reads across every facet's marks, through the
+/// color scale's `transform` when it has one.
+fn color_values(
+    facets: &[Vec<PreparedMark>],
+    transform: Option<&crate::options::ScaleTransform>,
+) -> Vec<Value> {
     let mut values = Vec::new();
     for mark in facets.iter().flatten() {
         // A density's "density" color reads Plot's density units; zero
@@ -80,6 +87,10 @@ fn color_values(facets: &[Vec<PreparedMark>]) -> Vec<Value> {
                 mark.rows
                     .iter()
                     .filter_map(|row| channel.scaled_value(&row.row))
+                    .map(|value| match transform {
+                        Some(t) => t.apply(&value),
+                        None => value,
+                    })
                     .filter(|value| {
                         value
                             .as_text()
@@ -317,7 +328,8 @@ impl PlotColors {
         color: Option<(&SharedString, &ColorRange)>,
         options: &ScaleOptions,
     ) -> Self {
-        let scale = color_scale(theme, &color_values(facets), options);
+        let transform = options.transform.clone();
+        let scale = color_scale(theme, &color_values(facets, transform.as_ref()), options);
         let ordinal = match &scale {
             Some(scale) if scale.is_ordinal() => scale.clone(),
             _ => ColorScale::ordinal(Vec::new(), theme.palette.clone()),
@@ -337,6 +349,7 @@ impl PlotColors {
             ordinal,
             continuous,
             mark_color: theme.mark_color,
+            transform,
         }
     }
 
@@ -354,6 +367,10 @@ impl PlotColors {
                 if let Some(color) = value.as_text().and_then(|t| crate::css::parse(t)) {
                     return color;
                 }
+                let value = match &self.transform {
+                    Some(t) => t.apply(&value),
+                    None => value,
+                };
                 self.scale
                     .as_ref()
                     .and_then(|scale| scale.color(&value))

@@ -24,24 +24,12 @@ pub fn examples() -> Vec<Example> {
     ]
 }
 
-/// The RIAA revenue with each year's revenue in billions, the docs'
-/// `y: {transform: (d) => d / 1000}`.
-///
-/// Gap: a scale's `transform` function is missing; the field is divided up
-/// front.
-fn riaa() -> Dataset {
-    Dataset::new(data::riaa().rows().iter().map(|d| {
-        let billions = d.number("revenue").map(|v| v / 1000.);
-        d.clone().with(
-            "revenue",
-            billions.map(Value::Number).unwrap_or(Value::Null),
-        )
-    }))
-}
-
-/// The revenue axis the RIAA charts share.
+/// The revenue axis the RIAA charts share, with the docs'
+/// `transform: (d) => d / 1000` (millions to billions).
 fn revenue_axis(y: gpui_plot::ScaleOptions) -> gpui_plot::ScaleOptions {
-    y.grid(true).label("Annual revenue (billions, adj.)")
+    y.grid(true)
+        .label("Annual revenue (billions, adj.)")
+        .transform(|d| d / 1000.)
 }
 
 /// `Plot.areaY(crimea, {x: "date", y: "deaths", fill: "cause"})`
@@ -114,7 +102,7 @@ fn e05() -> Plot {
         .y(revenue_axis)
         .color(|c| c.legend(true))
         .mark(
-            area_y(riaa())
+            area_y(data::riaa())
                 .x("year")
                 .y("revenue")
                 .z("format")
@@ -132,7 +120,7 @@ fn e06() -> Plot {
         .y(revenue_axis)
         .color(|c| c.legend(true))
         .mark(
-            area_y(riaa())
+            area_y(data::riaa())
                 .x("year")
                 .y("revenue")
                 .z("format")
@@ -149,7 +137,7 @@ fn e07() -> Plot {
     Plot::plot()
         .y(revenue_axis)
         .mark(
-            area_y(riaa())
+            area_y(data::riaa())
                 .x("year")
                 .y("revenue")
                 .z("format")
@@ -164,7 +152,7 @@ fn e07() -> Plot {
 /// `"wiggle"`.
 fn e08() -> Plot {
     Plot::plot().y(revenue_axis).mark(
-        area_y(riaa())
+        area_y(data::riaa())
             .x("year")
             .y("revenue")
             .z("format")
@@ -179,7 +167,7 @@ fn e08() -> Plot {
 /// Gap: ordering a stack by another channel (`order: "group"`) is missing;
 /// the port spells the formats out in their groups' order.
 fn e09() -> Plot {
-    let riaa = riaa();
+    let riaa = data::riaa();
     let mut formats: Vec<(Value, Value)> = Vec::new();
     for d in riaa.rows() {
         let format = d.value("format");

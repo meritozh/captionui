@@ -662,6 +662,57 @@ fn select_rows(rows: Vec<PreparedRow>, config: &crate::mark::SelectConfig) -> Ve
         .collect()
 }
 
+/// Plot's `applyScaleTransforms`: once the marks' own transforms (stack,
+/// bin, window …) have run, each channel bound to a scale with a
+/// `transform` option has its values mapped through it, before any scale
+/// infers its domain. The position channels (`x`, `x1`, `x2` and the `y`
+/// family) take the x and y scales' transforms, and the scaled `r` and
+/// `opacity` values the `r` and `opacity` scales'; the color scale's
+/// transform is applied where its values are read, in
+/// [`color::PlotColors`].
+pub fn apply_scale_transforms(
+    facets: &mut [Vec<PreparedMark>],
+    x: &crate::options::ScaleOptions,
+    y: &crate::options::ScaleOptions,
+    r: &crate::options::ScaleOptions,
+    opacity: &crate::options::ScaleOptions,
+) {
+    let (tx, ty, tr, to) = (&x.transform, &y.transform, &r.transform, &opacity.transform);
+    if tx.is_none() && ty.is_none() && tr.is_none() && to.is_none() {
+        return;
+    }
+    for mark in facets.iter_mut().flatten() {
+        // Furniture reads the scales, not channels.
+        if mark.mark.kind.is_furniture() {
+            continue;
+        }
+        let [fx, fy] = &mut mark.filtered_domain;
+        for (t, values) in [(tx, fx), (ty, fy)] {
+            if let Some(t) = t {
+                values.iter_mut().for_each(|v| t.apply_mut(v));
+            }
+        }
+        for row in mark.rows.iter_mut() {
+            if let Some(t) = tx {
+                for v in [Some(&mut row.x), row.x1.as_mut(), row.x2.as_mut()] {
+                    v.into_iter().for_each(|v| t.apply_mut(v));
+                }
+            }
+            if let Some(t) = ty {
+                for v in [Some(&mut row.y), row.y1.as_mut(), row.y2.as_mut()] {
+                    v.into_iter().for_each(|v| t.apply_mut(v));
+                }
+            }
+            if let (Some(t), Some(v)) = (tr, row.r_value.as_mut()) {
+                *v = t.number(*v);
+            }
+            if let (Some(t), Some(v)) = (to, row.opacity_value.as_mut()) {
+                *v = t.number(*v);
+            }
+        }
+    }
+}
+
 /// Put every scaled `r` and `opacity` value through Plot's scales: a sqrt
 /// radius scale over `[0, max]` whose first quartile is three pixels (capped
 /// so the largest dot is 30), and a linear opacity scale from `[0, max]` to
@@ -2977,6 +3028,27 @@ mod bin_tests {
                 row.y1.as_ref().unwrap().as_number().unwrap() > 0.,
                 "male stacks on female"
             );
+        }
+    }
+
+    #[test]
+    fn scale_transforms_map_channels_after_the_mark_transforms() {
+        use crate::options::ScaleOptions;
+        // A stacked bar: the stack runs in data units, then the y scale's
+        // transform maps its interval, as Plot's applyScaleTransforms.
+        let mark = Mark::new(MarkKind::BarY).x("sex").y("weight").stack_y();
+        let mut facets = vec![prepare(&athletes(), &[mark])];
+        let raw = facets.clone();
+        let y = ScaleOptions::default().transform(|d| d / 1000.);
+        let none = ScaleOptions::default();
+        apply_scale_transforms(&mut facets, &none, &y, &none, &none);
+        for (a, b) in raw[0][0].rows.iter().zip(&facets[0][0].rows) {
+            let (a1, a2) = a.y_interval().unwrap();
+            let (b1, b2) = b.y_interval().unwrap();
+            assert_eq!(b1.as_number().unwrap(), a1.as_number().unwrap() / 1000.);
+            assert_eq!(b2.as_number().unwrap(), a2.as_number().unwrap() / 1000.);
+            // The x scale has no transform, so its ordinal values stay.
+            assert_eq!(a.x, b.x);
         }
     }
 

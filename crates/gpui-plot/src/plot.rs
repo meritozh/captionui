@@ -413,13 +413,14 @@ impl Plot {
     pub fn natural_height(&self, width: f32) -> f32 {
         let grid = self.facet_grid();
         let bucketed = self.interval_marks();
-        let (facets, _) = render::prepare_facets(
+        let (mut facets, _) = render::prepare_facets(
             &self.data,
             bucketed.as_deref().unwrap_or(&self.marks),
             &grid,
             self.fx.as_deref(),
             self.fy.as_deref(),
         );
+        self.apply_scale_transforms(&mut facets);
         let [mt, mr, mb, ml] = self.plot_margins(&grid);
         let y_values = self.y_domain_values(&facets);
         let x_values = self.x_domain_values(&facets);
@@ -2935,6 +2936,7 @@ impl PlotTrait for Plot {
             self.fy.as_deref(),
         );
         grid.set_empty(&populated);
+        self.apply_scale_transforms(&mut facets);
         render::apply_quantity_scales(&mut facets, &self.scales.r, &self.scales.opacity);
         render::apply_symbol_scale(&mut facets, &self.scales.symbol);
         let frame = self.resolve_frame(bounds, &theme, window, &facets, &grid);
@@ -3349,6 +3351,12 @@ fn hoverable(mark: &PreparedMark) -> bool {
 
 impl Plot {
     /// The plot's color scales over the resolved marks.
+    /// Plot's scale `transform` options, over the resolved marks' channels.
+    fn apply_scale_transforms(&self, facets: &mut [Vec<PreparedMark>]) {
+        let s = &self.scales;
+        render::apply_scale_transforms(facets, &s.x, &s.y, &s.r, &s.opacity);
+    }
+
     fn plot_colors(
         &self,
         theme: &PlotTheme,
