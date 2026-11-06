@@ -1805,6 +1805,35 @@ fn bind_outputs(mark: &Mark) -> Option<Mark> {
             }
         }
     }
+    // Plot's `maybeSubgroup`: groups subdivide by the first of `z`, `fill`
+    // and `stroke` that is a channel and not an output. A `z` a color
+    // implied goes when an output replaces that color, and the next color
+    // channel left as an input implies it instead.
+    if mark.implied_z {
+        use crate::{style::ColorChannel, table::Channel};
+        let implies = |color: &Option<ColorChannel>| match (color, &mark.channels.z) {
+            (Some(ColorChannel::Field(a)), Some(Channel::Field(b))) => a == b,
+            (Some(ColorChannel::Value(a)), Some(Channel::Accessor(b))) => std::rc::Rc::ptr_eq(a, b),
+            _ => false,
+        };
+        let is_output = |name: &str| {
+            outputs.iter().any(|n| n.as_ref() == name) || (default_fill && name == "fill")
+        };
+        let colors = [
+            ("fill", mark.channels.fill.clone()),
+            ("stroke", mark.channels.stroke.clone()),
+        ];
+        if colors.iter().any(|(name, c)| is_output(name) && implies(c)) {
+            let mut next = colors.iter().filter(|(name, _)| !is_output(name));
+            let z = next.find_map(|(_, c)| match c {
+                Some(ColorChannel::Field(f)) => Some(Channel::Field(f.clone())),
+                Some(ColorChannel::Value(a)) => Some(Channel::Accessor(a.clone())),
+                _ => None,
+            });
+            mark.channels.z = z;
+            mark.implied_z = mark.channels.z.is_some();
+        }
+    }
     for name in outputs
         .iter()
         .map(|n| n.as_ref())
@@ -2530,6 +2559,27 @@ mod stack_tests {
         // The later output replaces the default count, and sums the y values.
         assert_eq!(rows[0].y_value(), &Value::Number(4.));
         assert_eq!(rows[1].y_value(), &Value::Number(5.));
+    }
+
+    #[test]
+    fn a_color_output_does_not_subgroup_by_its_input() {
+        // Plot's maybeSubgroup: `stroke: "sex"` splits groupX's groups by sex
+        // unless a `stroke` output replaces it.
+        let count = || crate::transform::GroupReducer::Count;
+        let by_sex = Mark::new(MarkKind::BarY).x("c").stroke("sex").group_x();
+        let replaced = by_sex.clone().group_output("stroke", count());
+        let rows = |mark: Mark| {
+            prepare(&Dataset::new(grouped_rows()), &[mark])[0]
+                .rows
+                .len()
+        };
+        let categories = grouped_rows()
+            .iter()
+            .map(|row| row.value("c").key())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert!(rows(by_sex.group_output("y", count())) > categories);
+        assert_eq!(rows(replaced.group_output("y", count())), categories);
     }
 
     #[test]

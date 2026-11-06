@@ -61,8 +61,18 @@ fn color_values(
             continue;
         }
         // A raster's or contour's grid values feed the color scale.
+        let transformed = |value: Value| match transform {
+            Some(t) => t.apply(&value),
+            None => value,
+        };
         if let Some(grid) = &mark.raster {
-            values.extend(grid.values.iter().filter(|v| !v.is_null()).cloned());
+            values.extend(
+                grid.values
+                    .iter()
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .map(transformed),
+            );
             continue;
         }
         if matches!(
@@ -76,7 +86,7 @@ fn color_values(
                 for i in 0..32 {
                     let x = x1 + (x2 - x1) * (i as f64 + 0.5) / 32.;
                     let y = y1 + (y2 - y1) * (j as f64 + 0.5) / 32.;
-                    values.push(f(x, y));
+                    values.push(transformed(f(x, y)));
                 }
             }
             continue;
@@ -87,10 +97,7 @@ fn color_values(
                 mark.rows
                     .iter()
                     .filter_map(|row| channel.scaled_value(&row.row))
-                    .map(|value| match transform {
-                        Some(t) => t.apply(&value),
-                        None => value,
-                    })
+                    .map(transformed)
                     .filter(|value| {
                         value
                             .as_text()
@@ -367,17 +374,22 @@ impl PlotColors {
                 if let Some(color) = value.as_text().and_then(|t| crate::css::parse(t)) {
                     return color;
                 }
-                let value = match &self.transform {
-                    Some(t) => t.apply(&value),
-                    None => value,
-                };
-                self.scale
-                    .as_ref()
-                    .and_then(|scale| scale.color(&value))
+                self.scale_color(&value)
                     .unwrap_or(Hsla::transparent_black())
             }
             ColorChannel::Current => self.mark_color,
             _ => channel.read(row),
+        }
+    }
+
+    /// The color scale's color for a data value, through the scale's
+    /// `transform` first: a raster cell's or contour threshold's value, or a
+    /// color channel's.
+    pub fn scale_color(&self, value: &Value) -> Option<Hsla> {
+        let scale = self.scale.as_ref()?;
+        match &self.transform {
+            Some(t) => scale.color(&t.apply(value)),
+            None => scale.color(value),
         }
     }
 

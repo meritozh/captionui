@@ -3350,13 +3350,13 @@ fn hoverable(mark: &PreparedMark) -> bool {
 }
 
 impl Plot {
-    /// The plot's color scales over the resolved marks.
     /// Plot's scale `transform` options, over the resolved marks' channels.
     fn apply_scale_transforms(&self, facets: &mut [Vec<PreparedMark>]) {
         let s = &self.scales;
         render::apply_scale_transforms(facets, &s.x, &s.y, &s.r, &s.opacity);
     }
 
+    /// The plot's color scales over the resolved marks.
     fn plot_colors(
         &self,
         theme: &PlotTheme,
@@ -4205,6 +4205,24 @@ mod tests {
         for row in &mark.rows {
             assert!(render::basic::position_in(mark, &frame, row).is_some());
         }
+    }
+
+    #[test]
+    fn a_row_missing_its_channel_value_is_not_placed() {
+        // d3.autoType reads "NaN" as missing; Plot filters the row out
+        // rather than drawing it at the frame's middle.
+        let data = [Value::Number(1.), Value::Null, Value::Number(3.)]
+            .map(|y| Table::empty().with("x", Value::Number(1.)).with("y", y));
+        let plot = Plot::plot().mark(crate::marks::dot(data.to_vec()).x("x").y("y"));
+        let facets = vec![render::prepare(plot.data(), plot.marks())];
+        let frame = frame_for(&plot, &facets);
+        let mark = &facets[0][0];
+        let placed: Vec<bool> = mark
+            .rows
+            .iter()
+            .map(|row| render::basic::position_in(mark, &frame, row).is_some())
+            .collect();
+        assert_eq!(placed, [true, false, true]);
     }
 
     #[test]
