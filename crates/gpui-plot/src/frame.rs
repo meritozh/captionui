@@ -1302,10 +1302,12 @@ pub(crate) fn paint_vertical_axis_label(
         plot.origin.x - px(offset)
     };
     if anchor == LabelAnchor::Center {
-        // Plot's line anchor `top` (`bottom` on the right): the rotated
-        // text's top edge sits on the offset, so its middle is inward.
+        // Plot's line anchor `top` on the left puts the rotated baseline
+        // 0.71em inside the offset; `bottom` on the right puts it on the
+        // offset. `paint_rotated_text` centres the line 0.35em off its
+        // baseline, so the anchor moves inward by the difference.
         let size = theme.label_size.as_f32();
-        let inward = if right { -0.6 * size } else { 0.6 * size };
+        let inward = if right { -0.35 * size } else { 0.36 * size };
         paint::paint_rotated_text(
             text,
             size,
