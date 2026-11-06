@@ -21,7 +21,7 @@ thread_local! {
 }
 
 /// A dataset parsed once and kept for the thread.
-fn cached(key: &'static str, load: impl FnOnce() -> Dataset) -> Dataset {
+pub fn cached(key: &'static str, load: impl FnOnce() -> Dataset) -> Dataset {
     if let Some(data) = CACHE.with(|cache| cache.borrow().get(key).cloned()) {
         return data;
     }

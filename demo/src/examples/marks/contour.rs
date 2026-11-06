@@ -60,17 +60,19 @@ fn grid_text() -> TextMark {
 
 /// The page's `vapor`: a 360 × 180 grid of water vapor, `99999.0` for missing.
 fn vapor() -> Dataset {
-    Dataset::values_of(
-        data::text("MYDAL2_M_SKY_WV_2022-11-01_rgb_360x180.csv")
-            .lines()
-            .flat_map(|line| line.split(',').map(str::to_string).collect::<Vec<_>>())
-            .map(|text| match text.trim() {
-                "99999.0" => f64::NAN,
-                text => text.parse().unwrap_or(f64::NAN),
-            })
-            .map(Value::number)
-            .collect::<Vec<_>>(),
-    )
+    data::cached("contour vapor", || {
+        Dataset::values_of(
+            data::text("MYDAL2_M_SKY_WV_2022-11-01_rgb_360x180.csv")
+                .lines()
+                .flat_map(|line| line.split(',').map(str::to_string).collect::<Vec<_>>())
+                .map(|text| match text.trim() {
+                    "99999.0" => f64::NAN,
+                    text => text.parse().unwrap_or(f64::NAN),
+                })
+                .map(Value::number)
+                .collect::<Vec<_>>(),
+        )
+    })
 }
 
 /// `Plot.contour(volcano.values, {width: volcano.width, height: volcano.height}).plot()`

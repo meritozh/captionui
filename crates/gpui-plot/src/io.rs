@@ -8,6 +8,7 @@
 //! chart reads `"Date"` as a date and `"Close"` as a number without a schema.
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
+use gpui::SharedString;
 
 use crate::table::{Dataset, Table};
 use crate::value::Value;
@@ -39,6 +40,8 @@ pub fn delimited(text: &str, delimiter: u8) -> Dataset {
     let Some(header) = rows.next() else {
         return Dataset::default();
     };
+    // Convert the header once, so every row shares its names' storage.
+    let header: Vec<SharedString> = header.into_iter().map(Into::into).collect();
     Dataset::new(
         rows.filter(|row| !(row.len() == 1 && row[0].is_empty()))
             .map(|row| {

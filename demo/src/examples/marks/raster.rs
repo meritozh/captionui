@@ -57,20 +57,22 @@ fn grid_text() -> TextMark {
 /// The docs' `vapor`: NASA's water vapor for November 2022, 360 × 180, with
 /// `99999.0` as missing.
 fn vapor() -> Dataset {
-    Dataset::values_of(
-        gpui_plot::io::rows(
-            &data::text("MYDAL2_M_SKY_WV_2022-11-01_rgb_360x180.csv"),
-            b',',
+    data::cached("raster vapor", || {
+        Dataset::values_of(
+            gpui_plot::io::rows(
+                &data::text("MYDAL2_M_SKY_WV_2022-11-01_rgb_360x180.csv"),
+                b',',
+            )
+            .into_iter()
+            .flatten()
+            .map(|x| match x.trim() {
+                "99999.0" => f64::NAN,
+                x => x.parse().unwrap_or(f64::NAN),
+            })
+            .map(Value::number)
+            .collect::<Vec<_>>(),
         )
-        .into_iter()
-        .flatten()
-        .map(|x| match x.trim() {
-            "99999.0" => f64::NAN,
-            x => x.parse().unwrap_or(f64::NAN),
-        })
-        .map(Value::number)
-        .collect::<Vec<_>>(),
-    )
+    })
 }
 
 /// `Plot.raster(ca55, {x: "LONGITUDE", y: "LATITUDE", fill: "MAG_IGRF90", interpolate})`

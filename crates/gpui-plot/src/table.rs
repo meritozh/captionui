@@ -28,9 +28,13 @@ use crate::value::Value;
 ///
 /// A table shares its fields behind an `Rc`, so the copies the transforms and
 /// prepared rows keep are cheap; [`Table::with`] copies on write.
+///
+/// The fields are a vector of pairs sorted by name with no duplicates, so a
+/// lookup is a binary search over contiguous memory and a copy on write is a
+/// single vector clone.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Table {
-    fields: Rc<BTreeMap<SharedString, Value>>,
+    fields: Rc<Vec<(SharedString, Value)>>,
 }
 
 impl Table {
@@ -41,14 +45,20 @@ impl Table {
         I: IntoIterator<Item = (S, Value)>,
         S: Into<SharedString>,
     {
+        // Collecting through a map keeps the last pair for a repeated name
+        // and sorts the fields by name.
+        let fields: BTreeMap<SharedString, Value> = fields
+            .into_iter()
+            .map(|(name, value)| (name.into(), value))
+            .collect();
         Self {
-            fields: Rc::new(
-                fields
-                    .into_iter()
-                    .map(|(name, value)| (name.into(), value))
-                    .collect(),
-            ),
+            fields: Rc::new(fields.into_iter().collect()),
         }
+    }
+
+    /// The position of `name` among the sorted fields, or where it would go.
+    fn position(&self, name: &str) -> Result<usize, usize> {
+        self.fields.binary_search_by(|(k, _)| k.as_ref().cmp(name))
     }
 
     /// An empty table.
@@ -58,13 +68,18 @@ impl Table {
 
     /// Set a field, replacing any value already under that name.
     pub fn with(mut self, name: impl Into<SharedString>, value: impl Into<Value>) -> Self {
-        Rc::make_mut(&mut self.fields).insert(name.into(), value.into());
+        let name = name.into();
+        let value = value.into();
+        match self.position(&name) {
+            Ok(i) => Rc::make_mut(&mut self.fields)[i].1 = value,
+            Err(i) => Rc::make_mut(&mut self.fields).insert(i, (name, value)),
+        }
         self
     }
 
     /// Read a field by name.
     pub fn get(&self, name: &str) -> Option<&Value> {
-        self.fields.get(name)
+        self.position(name).ok().map(|i| &self.fields[i].1)
     }
 
     /// Read a field by name, or [`Value::Null`] when the field is absent.
@@ -72,12 +87,12 @@ impl Table {
     /// Plot treats a missing field as an undefined value, and marks skip it;
     /// returning `Null` here keeps the accessor chain total.
     pub fn value(&self, name: &str) -> Value {
-        self.fields.get(name).cloned().unwrap_or(Value::Null)
+        self.get(name).cloned().unwrap_or(Value::Null)
     }
 
     /// The field names in the table, in sorted order.
     pub fn field_names(&self) -> impl Iterator<Item = &SharedString> {
-        self.fields.keys()
+        self.fields.iter().map(|(name, _)| name)
     }
 
     /// The number of fields.
@@ -166,9 +181,10 @@ impl Dataset {
     /// each value becomes a record holding it under [`VALUE`].
     pub fn values_of<V: Into<Value>>(values: impl IntoIterator<Item = V>) -> Self {
         Self::new(values.into_iter().enumerate().map(|(i, value)| {
-            Table::empty()
-                .with(VALUE, value.into())
-                .with(INDEX, Value::Number(i as f64))
+            Table::new([
+                (SharedString::new_static(VALUE), value.into()),
+                (SharedString::new_static(INDEX), Value::Number(i as f64)),
+            ])
         }))
     }
 
@@ -180,16 +196,19 @@ impl Dataset {
             Table::new(
                 row.into_iter()
                     .enumerate()
-                    .map(|(index, value)| (SharedString::from(index.to_string()), value.into())),
+                    .map(|(index, value)| (SharedString::from(index.to_string()), value.into()))
+                    .chain([(SharedString::new_static(INDEX), Value::Number(i as f64))]),
             )
-            .with(INDEX, Value::Number(i as f64))
         }))
     }
 
     /// `n` records that hold only their index, Plot's `{length: n}` data for
     /// marks whose channels are all functions.
     pub fn length(n: usize) -> Self {
-        Self::new((0..n).map(|i| Table::empty().with(INDEX, Value::Number(i as f64))))
+        Self::new(
+            (0..n)
+                .map(|i| Table::new([(SharedString::new_static(INDEX), Value::Number(i as f64))])),
+        )
     }
 
     /// Whether this is a dataset of plain values ([`Dataset::values_of`]).
