@@ -3,8 +3,6 @@
 //! A radial mark places its rows on an arc rather than on the x and y axes; its
 //! domain is the sum of its values, not the frame's extents.
 
-use std::collections::HashMap;
-
 use gpui::{Point, point, px};
 
 use crate::mark::MarkKind;
@@ -561,49 +559,16 @@ fn draw_density(prepared: &PreparedMark, ctx: &mut DrawContext<'_>, along_x: boo
 fn draw_hexbin(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let colors = Colors::resolve(prepared, ctx);
     let bin_width = prepared.mark.style.bin_width.max(2.);
-    // The lattice's spacing: `dx` across, and rows `dy` apart.
-    let dx = bin_width;
-    let dy = dx * (1.5 / 3f32.sqrt());
-    let (ox, oy) = (0.5_f32, 0.0_f32);
-
-    // Key by the lattice cell, and keep its center in pixels.
-    let mut cells: HashMap<(i32, i32), (f32, f32, usize)> = HashMap::new();
-    for row in prepared.rows.iter() {
-        let Some(placed) = crate::render::basic::position_in(prepared, ctx.frame, row) else {
-            continue;
-        };
-        let (px, py) = (placed.x.as_f32(), placed.y.as_f32());
-        let mut line = ((py - oy) / dy).round();
-        let mut column = ((px - ox) / dx - (line as i32 & 1) as f32 / 2.).round();
-        let fy = (py - oy) / dy - line;
-        // Near a corner, take the neighbouring hexagon when it is nearer.
-        if fy.abs() * 3. > 1. {
-            let fx = (px - ox) / dx - (line as i32 & 1) as f32 / 2. - column;
-            let column2 = column
-                + if (px - ox) / dx - (line as i32 & 1) as f32 / 2. < column {
-                    -0.5
-                } else {
-                    0.5
-                };
-            let line2 = line + if (py - oy) / dy < line { -1. } else { 1. };
-            let fx2 = (px - ox) / dx - (line2 as i32 & 1) as f32 / 2. - column2;
-            let fy2 = (py - oy) / dy - line2;
-            if fx * fx + fy * fy > fx2 * fx2 + fy2 * fy2 {
-                column = column2 + if line as i32 & 1 == 1 { 0.5 } else { -0.5 };
-                line = line2;
-            }
-        }
-        let key = (column as i32, line as i32);
-        let centre = (
-            (column + (line as i32 & 1) as f32 / 2.) * dx + ox,
-            line * dy + oy,
-        );
-        let entry = cells.entry(key).or_insert((centre.0, centre.1, 0));
-        entry.2 += 1;
-    }
+    let cells = hexbin_cells(
+        prepared.rows.iter().filter_map(|row| {
+            let placed = crate::render::basic::position_in(prepared, ctx.frame, row)?;
+            Some((placed.x.as_f32(), placed.y.as_f32()))
+        }),
+        bin_width,
+    );
 
     let max = cells
-        .values()
+        .iter()
         .map(|(.., count)| *count)
         .max()
         .unwrap_or(1)
@@ -611,7 +576,7 @@ fn draw_hexbin(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
     let scale = crate::scale::ColorScale::continuous([0., max], ctx.theme.sequential_range());
 
     ctx.clipped(|ctx| {
-        for (x, y, count) in cells.values() {
+        for (x, y, count) in &cells {
             let center = ctx.absolute(gpui::point(px(*x), px(*y)));
             // Plot's hexagon symbol, pointy-top: `binWidth` is its full
             // width, and its corners reach `ry` above and below the centre.
@@ -635,6 +600,57 @@ fn draw_hexbin(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             );
         }
     });
+}
+
+/// The hexagons of a `bin_width` lattice that pixel `points` fall in, each
+/// as its center and how many points it holds, in the order their first
+/// points arrive: the hexagons paint in the data's order, the same on every
+/// run (a hash map's order would change from run to run).
+fn hexbin_cells(
+    points: impl IntoIterator<Item = (f32, f32)>,
+    bin_width: f32,
+) -> Vec<(f32, f32, usize)> {
+    // The lattice's spacing: `dx` across, and rows `dy` apart.
+    let dx = bin_width;
+    let dy = dx * (1.5 / 3f32.sqrt());
+    let (ox, oy) = (0.5_f32, 0.0_f32);
+
+    // Each lattice cell's place in `cells`, which keeps its center in pixels.
+    let mut cells: Vec<(f32, f32, usize)> = Vec::new();
+    let mut slots: rustc_hash::FxHashMap<(i32, i32), usize> = Default::default();
+    for (px, py) in points {
+        let mut line = ((py - oy) / dy).round();
+        let mut column = ((px - ox) / dx - (line as i32 & 1) as f32 / 2.).round();
+        let fy = (py - oy) / dy - line;
+        // Near a corner, take the neighbouring hexagon when it is nearer.
+        if fy.abs() * 3. > 1. {
+            let fx = (px - ox) / dx - (line as i32 & 1) as f32 / 2. - column;
+            let column2 = column
+                + if (px - ox) / dx - (line as i32 & 1) as f32 / 2. < column {
+                    -0.5
+                } else {
+                    0.5
+                };
+            let line2 = line + if (py - oy) / dy < line { -1. } else { 1. };
+            let fx2 = (px - ox) / dx - (line2 as i32 & 1) as f32 / 2. - column2;
+            let fy2 = (py - oy) / dy - line2;
+            if fx * fx + fy * fy > fx2 * fx2 + fy2 * fy2 {
+                column = column2 + if line as i32 & 1 == 1 { 0.5 } else { -0.5 };
+                line = line2;
+            }
+        }
+        let key = (column as i32, line as i32);
+        let slot = *slots.entry(key).or_insert_with(|| {
+            let centre = (
+                (column + (line as i32 & 1) as f32 / 2.) * dx + ox,
+                line * dy + oy,
+            );
+            cells.push((centre.0, centre.1, 0));
+            cells.len() - 1
+        });
+        cells[slot].2 += 1;
+    }
+    cells
 }
 
 /// Plot's `density` defaults: a 20-pixel Gaussian bandwidth over 4-pixel
@@ -808,4 +824,58 @@ pub fn density_peak(prepared: &PreparedMark, frame: &crate::frame::Frame) -> Opt
     let n = spec.count.unwrap_or(DENSITY_THRESHOLDS).max(1) as f64;
     // The highest threshold, as Plot's legend runs to it.
     Some(max * (n - 1.) / n * 100. / (DENSITY_CELL as f64 * DENSITY_CELL as f64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hexagons come back in the order their first points arrive, with
+    /// every point counted once, so the hexbin mark paints the same way on
+    /// every run.
+    #[test]
+    fn hexbin_cells_keep_their_first_points_order() {
+        let mut seed = 11_u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let points: Vec<(f32, f32)> = (0..500).map(|_| (next() * 300., next() * 200.)).collect();
+        let cells = hexbin_cells(points.iter().copied(), 20.);
+        assert_eq!(cells.iter().map(|(.., n)| n).sum::<usize>(), points.len());
+        // Each cell's first point is the earliest point binned there: bin
+        // the points one at a time and watch the cells appear.
+        let mut seen: Vec<(u32, u32)> = Vec::new();
+        for k in 0..points.len() {
+            let upto = hexbin_cells(points[..=k].iter().copied(), 20.);
+            if upto.len() > seen.len() {
+                let (x, y, n) = upto[upto.len() - 1];
+                assert_eq!(n, 1, "a new cell holds just its first point");
+                seen.push((x.to_bits(), y.to_bits()));
+            }
+        }
+        let order: Vec<(u32, u32)> = cells
+            .iter()
+            .map(|(x, y, _)| (x.to_bits(), y.to_bits()))
+            .collect();
+        assert_eq!(order, seen);
+        // The same points in the same order give the same cells.
+        let again = hexbin_cells(points.iter().copied(), 20.);
+        assert_eq!(
+            again
+                .iter()
+                .map(|(x, y, n)| (x.to_bits(), y.to_bits(), *n))
+                .collect::<Vec<_>>(),
+            cells
+                .iter()
+                .map(|(x, y, n)| (x.to_bits(), y.to_bits(), *n))
+                .collect::<Vec<_>>()
+        );
+        // Two points in one hexagon and one in another, interleaved.
+        let few = hexbin_cells([(100., 100.), (300., 100.), (101., 100.)], 20.);
+        assert_eq!(few.iter().map(|c| c.2).collect::<Vec<_>>(), vec![2, 1]);
+        assert!(few[0].0 < few[1].0);
+    }
 }
