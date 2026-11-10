@@ -62,12 +62,24 @@ fn e04() -> Plot {
 /// also ignores the plot's projection, so the centroids are pre-projected
 /// (see [`crate::examples::pre_projected`]).
 fn e05() -> Plot {
-    let (counties, plot) = crate::examples::pre_projected(
-        data::counties(),
-        &crate::examples::albers(),
-        crate::examples::geo_centroid,
-    );
-    plot.mark(hexbin(counties).x("x").y("y"))
+    // Projecting the counties is the same work every time: done once per
+    // thread, like loading them.
+    thread_local! {
+        static PROJECTED: std::cell::OnceCell<(Dataset, [[f64; 2]; 2])> =
+            const { std::cell::OnceCell::new() };
+    }
+    let (counties, frame) = PROJECTED.with(|projected| {
+        projected
+            .get_or_init(|| {
+                crate::examples::pre_projected_rows(
+                    data::counties(),
+                    &crate::examples::albers(),
+                    crate::examples::geo_centroid,
+                )
+            })
+            .clone()
+    });
+    crate::examples::pre_projected_plot(frame).mark(hexbin(counties).x("x").y("y"))
 }
 
 /// Gap: `Plot.pointer` on a tip is an interaction; the snapshot shows no

@@ -52,7 +52,13 @@ impl FacetReads {
         {
             Some(index) => index,
             None => {
-                let values = data.rows().iter().map(|row| channel.read(row)).collect();
+                // Records of one shape keep a field at one position.
+                let hint = std::cell::Cell::new(0);
+                let values = data
+                    .rows()
+                    .iter()
+                    .map(|row| channel.read_hinted(row, &hint))
+                    .collect();
                 self.0.push((data.clone(), channel.clone(), values));
                 self.0.len() - 1
             }

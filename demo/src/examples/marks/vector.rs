@@ -106,7 +106,10 @@ fn e03() -> Plot {
 /// The docs' Perlin noise field over a Poisson-disk sample.
 fn e04() -> Plot {
     let noise = |x: f64, y: f64| perlin::octave2(x, y, 2);
-    let points = Dataset::tuples(poisson([0., 0., 2., 2.], 4000.));
+    // The sampler is seeded, so its points are the same every time.
+    let points = crate::data::cached("vector-04 poisson", || {
+        Dataset::tuples(poisson([0., 0., 2., 2.], 4000.))
+    });
     Plot::plot()
         .inset(6.)
         .width(1024.)

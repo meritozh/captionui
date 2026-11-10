@@ -1447,6 +1447,8 @@ pub fn dodge_positions(
     // The placed circles, as (low, high, index) along the varying axis.
     let mut placed: Vec<(f32, f32, usize)> = Vec::new();
     let mut intervals: Vec<f32> = Vec::new();
+    let mut candidates: Vec<f32> = Vec::new();
+    let mut blocked: Vec<(f32, f32)> = Vec::new();
     for &i in order {
         let Some(x) = positions.get(i).copied().flatten().filter(|x| x.is_finite()) else {
             continue;
@@ -1472,21 +1474,25 @@ pub fn dodge_positions(
             intervals.push(yj - dy);
             intervals.push(yj + dy);
         }
-        let mut candidates: Vec<f32> = intervals.clone();
+        candidates.clear();
+        candidates.extend_from_slice(&intervals);
         if ky != 0. {
             candidates.retain(|c| *c >= 0.);
             candidates.sort_by(f32::total_cmp);
         } else {
             candidates.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
         }
-        'candidates: for candidate in candidates {
-            for pair in intervals.chunks(2) {
-                if pair[0] + 1e-6 < candidate && candidate < pair[1] - 1e-6 {
-                    continue 'candidates;
-                }
-            }
+        // A candidate is blocked inside any interval, shrunk by a hair:
+        // `lo + 1e-6 < c < hi - 1e-6`. Those open intervals' union, sorted
+        // and disjoint, blocks the same candidates and answers each in a
+        // search rather than a pass over every interval.
+        open_union(&intervals, &mut blocked);
+        if let Some(&candidate) = candidates.iter().find(|&&c| {
+            let k = blocked.partition_point(|&(lo, _)| lo < c);
+            // A NaN is below no start, so it is never blocked, as before.
+            k == 0 || c >= blocked[k - 1].1
+        }) {
             y[i] = candidate + y0;
-            break;
         }
         placed.push((l, h, i));
     }
@@ -1497,6 +1503,40 @@ pub fn dodge_positions(
         }
     }
     out
+}
+
+/// The union of the open intervals `(lo + 1e-6, hi - 1e-6)` over the pairs
+/// `[lo, hi]` of `pairs`, as sorted, disjoint open intervals in `union`.
+///
+/// An empty or NaN interval contains nothing and is left out. Sorted by
+/// start, an interval joins the one before when it starts strictly inside
+/// it; one starting at the other's end stays apart, since that end is in
+/// neither. A value then lies in some interval exactly when it lies in the
+/// last union member starting below it, which compares only the values the
+/// intervals were shrunk to.
+fn open_union(pairs: &[f32], union: &mut Vec<(f32, f32)>) {
+    union.clear();
+    union.extend(
+        pairs
+            .chunks(2)
+            .map(|pair| (pair[0] + 1e-6, pair[1] - 1e-6))
+            .filter(|(lo, hi)| lo < hi),
+    );
+    union.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged = 0;
+    for k in 0..union.len() {
+        let (lo, hi) = union[k];
+        if merged > 0 && lo < union[merged - 1].1 {
+            let end = &mut union[merged - 1].1;
+            if hi > *end {
+                *end = hi;
+            }
+        } else {
+            union[merged] = (lo, hi);
+            merged += 1;
+        }
+    }
+    union.truncate(merged);
 }
 
 /// Which row of a group a [`Select`] keeps, Plot's `select` options.
@@ -1640,6 +1680,141 @@ pub fn shuffle(data: &Dataset, seed: u64) -> Dataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `dodge_positions` as it was: each candidate tested against every
+    /// interval.
+    fn dodge_positions_scanning(
+        positions: &[Option<f32>],
+        radii: &[f32],
+        order: &[usize],
+        anchor: DodgeAnchor,
+        padding: f32,
+        extent: [f32; 2],
+    ) -> Vec<Option<f32>> {
+        let (start, end) = (extent[0].min(extent[1]), extent[0].max(extent[1]));
+        let (ky, ty) = match anchor {
+            DodgeAnchor::Start => (1., start),
+            DodgeAnchor::End => (-1., end),
+            DodgeAnchor::Middle => (0., (start + end) / 2.),
+        };
+        let mut y: Vec<f32> = vec![f32::NAN; positions.len()];
+        let mut out: Vec<Option<f32>> = vec![None; positions.len()];
+        let mut placed: Vec<(f32, f32, usize)> = Vec::new();
+        let mut intervals: Vec<f32> = Vec::new();
+        for &i in order {
+            let Some(x) = positions
+                .get(i)
+                .copied()
+                .flatten()
+                .filter(|x| x.is_finite())
+            else {
+                continue;
+            };
+            let ri = radii.get(i).copied().unwrap_or(0.);
+            if ri.is_nan() || ri <= 0. {
+                continue;
+            }
+            let y0 = if ky != 0. { ri + padding } else { 0. };
+            let (l, h) = (x - ri, x + ri);
+            intervals.clear();
+            intervals.extend([0., 0.]);
+            for &(lj, hj, j) in &placed {
+                if hj < l - padding || lj > h + padding {
+                    continue;
+                }
+                let xj = positions[j].unwrap_or(f32::NAN);
+                let yj = y[j] - y0;
+                let dx = x - xj;
+                let dr = padding + ri + radii[j];
+                let dy = (dr * dr - dx * dx).max(0.).sqrt();
+                intervals.push(yj - dy);
+                intervals.push(yj + dy);
+            }
+            let mut candidates: Vec<f32> = intervals.clone();
+            if ky != 0. {
+                candidates.retain(|c| *c >= 0.);
+                candidates.sort_by(f32::total_cmp);
+            } else {
+                candidates.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
+            }
+            'candidates: for candidate in candidates {
+                for pair in intervals.chunks(2) {
+                    if pair[0] + 1e-6 < candidate && candidate < pair[1] - 1e-6 {
+                        continue 'candidates;
+                    }
+                }
+                y[i] = candidate + y0;
+                break;
+            }
+            placed.push((l, h, i));
+        }
+        let ky = if ky == 0. { 1. } else { ky };
+        for (i, value) in y.iter().enumerate() {
+            if value.is_finite() {
+                out[i] = Some(value * ky + ty);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_interval_union_dodges_as_the_scan_did() {
+        let mut seed = 31_u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let bits = |v: &[Option<f32>]| -> Vec<Option<u32>> {
+            v.iter().map(|p| p.map(f32::to_bits)).collect()
+        };
+        for n in [0, 1, 2, 5, 40, 400] {
+            for case in 0..6 {
+                let positions: Vec<Option<f32>> = (0..n)
+                    .map(|_| match case {
+                        // Snapped: many dots at the same x.
+                        0 => Some((next() * 10.).floor() * 8.),
+                        1 if next() < 0.1 => None,
+                        1 if next() < 0.1 => Some(f32::NAN),
+                        1 if next() < 0.05 => Some(f32::INFINITY),
+                        _ => Some(next() * 600.),
+                    })
+                    .collect();
+                let radii: Vec<f32> = (0..n)
+                    .map(|_| match case {
+                        2 => 3.,
+                        3 if next() < 0.1 => 0.,
+                        3 if next() < 0.1 => f32::NAN,
+                        3 if next() < 0.1 => -2.,
+                        _ => 0.5 + next() * 12.,
+                    })
+                    .collect();
+                let mut order: Vec<usize> = (0..n).collect();
+                if case % 2 == 1 {
+                    order.reverse();
+                }
+                if case == 4 {
+                    order.sort_by(|a, b| radii[*b].total_cmp(&radii[*a]));
+                }
+                for anchor in [DodgeAnchor::Start, DodgeAnchor::Middle, DodgeAnchor::End] {
+                    for padding in [0., 1., 2.5] {
+                        for extent in [[0., 400.], [300., 20.]] {
+                            assert_eq!(
+                                bits(&dodge_positions(
+                                    &positions, &radii, &order, anchor, padding, extent
+                                )),
+                                bits(&dodge_positions_scanning(
+                                    &positions, &radii, &order, anchor, padding, extent
+                                )),
+                                "n={n} case={case} {anchor:?} padding={padding} {extent:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn rows() -> Dataset {
         Dataset::new([

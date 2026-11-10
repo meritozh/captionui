@@ -5,8 +5,6 @@
 //! are clipped to the plot, so a value outside the domain stops at the frame's
 //! edge the way Plot's marks do.
 
-use std::collections::HashMap;
-
 use gpui::{
     App, Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, SharedString, TextAlign, Window,
     point, px,
@@ -2018,7 +2016,9 @@ pub fn position_in(
 /// Rows grouped by their `z` series, in first-occurrence order.
 pub fn series_groups(prepared: &PreparedMark) -> Vec<Vec<(usize, &PreparedRow)>> {
     let mut order: Vec<Option<Value>> = Vec::new();
-    let mut groups: HashMap<crate::value::ValueKey, Vec<(usize, &PreparedRow)>> = HashMap::new();
+    // Only looked up, never iterated: `order` decides the groups' order.
+    let mut groups: rustc_hash::FxHashMap<crate::value::ValueKey, Vec<(usize, &PreparedRow)>> =
+        Default::default();
     for (index, row) in prepared.rows.iter().enumerate() {
         let key = row.z.as_ref().map(|z| z.key());
         if !order.iter().any(|existing| existing == &row.z) {
@@ -3408,6 +3408,10 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             let pixels = projected_raster(&grid, projection, size, [pw, ph], how);
             let (dw, dh) = device;
             let mut rgba = vec![0u8; dw * dh * 4];
+            // Several device pixels fall in one resampled cell: each cell's
+            // bytes are worked out once per row of cells, then copied.
+            let mut row_sy = usize::MAX;
+            let mut row_bytes: Vec<Option<Option<[u8; 4]>>> = vec![None; size.0];
             for y in 0..dh {
                 let py_ = (y as f64 + 0.5) / scale as f64;
                 // The sphere's spans on this row, even-odd.
@@ -3423,6 +3427,10 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                     xs
                 });
                 let sy = ((py_ / ph * size.1 as f64) as usize).min(size.1 - 1);
+                if sy != row_sy {
+                    row_sy = sy;
+                    row_bytes.fill(None);
+                }
                 for x in 0..dw {
                     let px_ = (x as f64 + 0.5) / scale as f64;
                     if let Some(xs) = &spans
@@ -3431,16 +3439,22 @@ fn draw_raster(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
                         continue;
                     }
                     let sx = ((px_ / pw * size.0 as f64) as usize).min(size.0 - 1);
-                    let Some(c) = cell_color(&pixels.values[sy * size.0 + sx], ctx) else {
+                    let bytes = *row_bytes[sx].get_or_insert_with(|| {
+                        let c =
+                            gpui::Rgba::from(cell_color(&pixels.values[sy * size.0 + sx], ctx)?);
+                        // GPUI's images are BGRA.
+                        Some([
+                            (c.b * 255.).round() as u8,
+                            (c.g * 255.).round() as u8,
+                            (c.r * 255.).round() as u8,
+                            ((c.a * opacity).clamp(0., 1.) * 255.).round() as u8,
+                        ])
+                    });
+                    let Some(bytes) = bytes else {
                         continue;
                     };
-                    let c = gpui::Rgba::from(c);
                     let k = (y * dw + x) * 4;
-                    // GPUI's images are BGRA.
-                    rgba[k] = (c.b * 255.).round() as u8;
-                    rgba[k + 1] = (c.g * 255.).round() as u8;
-                    rgba[k + 2] = (c.r * 255.).round() as u8;
-                    rgba[k + 3] = ((c.a * opacity).clamp(0., 1.) * 255.).round() as u8;
+                    rgba[k..k + 4].copy_from_slice(&bytes);
                 }
             }
             let image = crate::image_from_rgba(dw as u32, dh as u32, rgba);
@@ -3673,14 +3687,38 @@ pub fn draw_contour_grid(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
             px(ctx.frame.y.scale.position(&Value::Number(p[1]))?),
         )))
     };
+    // A grid's rings at a threshold are the same on every repaint: the last
+    // few grids' rings are kept, each entry holding its grid so the address
+    // it is found by can't be reused while it lives.
+    type Rings = std::rc::Rc<Vec<Vec<[f64; 2]>>>;
+    type Entry = (std::rc::Rc<crate::raster::RasterGrid>, u64, Rings);
+    thread_local! {
+        static CONTOURS: std::cell::RefCell<Vec<Entry>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let contour = |threshold: f64| -> Rings {
+        let bits = threshold.to_bits();
+        if let Some(rings) = CONTOURS.with_borrow(|kept| {
+            kept.iter()
+                .find(|(g, t, _)| *t == bits && std::rc::Rc::ptr_eq(g, &grid))
+                .map(|(_, _, rings)| rings.clone())
+        }) {
+            return rings;
+        }
+        let rings = std::rc::Rc::new(grid.contour(threshold));
+        CONTOURS.with_borrow_mut(|kept| {
+            kept.insert(0, (grid.clone(), bits, rings.clone()));
+            kept.truncate(64);
+        });
+        rings
+    };
     ctx.clipped(|ctx| {
         for threshold in thresholds {
-            let rings: Vec<Vec<Point<Pixels>>> = grid
-                .contour(threshold)
-                .into_iter()
+            let rings: Vec<Vec<Point<Pixels>>> = contour(threshold)
+                .iter()
                 .filter_map(|ring| {
-                    ring.into_iter()
-                        .map(|p| place(p, ctx))
+                    ring.iter()
+                        .map(|p| place(*p, ctx))
                         .collect::<Option<Vec<_>>>()
                 })
                 .collect();

@@ -524,14 +524,53 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         .group
         .as_ref()
         .filter(|_| mark.sort.is_none() && !transforms_before_group(mark));
-    let mut rows: Vec<PreparedRow> = match streamed {
-        Some(config) => collapse_groups(
-            raw().map(|(index, row)| resolve_row(row, index, channels, mark, &facts)),
+    // A box's outliers are a few rows of many: when nothing before the
+    // outlier filter rewrites the rows, each is read only as far as its
+    // value and series, and only the outliers are resolved in full.
+    let outliers_first = mark.outliers.filter(|_| {
+        streamed.is_none()
+            && mark.sort.is_none()
+            && mark.window.is_none()
+            && !mark.normalize
+            && !(mark.normalize_by.is_some() && mark.bin.is_none())
+    });
+    // A bin whose rows nothing rewrites before it bins the records
+    // themselves, resolving only each cell's first row; the transforms
+    // below up to the bin are then all no-ops on the rows left empty.
+    let binned_records = mark.bin.is_some()
+        && streamed.is_none()
+        && mark.group.is_none()
+        && mark.sort.is_none()
+        && !transforms_before_group(mark);
+    let mut rows: Vec<PreparedRow> = match (streamed, outliers_first) {
+        (Some(config), _) => collapse_groups(
+            raw().map(|(index, row)| CoreRow {
+                core: resolve_core(row, index, channels, mark, &facts),
+                record: row,
+                index,
+            }),
+            |row| finish_row(row.core, row.record, row.index, channels, &facts),
             mark,
             config,
             bound_channels,
         ),
-        None => raw()
+        (None, Some(axis)) => {
+            let keep = outlier_flags(
+                raw().map(|(index, row)| CoreRow {
+                    core: resolve_core(row, index, channels, mark, &facts),
+                    record: row,
+                    index,
+                }),
+                axis,
+            );
+            raw()
+                .zip(keep)
+                .filter(|(_, keep)| *keep)
+                .map(|((index, row), _)| resolve_row(row, index, channels, mark, &facts))
+                .collect()
+        }
+        (None, None) if binned_records => Vec::new(),
+        (None, None) => raw()
             .map(|(index, row)| resolve_row(row, index, channels, mark, &facts))
             .collect(),
     };
@@ -551,7 +590,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     if let Some((axis, basis)) = mark.normalize_by.filter(|_| mark.bin.is_none()) {
         stack::normalize(&mut rows, axis, basis);
     }
-    if let Some(axis) = mark.outliers {
+    if let Some(axis) = mark.outliers.filter(|_| outliers_first.is_none()) {
         rows = outlier_rows(rows, axis);
     }
     // A select over an axis (`selectMinX`) reads the mark's resolved channel,
@@ -563,7 +602,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // A grouping collapses the rows sharing a category into one row each,
     // Plot's `groupX`/`groupY`/`groupZ`.
     if let Some(config) = mark.group.as_ref().filter(|_| streamed.is_none()) {
-        rows = collapse_groups(rows, mark, config, bound_channels);
+        rows = collapse_groups(rows, |row| row, mark, config, bound_channels);
     }
 
     // A reducer collapses the rows sharing a category, Plot's `groupX`. A
@@ -579,7 +618,11 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // read.
     if mark.bin.is_some() {
         let resolved = mark.group.is_none() && !transforms_before_group(mark);
-        rows = bin_rows(mark, &rows, bound_channels, resolved);
+        rows = if binned_records {
+            bin_records(mark, source.rows(), channels, &facts, bound_channels)
+        } else {
+            bin_rows(mark, &rows, bound_channels, resolved)
+        };
         if let Some((axis, basis)) = mark.normalize_by {
             stack::normalize(&mut rows, axis, basis);
         }
@@ -635,38 +678,43 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
 
 /// Keep each `z` group's rows beyond its whiskers, Plot's box outliers.
 fn outlier_rows(mut rows: Vec<PreparedRow>, axis: Axis) -> Vec<PreparedRow> {
-    let read = |row: &PreparedRow| -> Value {
+    // Kept in place, so only the outliers move; `retain` visits the rows in
+    // order, as the flags list them.
+    let mut keep = outlier_flags(rows.iter(), axis).into_iter();
+    rows.retain(|_| keep.next().expect("a flag per row"));
+    rows
+}
+
+/// Which of `rows` lie beyond their `z` group's whiskers, in row order.
+fn outlier_flags<R: GroupRow>(rows: impl Iterator<Item = R>, axis: Axis) -> Vec<bool> {
+    let read = |row: &R| -> Value {
         if axis == Axis::X {
-            row.x_value().clone()
+            GroupRow::x_value(row).clone()
         } else {
-            row.y_value().clone()
+            GroupRow::y_value(row).clone()
         }
     };
-    // Each `z` group's first row and values, in row order, and each row's
-    // group and number. A row whose `z` equals the `z` of the previous row's
-    // group is in that group, since equal values have equal keys; any other
-    // asks the map.
-    let mut groups: Vec<(usize, Vec<Value>)> = Vec::new();
+    // Each `z` group's first row's `z` and values, in row order, and each
+    // row's group and number. A row whose `z` equals the `z` of the previous
+    // row's group is in that group, since equal values have equal keys; any
+    // other asks the map.
+    let mut groups: Vec<(Option<Value>, Vec<Value>)> = Vec::new();
     let mut slots: rustc_hash::FxHashMap<crate::value::ValueKey, usize> = Default::default();
-    let mut members: Vec<(usize, Option<f64>)> = Vec::with_capacity(rows.len());
+    let mut members: Vec<(usize, Option<f64>)> = Vec::with_capacity(rows.size_hint().0);
     let mut last: Option<usize> = None;
-    for (index, row) in rows.iter().enumerate() {
+    for row in rows {
         let group = match last {
-            Some(group) if rows[groups[group].0].z == row.z => group,
+            Some(group) if groups[group].0.as_ref() == row.z() => group,
             _ => {
-                let key = row
-                    .z
-                    .as_ref()
-                    .map(Value::key)
-                    .unwrap_or_else(|| Value::Null.key());
+                let key = row.z().map(Value::key).unwrap_or_else(|| Value::Null.key());
                 *slots.entry(key).or_insert_with(|| {
-                    groups.push((index, Vec::new()));
+                    groups.push((row.z().cloned(), Vec::new()));
                     groups.len() - 1
                 })
             }
         };
         last = Some(group);
-        let value = read(row);
+        let value = read(&row);
         members.push((group, value.as_number()));
         groups[group].1.push(value);
     }
@@ -683,15 +731,13 @@ fn outlier_rows(mut rows: Vec<PreparedRow>, axis: Axis) -> Vec<PreparedRow> {
             (lo, hi)
         })
         .collect();
-    // Kept in place, so only the outliers move; `retain` visits the rows in
-    // order, as `members` lists them.
-    let mut members = members.into_iter();
-    rows.retain(|_| {
-        let (group, value) = members.next().expect("a member per row");
-        let (lo, hi) = bounds[group];
-        value.is_some_and(|v| v < lo || v > hi)
-    });
-    rows
+    members
+        .into_iter()
+        .map(|(group, value)| {
+            let (lo, hi) = bounds[group];
+            value.is_some_and(|v| v < lo || v > hi)
+        })
+        .collect()
 }
 
 /// Keep the row of each group with the least or greatest value on the
@@ -1414,6 +1460,155 @@ fn resolve_row(
     mark: &Mark,
     facts: &RowFacts,
 ) -> PreparedRow {
+    let core = resolve_core(row, index, channels, mark, facts);
+    finish_row(core, row, index, channels, facts)
+}
+
+/// What grouping and the outlier filter read of a row besides its record:
+/// its positions, interval ends and series, as [`resolve_row`] resolves
+/// them (it resolves these first, then [`finish_row`] the rest).
+struct RowCore {
+    x: Value,
+    y: Value,
+    x1: Option<Value>,
+    x2: Option<Value>,
+    y1: Option<Value>,
+    y2: Option<Value>,
+    z: Option<Value>,
+}
+
+/// A row read as far as its [`RowCore`], with its record and index, which
+/// [`finish_row`] makes a [`PreparedRow`] only if it is kept.
+struct CoreRow<'a> {
+    core: RowCore,
+    record: &'a Table,
+    index: usize,
+}
+
+/// A row as grouping reads it: a [`PreparedRow`], or a [`CoreRow`] not yet
+/// resolved in full.
+trait GroupRow {
+    fn record(&self) -> &Table;
+    fn x(&self) -> &Value;
+    fn y(&self) -> &Value;
+    fn x1(&self) -> Option<&Value>;
+    fn x2(&self) -> Option<&Value>;
+    fn y1(&self) -> Option<&Value>;
+    fn y2(&self) -> Option<&Value>;
+    fn z(&self) -> Option<&Value>;
+
+    /// [`PreparedRow::x_value`].
+    fn x_value(&self) -> &Value {
+        let x = self.x();
+        if !x.is_null() {
+            x
+        } else {
+            self.x1().unwrap_or(x)
+        }
+    }
+
+    /// [`PreparedRow::y_value`].
+    fn y_value(&self) -> &Value {
+        let y = self.y();
+        if !y.is_null() {
+            y
+        } else {
+            self.y1().unwrap_or(y)
+        }
+    }
+}
+
+impl GroupRow for PreparedRow {
+    fn record(&self) -> &Table {
+        &self.row
+    }
+    fn x(&self) -> &Value {
+        &self.x
+    }
+    fn y(&self) -> &Value {
+        &self.y
+    }
+    fn x1(&self) -> Option<&Value> {
+        self.x1.as_ref()
+    }
+    fn x2(&self) -> Option<&Value> {
+        self.x2.as_ref()
+    }
+    fn y1(&self) -> Option<&Value> {
+        self.y1.as_ref()
+    }
+    fn y2(&self) -> Option<&Value> {
+        self.y2.as_ref()
+    }
+    fn z(&self) -> Option<&Value> {
+        self.z.as_ref()
+    }
+}
+
+impl GroupRow for CoreRow<'_> {
+    fn record(&self) -> &Table {
+        self.record
+    }
+    fn x(&self) -> &Value {
+        &self.core.x
+    }
+    fn y(&self) -> &Value {
+        &self.core.y
+    }
+    fn x1(&self) -> Option<&Value> {
+        self.core.x1.as_ref()
+    }
+    fn x2(&self) -> Option<&Value> {
+        self.core.x2.as_ref()
+    }
+    fn y1(&self) -> Option<&Value> {
+        self.core.y1.as_ref()
+    }
+    fn y2(&self) -> Option<&Value> {
+        self.core.y2.as_ref()
+    }
+    fn z(&self) -> Option<&Value> {
+        self.core.z.as_ref()
+    }
+}
+
+impl<T: GroupRow> GroupRow for &T {
+    fn record(&self) -> &Table {
+        (**self).record()
+    }
+    fn x(&self) -> &Value {
+        (**self).x()
+    }
+    fn y(&self) -> &Value {
+        (**self).y()
+    }
+    fn x1(&self) -> Option<&Value> {
+        (**self).x1()
+    }
+    fn x2(&self) -> Option<&Value> {
+        (**self).x2()
+    }
+    fn y1(&self) -> Option<&Value> {
+        (**self).y1()
+    }
+    fn y2(&self) -> Option<&Value> {
+        (**self).y2()
+    }
+    fn z(&self) -> Option<&Value> {
+        (**self).z()
+    }
+}
+
+/// The first half of [`resolve_row`]: the channels a [`RowCore`] holds,
+/// read in the order `resolve_row` reads them.
+#[inline(always)]
+fn resolve_core(
+    row: &Table,
+    index: usize,
+    channels: &Channels,
+    mark: &Mark,
+    facts: &RowFacts,
+) -> RowCore {
     let read = |channel: &Option<crate::table::Channel>, slot: usize| match channel {
         Some(channel @ crate::table::Channel::Field(_)) => {
             channel.read_hinted(row, &facts.slots[slot])
@@ -1453,7 +1648,36 @@ fn resolve_row(
         None => channels.z.as_ref().map(|_| read(&channels.z, 6)),
     }
     .filter(|v| !v.is_null());
+    RowCore {
+        x,
+        y,
+        x1,
+        x2,
+        y1,
+        y2,
+        z,
+    }
+}
 
+/// The second half of [`resolve_row`]: the row from its core and the
+/// channels left to read.
+#[inline(always)]
+fn finish_row(
+    core: RowCore,
+    row: &Table,
+    index: usize,
+    channels: &Channels,
+    facts: &RowFacts,
+) -> PreparedRow {
+    let RowCore {
+        x,
+        y,
+        x1,
+        x2,
+        y1,
+        y2,
+        z,
+    } = core;
     PreparedRow {
         row: row.clone(),
         index,
@@ -1771,30 +1995,24 @@ fn normalize_rows(rows: &mut [PreparedRow]) {
 /// input, and `y1`/`y2` fall back to `y` when the mark names no interval —
 /// Plot's `maybeInput` — so `{y1: "min"}` is the smallest y value even though
 /// a bar's interval has already been grown from zero by the time it groups.
-fn group_input(row: &PreparedRow, mark: &Mark, name: &str) -> Value {
+fn group_input(row: &impl GroupRow, mark: &Mark, name: &str) -> Value {
     match name {
         // An interval's end falls back to the channel it splits, the way
         // Plot's `maybeInput` does.
-        "x1" | "x2" if mark.channels.x1.is_some() || mark.channels.x2.is_some() => row
-            .x1
-            .as_ref()
-            .or(row.x2.as_ref())
-            .unwrap_or(&row.x)
-            .clone(),
-        "y1" | "y2" if mark.channels.y1.is_some() || mark.channels.y2.is_some() => row
-            .y1
-            .as_ref()
-            .or(row.y2.as_ref())
-            .unwrap_or(&row.y)
-            .clone(),
+        "x1" | "x2" if mark.channels.x1.is_some() || mark.channels.x2.is_some() => {
+            row.x1().or(row.x2()).unwrap_or(row.x()).clone()
+        }
+        "y1" | "y2" if mark.channels.y1.is_some() || mark.channels.y2.is_some() => {
+            row.y1().or(row.y2()).unwrap_or(row.y()).clone()
+        }
         "x1" | "x2" => row.x_value().clone(),
         "y1" | "y2" => row.y_value().clone(),
         "x" => row.x_value().clone(),
         "y" => row.y_value().clone(),
-        "z" => row.z.clone().unwrap_or(Value::Null),
+        "z" => row.z().cloned().unwrap_or(Value::Null),
         // Any other name is a field on the record, which is where a grouped
         // color, label or tooltip value lands.
-        field => row.row.value(field),
+        field => row.record().value(field),
     }
 }
 
@@ -1814,15 +2032,18 @@ fn group_input(row: &PreparedRow, mark: &Mark, name: &str) -> Value {
 /// The rows arrive one at a time and only each group's first row is kept:
 /// the others leave the values their outputs read, so a mark whose raw rows
 /// nothing else reads can stream them in without collecting them first.
-fn collapse_groups(
-    rows: impl IntoIterator<Item = PreparedRow>,
+/// A streamed row arrives as its [`CoreRow`], which `finish` resolves in
+/// full only when it starts a group.
+fn collapse_groups<R: GroupRow>(
+    rows: impl IntoIterator<Item = R>,
+    mut finish: impl FnMut(R) -> PreparedRow,
     mark: &Mark,
     config: &crate::mark::GroupConfig,
     bound: &Channels,
 ) -> Vec<PreparedRow> {
     let by_x = config.both || config.axis == Some(Axis::X);
     let by_y = config.both || config.axis == Some(Axis::Y);
-    let key = |row: &PreparedRow| -> (
+    let key = |row: &R| -> (
         crate::value::ValueKey,
         crate::value::ValueKey,
         crate::value::ValueKey,
@@ -1830,16 +2051,16 @@ fn collapse_groups(
         let none = Value::Null.key();
         (
             if by_x {
-                row.x_value().key()
+                GroupRow::x_value(row).key()
             } else {
                 none.clone()
             },
             if by_y {
-                row.y_value().key()
+                GroupRow::y_value(row).key()
             } else {
                 none.clone()
             },
-            row.z.as_ref().map(Value::key).unwrap_or(none),
+            row.z().map(Value::key).unwrap_or(none),
         )
     };
     // Plot's default output: a count into the channel the grouping leaves
@@ -1900,10 +2121,10 @@ fn collapse_groups(
     // hashing their keys. Equal values have equal keys (a key only forgets a
     // date's sub-millisecond part), so a match is the group the map would
     // find; a mismatch asks the map.
-    let same_group = |row: &PreparedRow, first: &PreparedRow| {
-        (!by_x || row.x_value() == first.x_value())
-            && (!by_y || row.y_value() == first.y_value())
-            && row.z == first.z
+    let same_group = |row: &R, first: &PreparedRow| {
+        (!by_x || GroupRow::x_value(row) == first.x_value())
+            && (!by_y || GroupRow::y_value(row) == first.y_value())
+            && row.z() == first.z.as_ref()
     };
     // The group of the last row.
     let mut last: Option<usize> = None;
@@ -1914,7 +2135,7 @@ fn collapse_groups(
         total += 1;
         let read = |&(name, input_slot): &(&str, Option<usize>)| match input_slot {
             // A `$in:` input reads the mark's own channel.
-            Some(channel) => bound_input(bound, channel, name, &row.row),
+            Some(channel) => bound_input(bound, channel, name, row.record()),
             None => group_input(&row, mark, name),
         };
         let found = match last {
@@ -1929,7 +2150,7 @@ fn collapse_groups(
                     column.push(read(input));
                 }
                 if needs_records {
-                    group.records.push(row.row.clone());
+                    group.records.push(row.record().clone());
                 }
                 last = Some(slot);
             }
@@ -1939,12 +2160,12 @@ fn collapse_groups(
                 last = Some(slot);
                 let columns = inputs.iter().map(|input| vec![read(input)]).collect();
                 let records = if needs_records {
-                    vec![row.row.clone()]
+                    vec![row.record().clone()]
                 } else {
                     Vec::new()
                 };
                 groups.push(Group {
-                    first: row,
+                    first: finish(row),
                     len: 1,
                     columns,
                     records,
@@ -2415,9 +2636,10 @@ fn bin_edges(
     let (x_channel, y_channel) = bin_channels(mark);
     let numbers = |channel: Option<&crate::table::Channel>| -> Option<Vec<f64>> {
         let channel = channel?;
+        let hint = std::cell::Cell::new(0);
         Some(
             rows.iter()
-                .filter_map(|row| channel.read(row).as_number())
+                .filter_map(|row| channel.read_hinted(row, &hint).as_number())
                 .collect(),
         )
     };
@@ -2513,10 +2735,9 @@ fn bin_rows(
     bound: &Channels,
     resolved: bool,
 ) -> Vec<PreparedRow> {
-    let Some(bin) = &mark.bin else {
+    if mark.bin.is_none() {
         return rows.to_vec();
-    };
-    let (bin_x, bin_y) = bin_axes(mark);
+    }
     let (x_channel, y_channel) = bin_channels(mark);
     // Each bin channel's number per row, read once for both the edges and
     // the slots. A field the rows already resolved as their own position
@@ -2543,6 +2764,134 @@ fn bin_rows(
         numbers(x_channel, mark.channels.x.as_ref(), true),
         numbers(y_channel, mark.channels.y.as_ref(), false),
     );
+    bin_cells(mark, rows, xs, ys, bound)
+}
+
+/// [`bin_rows`] over a mark's raw records, which nothing before the bin
+/// rewrites: each row is read only as far as its bin numbers and series,
+/// and only a cell's first row is resolved in full.
+fn bin_records(
+    mark: &Mark,
+    records: &[Table],
+    channels: &Channels,
+    facts: &RowFacts,
+    bound: &Channels,
+) -> Vec<PreparedRow> {
+    let (x_channel, y_channel) = bin_channels(mark);
+    // A bin channel that is the row's own field channel reads the value the
+    // row resolved, as `bin_rows` reads it from a resolved row.
+    let own = |channel: Option<&crate::table::Channel>, own: Option<&crate::table::Channel>| {
+        channel.map(|channel| {
+            matches!(channel, crate::table::Channel::Field(_))
+                && own.is_some_and(|own| std::ptr::eq(own, channel))
+        })
+    };
+    let (own_x, own_y) = (
+        own(x_channel, mark.channels.x.as_ref()),
+        own(y_channel, mark.channels.y.as_ref()),
+    );
+    let (mut xs, mut ys) = (
+        own_x.map(|_| Vec::with_capacity(records.len())),
+        own_y.map(|_| Vec::with_capacity(records.len())),
+    );
+    let mut z = Vec::with_capacity(records.len());
+    let (x_hint, y_hint) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+    for (index, record) in records.iter().enumerate() {
+        let core = resolve_core(record, index, channels, mark, facts);
+        let number = |own: Option<bool>,
+                      channel: Option<&crate::table::Channel>,
+                      value: &Value,
+                      hint: &std::cell::Cell<usize>| match (own, channel) {
+            (Some(true), _) => value.as_number(),
+            (_, Some(channel)) => channel.read_hinted(record, hint).as_number(),
+            _ => None,
+        };
+        if let Some(xs) = xs.as_mut() {
+            xs.push(number(own_x, x_channel, &core.x, &x_hint));
+        }
+        if let Some(ys) = ys.as_mut() {
+            ys.push(number(own_y, y_channel, &core.y, &y_hint));
+        }
+        z.push(core.z.as_ref().map(Value::key));
+    }
+    let rows = RecordBins {
+        records,
+        z,
+        channels,
+        mark,
+        facts,
+    };
+    bin_cells(mark, &rows, xs, ys, bound)
+}
+
+/// What [`bin_cells`] reads of the rows it bins: resolved rows, or records
+/// read only as far as their series ([`RecordBins`]).
+trait BinRows {
+    fn len(&self) -> usize;
+    fn record(&self, index: usize) -> &Table;
+    fn z_key(&self, index: usize) -> Option<crate::value::ValueKey>;
+    /// The row resolved in full, which a cell starts from.
+    fn row(&self, index: usize) -> PreparedRow;
+}
+
+impl BinRows for [PreparedRow] {
+    fn len(&self) -> usize {
+        <[PreparedRow]>::len(self)
+    }
+    fn record(&self, index: usize) -> &Table {
+        &self[index].row
+    }
+    fn z_key(&self, index: usize) -> Option<crate::value::ValueKey> {
+        self[index].z.as_ref().map(|z| z.key())
+    }
+    fn row(&self, index: usize) -> PreparedRow {
+        self[index].clone()
+    }
+}
+
+/// Raw records with each one's series key, resolved on demand as
+/// [`resolve_row`] resolves them.
+struct RecordBins<'a> {
+    records: &'a [Table],
+    z: Vec<Option<crate::value::ValueKey>>,
+    channels: &'a Channels,
+    mark: &'a Mark,
+    facts: &'a RowFacts,
+}
+
+impl BinRows for RecordBins<'_> {
+    fn len(&self) -> usize {
+        self.records.len()
+    }
+    fn record(&self, index: usize) -> &Table {
+        &self.records[index]
+    }
+    fn z_key(&self, index: usize) -> Option<crate::value::ValueKey> {
+        self.z[index].clone()
+    }
+    fn row(&self, index: usize) -> PreparedRow {
+        resolve_row(
+            &self.records[index],
+            index,
+            self.channels,
+            self.mark,
+            self.facts,
+        )
+    }
+}
+
+/// [`bin_rows`] from each bin channel's number per row.
+fn bin_cells(
+    mark: &Mark,
+    rows: &(impl BinRows + ?Sized),
+    xs: Option<Vec<Option<f64>>>,
+    ys: Option<Vec<Option<f64>>>,
+    bound: &Channels,
+) -> Vec<PreparedRow> {
+    let Some(bin) = &mark.bin else {
+        return Vec::new();
+    };
+    let (bin_x, bin_y) = bin_axes(mark);
     let (x_edges, y_edges) = bin_edges_of(mark, xs.as_deref(), ys.as_deref());
     if (bin_x && x_edges.is_none()) || (bin_y && y_edges.is_none()) {
         return Vec::new();
@@ -2582,7 +2931,7 @@ fn bin_rows(
         Option<crate::value::ValueKey>,
         (usize, Gathering),
     > = std::collections::BTreeMap::new();
-    for (index, row) in rows.iter().enumerate() {
+    for index in 0..rows.len() {
         let slot = |numbers: &Option<Vec<Option<f64>>>, edges: Option<transform::BinEdges>| match (
             numbers, edges,
         ) {
@@ -2596,7 +2945,7 @@ fn bin_rows(
             continue;
         };
         gathering
-            .entry(row.z.as_ref().map(|z| z.key()))
+            .entry(rows.z_key(index))
             .or_insert_with(|| (index, Gathering::default()))
             .1
             .entry((xi, yi))
@@ -2691,9 +3040,9 @@ fn bin_rows(
         for (&(xi, yi), members) in cells {
             // An empty bin (kept by `filter: null`) takes its series' first
             // row, as Plot reads z, fill and stroke from the group's first.
-            let mut row = rows[members.first().copied().unwrap_or(*first)].clone();
+            let mut row = rows.row(members.first().copied().unwrap_or(*first));
             let records: Vec<&Table> = if needs_records {
-                members.iter().map(|index| &rows[*index].row).collect()
+                members.iter().map(|index| rows.record(*index)).collect()
             } else {
                 Vec::new()
             };
@@ -2728,7 +3077,7 @@ fn bin_rows(
                         let values: Vec<Value> = members
                             .iter()
                             .map(|index| {
-                                let record = &rows[*index].row;
+                                let record = rows.record(*index);
                                 match (input, channel) {
                                     (Some(field), _) => match slot {
                                         Some(slot) => bound_input(bound, *slot, field, record),
@@ -4324,7 +4673,13 @@ mod equivalence_tests {
             .iter()
             .enumerate()
             .map(|(index, row)| resolve_row(row, index, &mark.channels, mark, &facts));
-        let grouped = collapse_groups(rows, mark, mark.group.as_ref().unwrap(), &mark.channels);
+        let grouped = collapse_groups(
+            rows,
+            |row| row,
+            mark,
+            mark.group.as_ref().unwrap(),
+            &mark.channels,
+        );
         format!("{grouped:?}")
     }
 
@@ -4499,6 +4854,123 @@ mod equivalence_tests {
         }
     }
 
+    #[test]
+    fn rows_streamed_as_cores_group_as_resolved_rows_do() {
+        // Every input a group reads from a row: its positions, interval
+        // ends (with and without interval channels, where they derive),
+        // series, a record field, a bound channel and the records
+        // themselves; and marks whose r, opacity, symbol and path channels
+        // only a group's first row resolves.
+        let outputs = [
+            ("x1", GroupReducer::Min, Some("x1")),
+            ("y1", GroupReducer::Quantile(0.25), Some("y1")),
+            ("y2", GroupReducer::Max, Some("y2")),
+            ("yy", GroupReducer::Mean, Some("y")),
+            ("xx", GroupReducer::First, Some("x")),
+            ("zz", GroupReducer::Last, Some("z")),
+            ("label", GroupReducer::First, Some("f")),
+            ("fill", GroupReducer::Mode, None),
+            (
+                "found",
+                GroupReducer::find(|row| row.num("n") > 4.),
+                Some("n"),
+            ),
+            ("share", GroupReducer::Proportion, None),
+        ];
+        for rows in [records(), runs()] {
+            let data = Dataset::new(rows);
+            for base in [
+                Mark::new(MarkKind::BarY).x("c").y("v").group_x(),
+                Mark::new(MarkKind::BarY)
+                    .x("c")
+                    .y1("w")
+                    .y2("v")
+                    .fill("g")
+                    .group_x(),
+                Mark::new(MarkKind::RectX).y("c").x1("w").x2("v").group_y(),
+                Mark::new(MarkKind::Dot)
+                    .x("c")
+                    .y("v")
+                    .z("g")
+                    .r("w")
+                    .fill("f")
+                    .opacity("n")
+                    .group_xy(),
+                Mark::new(MarkKind::Dot)
+                    .x("c")
+                    .y(|row: &Table| row.value("v"))
+                    .group_z(),
+                Mark::new(MarkKind::RuleX)
+                    .x("c")
+                    .y("v")
+                    .stroke("g")
+                    .z("f")
+                    .group_x(),
+            ] {
+                let mut mark = base;
+                for (name, reducer, input) in &outputs {
+                    mark = mark.group_output(*name, reducer.clone());
+                    let output = mark.group.as_mut().unwrap().outputs.last_mut().unwrap();
+                    output.input = input.map(Into::into);
+                }
+                let streamed = prepare(&data, std::slice::from_ref(&mark));
+                let collected = prepare(&data, &[mark.clone().sort("n", false)]);
+                assert_eq!(
+                    format!("{:?}", streamed[0].rows),
+                    format!("{:?}", collected[0].rows),
+                    "{:?}",
+                    mark.kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn outliers_read_as_cores_keep_the_rows_resolved_in_full() {
+        // The outliers read from each row's value and series alone, then
+        // resolved in full, against every row resolved before the filter
+        // (a sort by the row index collects them, in the same order).
+        let mut rows = records();
+        rows.extend(runs());
+        for (i, row) in rows.iter_mut().enumerate() {
+            row.set("n", Value::Number(i as f64));
+            if i % 11 == 0 {
+                row.set("v", Value::Number(if i % 2 == 0 { 400. } else { -400. }));
+            }
+        }
+        let data = Dataset::new(rows);
+        for (axis, mark) in [
+            (
+                Axis::Y,
+                Mark::new(MarkKind::Dot)
+                    .x("c")
+                    .y("v")
+                    .z("c")
+                    .r("w")
+                    .fill("g"),
+            ),
+            (
+                Axis::Y,
+                Mark::new(MarkKind::Dot).x("c").y("v").z("g").symbol("f"),
+            ),
+            (Axis::X, Mark::new(MarkKind::Dot).y("c").x("v").opacity("w")),
+            (Axis::Y, Mark::new(MarkKind::BarY).x("c").y("v")),
+            (Axis::Y, Mark::new(MarkKind::Dot).x("c").y("v").group_x()),
+        ] {
+            let mut filtered = mark;
+            filtered.outliers = Some(axis);
+            let streamed = &prepare(&data, std::slice::from_ref(&filtered))[0];
+            let collected = &prepare(&data, &[filtered.clone().sort("n", false)])[0];
+            assert!(!streamed.rows.is_empty());
+            assert_eq!(
+                format!("{:?}", streamed.rows),
+                format!("{:?}", collected.rows),
+                "{axis:?} {:?}",
+                filtered.kind
+            );
+        }
+    }
+
     /// Plot's box outliers as they were read before the single pass: each
     /// `z` group's whiskers, then every row tested against its group's.
     fn naive_outliers(rows: &[PreparedRow], axis: Axis) -> Vec<usize> {
@@ -4613,6 +5085,56 @@ mod equivalence_tests {
             assert_eq!(
                 format!("{from_rows:?}"),
                 format!("{from_records:?}"),
+                "{:?}",
+                mark.kind
+            );
+        }
+    }
+
+    /// A bin over raw records, resolving only each cell's first row, gives
+    /// the rows a bin over every resolved row gives (a sort by the row's
+    /// index resolves them all first, in the same order): one and two axes,
+    /// series from `z` and from a color field, an accessor, an implied `z`
+    /// that a quantitative fill drops, a cumulative bin, kept empty bins,
+    /// bound and record-reading outputs.
+    #[test]
+    fn bins_over_records_resolve_only_their_first_rows() {
+        let mut data = records();
+        for (i, row) in data.iter_mut().enumerate() {
+            row.set("i", Value::Number(i as f64));
+            let when = chrono::DateTime::from_timestamp_millis(i as i64 * 86_400_000 * 3);
+            row.set("t", when.map_or(Value::Null, Value::Date));
+        }
+        let data = Dataset::new(data);
+        let bin = |mark: Mark| mark.bin(Thresholds::Count(6));
+        let marks = [
+            bin(Mark::new(MarkKind::Dot).x("v").y("n").r("w")).bin_output("r", GroupReducer::Count),
+            bin(Mark::new(MarkKind::Rect).x("n").y("v").z("g"))
+                .bin_output("fill", GroupReducer::Count),
+            bin(Mark::new(MarkKind::RectY).x("n").fill("g")).bin_output("y", GroupReducer::Sum),
+            bin(Mark::new(MarkKind::RectY).y("n")),
+            bin(Mark::new(MarkKind::RectX).y("t").x("w")).bin_output("x", GroupReducer::Mean),
+            bin(Mark::new(MarkKind::Dot).y("c")),
+            bin(Mark::new(MarkKind::Dot)
+                .x(|row: &Table| row.value("v"))
+                .y("w")
+                .symbol("f")),
+            bin(Mark::new(MarkKind::BarY).x("v").fill("f")).bin_cumulative(1),
+            bin(Mark::new(MarkKind::BarY).x("v").fill("f")).bin_cumulative(-1),
+            bin(Mark::new(MarkKind::RectY).x("n").stroke("g")).bin_keep_empty(),
+            bin(Mark::new(MarkKind::RectY).x("v").fill("w"))
+                .bin_output("y", GroupReducer::Proportion)
+                .bin_output("fill", GroupReducer::Mode)
+                .bin_output("title", GroupReducer::find(|row| row.num("w") > 3.))
+                .bin_output("fillOpacity", GroupReducer::Max),
+        ];
+        for mark in marks {
+            let from_records = &prepare(&data, std::slice::from_ref(&mark))[0];
+            let from_rows = &prepare(&data, &[mark.clone().sort("i", false)])[0];
+            assert!(!from_records.rows.is_empty(), "{:?}", mark.kind);
+            assert_eq!(
+                format!("{:?}", from_records.rows),
+                format!("{:?}", from_rows.rows),
                 "{:?}",
                 mark.kind
             );

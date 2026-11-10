@@ -12,6 +12,8 @@
 //! plot's `color: {…}` options override any of it. A mark without a color
 //! channel paints in `currentColor`, however it groups its rows by `z`.
 
+use std::ops::ControlFlow;
+
 use gpui::{Hsla, SharedString};
 
 use crate::options::{ScaleOptions, ScaleType};
@@ -46,6 +48,19 @@ fn color_values(
     transform: Option<&crate::options::ScaleTransform>,
 ) -> Vec<Value> {
     let mut values = Vec::new();
+    let _ = visit_color_values(facets, transform, &mut |value| {
+        values.push(value);
+        ControlFlow::Continue(())
+    });
+    values
+}
+
+/// Hand [`color_values`]' values to `visit` in order, until it breaks.
+fn visit_color_values(
+    facets: &[Vec<PreparedMark>],
+    transform: Option<&crate::options::ScaleTransform>,
+    visit: &mut dyn FnMut(Value) -> ControlFlow<()>,
+) -> ControlFlow<()> {
     for mark in facets.iter().flatten() {
         // A density's "density" color reads Plot's density units; zero
         // anchors the scale as Plot's does.
@@ -54,9 +69,9 @@ fn color_values(
             && (density_field(&mark.mark.channels.fill)
                 || density_field(&mark.mark.channels.stroke))
         {
-            values.push(Value::Number(0.));
+            visit(Value::Number(0.))?;
             if let Some(max) = mark.density_max {
-                values.push(Value::Number(max));
+                visit(Value::Number(max))?;
             }
             continue;
         }
@@ -66,13 +81,9 @@ fn color_values(
             None => value,
         };
         if let Some(grid) = &mark.raster {
-            values.extend(
-                grid.values
-                    .iter()
-                    .filter(|v| !v.is_null())
-                    .cloned()
-                    .map(transformed),
-            );
+            for value in grid.values.iter().filter(|v| !v.is_null()) {
+                visit(transformed(value.clone()))?;
+            }
             continue;
         }
         if matches!(
@@ -86,27 +97,86 @@ fn color_values(
                 for i in 0..32 {
                     let x = x1 + (x2 - x1) * (i as f64 + 0.5) / 32.;
                     let y = y1 + (y2 - y1) * (j as f64 + 0.5) / 32.;
-                    values.push(transformed(f(x, y)));
+                    visit(transformed(f(x, y)))?;
                 }
             }
             continue;
         }
         let channels = &mark.mark.channels;
         for channel in [&channels.fill, &channels.stroke].into_iter().flatten() {
-            values.extend(
-                mark.rows
-                    .iter()
-                    .filter_map(|row| channel.scaled_value(&row.row))
-                    .map(transformed)
-                    .filter(|value| {
-                        value
-                            .as_text()
-                            .is_none_or(|t| crate::css::parse(t).is_none())
-                    }),
-            );
+            for value in mark
+                .rows
+                .iter()
+                .filter_map(|row| channel.scaled_value(&row.row))
+                .map(transformed)
+            {
+                if value
+                    .as_text()
+                    .is_none_or(|t| crate::css::parse(t).is_none())
+                {
+                    visit(value)?;
+                }
+            }
         }
     }
-    values
+    ControlFlow::Continue(())
+}
+
+/// Whether [`PlotColors::new`] over `facets` builds a continuous (not an
+/// ordinal) color scale, without building it: the type [`color_scale`]
+/// infers from the first values that settle it.
+///
+/// A categorical, ordinal, band or point scale is ordinal; a threshold or
+/// quantile one is cut from numbers, so it is not; a quantize scale is built
+/// to see whether its values span anything; every other type is a ramp.
+pub fn color_scale_is_continuous(
+    theme: &PlotTheme,
+    facets: &[Vec<PreparedMark>],
+    options: &ScaleOptions,
+) -> bool {
+    let quantitative = |value: &Value| matches!(value.kind(), PlotKind::Number | PlotKind::Date);
+    let kind = match options.r#type {
+        Some(kind) => kind,
+        None => {
+            // The sample is the explicit domain, else every defined value.
+            let (any, all_quantitative) = match &options.domain {
+                Some(domain) => (!domain.is_empty(), domain.iter().all(quantitative)),
+                None => {
+                    let (mut any, mut all) = (false, true);
+                    let _ = visit_color_values(facets, options.transform.as_ref(), &mut |v| {
+                        if v.is_null() {
+                            return ControlFlow::Continue(());
+                        }
+                        any = true;
+                        all = quantitative(&v);
+                        if all {
+                            ControlFlow::Continue(())
+                        } else {
+                            ControlFlow::Break(())
+                        }
+                    });
+                    (any, all)
+                }
+            };
+            if !any {
+                return false;
+            }
+            let listed = options
+                .domain
+                .as_ref()
+                .map(Vec::len)
+                .or(options.colors.as_ref().map(Vec::len));
+            return all_quantitative && !listed.is_some_and(|n| n != 2);
+        }
+    };
+    match kind {
+        ScaleType::Ordinal | ScaleType::Categorical | ScaleType::Band | ScaleType::Point => false,
+        ScaleType::Quantize => {
+            let values = color_values(facets, options.transform.as_ref());
+            color_scale(theme, &values, options).is_some_and(|scale| !scale.is_ordinal())
+        }
+        _ => true,
+    }
 }
 
 /// Build Plot's color scale from the channels' values and the options.

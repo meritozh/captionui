@@ -23,14 +23,24 @@ pub const CURRENT_COLOR: Hsla = Hsla {
 /// `hsl()`/`hsla()`. `transparent` and `none` are fully transparent.
 pub fn parse(text: &str) -> Option<Hsla> {
     let text = text.trim();
-    let lower = text.to_ascii_lowercase();
-    if lower == "none" || lower == "transparent" {
+    // Every test below but the functions' reads the text case-insensitively
+    // in place, so the common cases (a name, a hex color, a field name that
+    // is neither) neither allocate nor scan the names.
+    if text.eq_ignore_ascii_case("none") || text.eq_ignore_ascii_case("transparent") {
         return Some(Hsla::transparent_black());
     }
-    if let Some(hex) = lower.strip_prefix('#') {
-        let digits: Vec<u32> = hex.chars().map(|c| c.to_digit(16)).collect::<Option<_>>()?;
+    if let Some(hex) = text.strip_prefix('#') {
+        // `to_digit` reads either case. Only 3, 4, 6 or 8 digits make a
+        // color, so a ninth ends the read as surely as a non-digit does.
+        let mut digits = [0_u32; 8];
+        let mut len = 0;
+        for c in hex.chars() {
+            let digit = c.to_digit(16)?;
+            *digits.get_mut(len)? = digit;
+            len += 1;
+        }
         let channel = |a: u32, b: u32| (a * 16 + b) as f32 / 255.;
-        return match digits.len() {
+        return match len {
             3 => Some(rgb_to_hsla(
                 channel(digits[0], digits[0]),
                 channel(digits[1], digits[1]),
@@ -58,7 +68,30 @@ pub fn parse(text: &str) -> Option<Hsla> {
             _ => None,
         };
     }
-    if let Some(args) = function(&lower, &["rgb", "rgba"]) {
+    if text.contains('(') {
+        return parse_function(&text.to_ascii_lowercase());
+    }
+    named(text)
+}
+
+/// The named color `text` is, in any case: a binary search of the sorted,
+/// lowercase [`NAMED`] for the text's ASCII-lowercased bytes.
+fn named(text: &str) -> Option<Hsla> {
+    let mut lower = [0_u8; 24];
+    let lower = lower.get_mut(..text.len())?;
+    for (to, from) in lower.iter_mut().zip(text.bytes()) {
+        *to = from.to_ascii_lowercase();
+    }
+    NAMED
+        .binary_search_by(|(name, _)| name.as_bytes().cmp(lower))
+        .ok()
+        .map(|i| hsla_from_hex(NAMED[i].1))
+}
+
+/// `rgb()`/`rgba()` or `hsl()`/`hsla()`, in lowercase text; or, failing
+/// those, a name (which holds no parenthesis, so none matches).
+fn parse_function(lower: &str) -> Option<Hsla> {
+    if let Some(args) = function(lower, &["rgb", "rgba"]) {
         let value = |text: &str, scale: f32| -> Option<f32> {
             match text.strip_suffix('%') {
                 Some(percent) => percent.trim().parse::<f32>().ok().map(|v| v / 100.),
@@ -71,7 +104,7 @@ pub fn parse(text: &str) -> Option<Hsla> {
         let a = args.get(3).and_then(|a| value(a, 1.)).unwrap_or(1.);
         return Some(rgb_to_hsla(r, g, b, a));
     }
-    if let Some(args) = function(&lower, &["hsl", "hsla"]) {
+    if let Some(args) = function(lower, &["hsl", "hsla"]) {
         let h = args
             .first()?
             .trim()
@@ -375,6 +408,164 @@ pub static NAMED: &[(&str, u32)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `parse` as it was: the text lowercased first, the names scanned.
+    fn parse_lowercasing(text: &str) -> Option<Hsla> {
+        let text = text.trim();
+        let lower = text.to_ascii_lowercase();
+        if lower == "none" || lower == "transparent" {
+            return Some(Hsla::transparent_black());
+        }
+        if let Some(hex) = lower.strip_prefix('#') {
+            let digits: Vec<u32> = hex.chars().map(|c| c.to_digit(16)).collect::<Option<_>>()?;
+            let channel = |a: u32, b: u32| (a * 16 + b) as f32 / 255.;
+            return match digits.len() {
+                3 => Some(rgb_to_hsla(
+                    channel(digits[0], digits[0]),
+                    channel(digits[1], digits[1]),
+                    channel(digits[2], digits[2]),
+                    1.,
+                )),
+                4 => Some(rgb_to_hsla(
+                    channel(digits[0], digits[0]),
+                    channel(digits[1], digits[1]),
+                    channel(digits[2], digits[2]),
+                    channel(digits[3], digits[3]),
+                )),
+                6 => Some(rgb_to_hsla(
+                    channel(digits[0], digits[1]),
+                    channel(digits[2], digits[3]),
+                    channel(digits[4], digits[5]),
+                    1.,
+                )),
+                8 => Some(rgb_to_hsla(
+                    channel(digits[0], digits[1]),
+                    channel(digits[2], digits[3]),
+                    channel(digits[4], digits[5]),
+                    channel(digits[6], digits[7]),
+                )),
+                _ => None,
+            };
+        }
+        if let Some(args) = function(&lower, &["rgb", "rgba"]) {
+            let value = |text: &str, scale: f32| -> Option<f32> {
+                match text.strip_suffix('%') {
+                    Some(percent) => percent.trim().parse::<f32>().ok().map(|v| v / 100.),
+                    None => text.trim().parse::<f32>().ok().map(|v| v / scale),
+                }
+            };
+            let r = value(args.first()?, 255.)?;
+            let g = value(args.get(1)?, 255.)?;
+            let b = value(args.get(2)?, 255.)?;
+            let a = args.get(3).and_then(|a| value(a, 1.)).unwrap_or(1.);
+            return Some(rgb_to_hsla(r, g, b, a));
+        }
+        if let Some(args) = function(&lower, &["hsl", "hsla"]) {
+            let h = args
+                .first()?
+                .trim()
+                .trim_end_matches("deg")
+                .parse::<f32>()
+                .ok()?;
+            let percent = |text: &String| {
+                text.trim()
+                    .trim_end_matches('%')
+                    .parse::<f32>()
+                    .ok()
+                    .map(|v| v / 100.)
+            };
+            let s = percent(args.get(1)?)?;
+            let l = percent(args.get(2)?)?;
+            let a = args
+                .get(3)
+                .and_then(|a| a.trim().parse::<f32>().ok())
+                .unwrap_or(1.);
+            return Some(Hsla {
+                h: (h / 360.).rem_euclid(1.),
+                s,
+                l,
+                a,
+            });
+        }
+        NAMED
+            .iter()
+            .find(|(name, _)| *name == lower)
+            .map(|(_, hex)| hsla_from_hex(*hex))
+    }
+
+    #[test]
+    fn parsing_in_place_matches_parsing_lowercased() {
+        let mut corpus: Vec<String> = [
+            "",
+            " ",
+            "red",
+            "Red",
+            "RED",
+            " red ",
+            "rebeccapurple",
+            "RebeccaPurple",
+            "none",
+            "NONE",
+            "Transparent",
+            "transparent ",
+            "#",
+            "#f",
+            "#ff",
+            "#fff",
+            "#FFF",
+            "#ffff",
+            "#fffff",
+            "#ffffff",
+            "#FfFfFf",
+            "#fffffff",
+            "#ffffffff",
+            "#fffffffff",
+            "#ggg",
+            "#12345678",
+            "#1234567z",
+            "#ÿÿÿ",
+            "rgb(1, 2, 3)",
+            "RGB(1,2,3)",
+            "rgba(1 2 3 / 50%)",
+            "rgb(10%, 20%, 30%)",
+            "rgb(1,2)",
+            "rgb(a,b,c)",
+            "hsl(120, 50%, 50%)",
+            "HSL(120DEG, 50%, 50%)",
+            "hsla(1e2, 5%, 5%, 0.5)",
+            "hsl(x)",
+            "rgb(",
+            "red(",
+            "steelblue",
+            "SteelBlue",
+            "steelbluee",
+            "steelblu",
+            "aliceblue",
+            "yellowgreen",
+            "zzz",
+            "a",
+            "lightgoldenrodyellow",
+            "lightgoldenrodyellowx",
+            "ﬀ",
+            "ÄÖÜ",
+            "é",
+            "sex",
+            "species",
+            "Anomaly",
+            "density",
+            "currentColor",
+            "grey",
+            "gray",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        corpus.extend(NAMED.iter().map(|(name, _)| name.to_ascii_uppercase()));
+        corpus.extend(NAMED.iter().map(|(name, _)| format!("{name} ")));
+        for text in &corpus {
+            assert_eq!(parse(text), parse_lowercasing(text), "{text:?}");
+        }
+    }
 
     #[test]
     fn css_colors_parse() {

@@ -131,6 +131,17 @@ pub fn pre_projected(
     projection: &gpui_plot::GeoProjection,
     lonlat: impl Fn(&gpui_plot::Table) -> Option<[f64; 2]>,
 ) -> (gpui_plot::Dataset, gpui_plot::Plot) {
+    let (rows, frame) = pre_projected_rows(data, projection, lonlat);
+    (rows, pre_projected_plot(frame))
+}
+
+/// [`pre_projected`]'s records, with the projection's frame the plot pins
+/// its scales to.
+pub fn pre_projected_rows(
+    data: gpui_plot::Dataset,
+    projection: &gpui_plot::GeoProjection,
+    lonlat: impl Fn(&gpui_plot::Table) -> Option<[f64; 2]>,
+) -> (gpui_plot::Dataset, [[f64; 2]; 2]) {
     let fitted = projection.fit(1000., 1000.);
     let [[x0, y0], [x1, y1]] = projection
         .domain
@@ -146,14 +157,19 @@ pub fn pre_projected(
                 .with("y", gpui_plot::Value::Number(y)),
         )
     });
-    let plot = gpui_plot::Plot::plot()
+    (gpui_plot::Dataset::new(rows), [[x0, y0], [x1, y1]])
+}
+
+/// [`pre_projected`]'s plot: linear x and y pinned to the projection's
+/// frame, a pixel a unit both ways.
+pub fn pre_projected_plot([[x0, y0], [x1, y1]]: [[f64; 2]; 2]) -> gpui_plot::Plot {
+    gpui_plot::Plot::plot()
         .no_axes()
         .margin(0.)
         .aspect_ratio(1.)
         .x(move |x| x.domain([x0, x1]).nice(false).zero(false))
         // Projected y grows downward.
-        .y(move |y| y.domain([y0, y1]).reverse(true).nice(false).zero(false));
-    (gpui_plot::Dataset::new(rows), plot)
+        .y(move |y| y.domain([y0, y1]).reverse(true).nice(false).zero(false))
 }
 
 /// A geometry's lines through the same fitted projection as

@@ -421,12 +421,19 @@ pub fn centroid(geometry: &Geometry) -> Option<[f64; 2]> {
         l: &mut [f64; 4],
         a: &mut [f64; 4],
     ) {
+        // Each vertex's unit vector is computed once and carried to the
+        // next segment, which starts where this one ends.
         let line = |ps: &[[f64; 2]], l: &mut [f64; 4]| {
-            for w in ps.windows(2) {
-                let (u, v) = (cart(w[0]), cart(w[1]));
+            let Some((first, rest)) = ps.split_first() else {
+                return;
+            };
+            let mut u = cart(*first);
+            for p in rest {
+                let v = cart(*p);
                 let dot = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]).clamp(-1., 1.);
                 let length = dot.acos();
                 add(l, [u[0] + v[0], u[1] + v[1], u[2] + v[2]], length / 2.);
+                u = v;
             }
         };
         // A ring's area-weighted centroid vector, by fanning triangles from
@@ -438,8 +445,9 @@ pub fn centroid(geometry: &Geometry) -> Option<[f64; 2]> {
                 return acc;
             }
             let o = cart(ps[0]);
-            for w in ps[1..].windows(2) {
-                let (u, v) = (cart(w[0]), cart(w[1]));
+            let mut u = cart(ps[1]);
+            for p in &ps[2..] {
+                let v = cart(*p);
                 let e1 = [u[0] - o[0], u[1] - o[1], u[2] - o[2]];
                 let e2 = [v[0] - o[0], v[1] - o[1], v[2] - o[2]];
                 let n = [
@@ -454,6 +462,7 @@ pub fn centroid(geometry: &Geometry) -> Option<[f64; 2]> {
                 ];
                 let area = (n[0] * c[0] + n[1] * c[1] + n[2] * c[2]) / 2.;
                 add(&mut acc, c, area);
+                u = v;
             }
             acc
         };
@@ -1297,6 +1306,147 @@ mod tests {
             "Kansas near the middle: {x},{y}"
         );
         assert!(usa.project(-150., 61.).is_some(), "Alaska is inset");
+    }
+
+    /// [`centroid`] as it was before each vertex's unit vector was carried
+    /// to the next segment: every segment converts both its ends.
+    fn centroid_converting_twice(geometry: &Geometry) -> Option<[f64; 2]> {
+        let mut points = [0.; 4];
+        let mut lines = [0.; 4];
+        let mut areas = [0.; 4];
+        let cart = |p: [f64; 2]| {
+            let (l, f) = (p[0] * RADIANS, p[1] * RADIANS);
+            [f.cos() * l.cos(), f.cos() * l.sin(), f.sin()]
+        };
+        fn add(acc: &mut [f64; 4], v: [f64; 3], w: f64) {
+            acc[0] += v[0] * w;
+            acc[1] += v[1] * w;
+            acc[2] += v[2] * w;
+            acc[3] += w;
+        }
+        fn visit(
+            g: &Geometry,
+            cart: &dyn Fn([f64; 2]) -> [f64; 3],
+            p: &mut [f64; 4],
+            l: &mut [f64; 4],
+            a: &mut [f64; 4],
+        ) {
+            let line = |ps: &[[f64; 2]], l: &mut [f64; 4]| {
+                for w in ps.windows(2) {
+                    let (u, v) = (cart(w[0]), cart(w[1]));
+                    let dot = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]).clamp(-1., 1.);
+                    add(l, [u[0] + v[0], u[1] + v[1], u[2] + v[2]], dot.acos() / 2.);
+                }
+            };
+            let ring = |ps: &[[f64; 2]]| -> [f64; 4] {
+                let mut acc = [0.; 4];
+                if ps.len() < 3 {
+                    return acc;
+                }
+                let o = cart(ps[0]);
+                for w in ps[1..].windows(2) {
+                    let (u, v) = (cart(w[0]), cart(w[1]));
+                    let e1 = [u[0] - o[0], u[1] - o[1], u[2] - o[2]];
+                    let e2 = [v[0] - o[0], v[1] - o[1], v[2] - o[2]];
+                    let n = [
+                        e1[1] * e2[2] - e1[2] * e2[1],
+                        e1[2] * e2[0] - e1[0] * e2[2],
+                        e1[0] * e2[1] - e1[1] * e2[0],
+                    ];
+                    let c = [
+                        (o[0] + u[0] + v[0]) / 3.,
+                        (o[1] + u[1] + v[1]) / 3.,
+                        (o[2] + u[2] + v[2]) / 3.,
+                    ];
+                    add(&mut acc, c, (n[0] * c[0] + n[1] * c[1] + n[2] * c[2]) / 2.);
+                }
+                acc
+            };
+            let polygon = |rings: &[Vec<[f64; 2]>], a: &mut [f64; 4]| {
+                for (i, r) in rings.iter().enumerate() {
+                    let part = ring(r);
+                    let sign = if part[3] < 0. { -1. } else { 1. };
+                    let k = if i == 0 { sign } else { -sign };
+                    for j in 0..4 {
+                        a[j] += part[j] * k;
+                    }
+                }
+            };
+            match g {
+                Geometry::Point(pt) => add(p, cart(*pt), 1.),
+                Geometry::MultiPoint(ps) => ps.iter().for_each(|pt| add(p, cart(*pt), 1.)),
+                Geometry::LineString(ps) => line(ps, l),
+                Geometry::MultiLineString(ls) => ls.iter().for_each(|ps| line(ps, l)),
+                Geometry::Polygon(rings) => polygon(rings, a),
+                Geometry::MultiPolygon(polys) => polys.iter().for_each(|rings| polygon(rings, a)),
+                Geometry::Collection(gs) => gs.iter().for_each(|g| visit(g, cart, p, l, a)),
+                Geometry::Sphere => {}
+            }
+        }
+        visit(geometry, &cart, &mut points, &mut lines, &mut areas);
+        let pick = if areas[3].abs() > 1e-12 {
+            areas
+        } else if lines[3] > 1e-12 {
+            lines
+        } else {
+            points
+        };
+        let m = (pick[0] * pick[0] + pick[1] * pick[1] + pick[2] * pick[2]).sqrt();
+        if m < 1e-12 {
+            return None;
+        }
+        Some([
+            pick[1].atan2(pick[0]) * DEGREES,
+            (pick[2] / m).clamp(-1., 1.).asin() * DEGREES,
+        ])
+    }
+
+    #[test]
+    fn carried_unit_vectors_keep_centroids_bit_for_bit() {
+        let mut seed = 5_u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut path = |n: usize| -> Vec<[f64; 2]> {
+            let (lon, lat) = (next() * 360. - 180., next() * 160. - 80.);
+            (0..n)
+                .map(|_| [lon + next() * 8. - 4., lat + next() * 8. - 4.])
+                .collect()
+        };
+        let mut shapes = Vec::new();
+        for n in [0, 1, 2, 3, 4, 7, 40] {
+            shapes.push(Geometry::LineString(path(n)));
+            shapes.push(Geometry::MultiLineString(vec![path(n), path(n + 1)]));
+            shapes.push(Geometry::Polygon(vec![path(n), path(n / 2 + 1)]));
+            shapes.push(Geometry::MultiPolygon(vec![
+                vec![path(n + 3)],
+                vec![path(n), path(3)],
+            ]));
+            shapes.push(Geometry::MultiPoint(path(n)));
+            shapes.push(Geometry::Collection(vec![
+                Geometry::Polygon(vec![path(n + 3)]),
+                Geometry::LineString(path(n)),
+                Geometry::Point(path(1)[0]),
+            ]));
+        }
+        shapes.push(Geometry::Polygon(vec![vec![
+            [0., 0.],
+            [f64::NAN, 1.],
+            [1., 1.],
+            [0., 0.],
+        ]]));
+        shapes.push(Geometry::Sphere);
+        let bits = |c: Option<[f64; 2]>| c.map(|[x, y]| [x.to_bits(), y.to_bits()]);
+        for shape in &shapes {
+            assert_eq!(
+                bits(centroid(shape)),
+                bits(centroid_converting_twice(shape)),
+                "{shape:?}"
+            );
+        }
     }
 
     #[test]

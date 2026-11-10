@@ -32,18 +32,13 @@ pub struct Triangulation {
 impl Triangulation {
     /// Triangulate `input`, dropping coincident points.
     pub fn new(input: &[Point2]) -> Self {
-        let mut points: Vec<Point2> = Vec::new();
-        let mut indices = Vec::with_capacity(input.len());
-        for point in input {
-            let found = points.iter().position(|existing| *existing == *point);
-            indices.push(match found {
-                Some(index) => index,
-                None => {
-                    points.push(*point);
-                    points.len() - 1
-                }
-            });
-        }
+        Self::triangulate(input, usize::MAX)
+    }
+
+    /// [`Triangulation::new`], leaving the edge map for the rebuild after
+    /// `mesh_points` points at the latest (a test covers the hand-over).
+    fn triangulate(input: &[Point2], mesh_points: usize) -> Self {
+        let (points, indices) = distinct(input);
         let n = points.len();
         if n < 3 {
             return Self {
@@ -68,52 +63,19 @@ impl Triangulation {
         let base = all.len();
         all.extend(super_triangle);
 
-        let mut triangles: Vec<[usize; 3]> = vec![[base, base + 1, base + 2]];
-        for point in 0..n {
-            // Which triangles' circumcircles swallow the new point.
-            let bad: Vec<bool> = triangles
-                .iter()
-                .map(|triangle| {
-                    circumcircle(&all, triangle).is_some_and(|circle| contains(circle, all[point]))
-                })
-                .collect();
-            if !bad.iter().any(|bad| *bad) {
-                continue;
-            }
-            let halfedges = halfedges(&triangles);
-            // The hole's boundary: an edge of a deleted triangle whose other
-            // side survives. It keeps the deleted triangle's direction, so the
-            // new triangles built on it come out counter-clockwise.
-            let mut boundary: Vec<(usize, usize)> = Vec::new();
-            for (index, triangle) in triangles.iter().enumerate() {
-                if !bad[index] {
-                    continue;
-                }
-                for k in 0..3 {
-                    let opposite = halfedges[3 * index + k];
-                    let survives = opposite >= 0 && !bad[opposite as usize / 3];
-                    if opposite < 0 || survives {
-                        boundary.push((triangle[k], triangle[(k + 1) % 3]));
-                    }
-                }
-            }
-            triangles = triangles
-                .into_iter()
-                .enumerate()
-                .filter(|(index, _)| !bad[*index])
-                .map(|(_, triangle)| triangle)
-                .collect();
-            for (a, b) in boundary {
-                // A collinear boundary edge adds no area, so it draws nothing;
-                // otherwise the triangle joins the hole in whichever direction
-                // keeps it counter-clockwise.
-                let area = signed_area(&all[a], &all[b], &all[point]);
-                if area > 0. {
-                    triangles.push([a, b, point]);
-                } else if area < 0. {
-                    triangles.push([b, a, point]);
-                }
-            }
+        let mut mesh = Mesh::new(&all, [base, base + 1, base + 2]);
+        let mut point = 0;
+        // While no two triangles share a directed edge (as in any proper
+        // triangulation), the mesh's edge map answers what the full
+        // half-edge rebuild would; past the first that do, rebuild.
+        while point < n.min(mesh_points) && mesh.unique {
+            mesh.insert(&all, point);
+            point += 1;
+        }
+        let mut triangles: Vec<[usize; 3]> =
+            mesh.alive.iter().map(|&id| mesh.triangles[id]).collect();
+        for point in point..n {
+            insert_rebuilding(&all, &mut triangles, point);
         }
 
         // Drop the super-triangle: every triangle that reaches one of its
@@ -147,6 +109,185 @@ impl Triangulation {
             }
         }
         edges
+    }
+}
+
+/// The distinct points of `input` in the order they first appear, and which
+/// of them each input point is: the first equal to it, as `==` compares
+/// (so `-0` and `0` are one, and a NaN coordinate is never equal).
+fn distinct(input: &[Point2]) -> (Vec<Point2>, Vec<usize>) {
+    let mut points: Vec<Point2> = Vec::new();
+    let mut indices = Vec::with_capacity(input.len());
+    let mut seen: rustc_hash::FxHashMap<[u64; 2], usize> = Default::default();
+    // Equal non-NaN floats have equal bits, but for the two zeros.
+    let bits = |v: f64| if v == 0. { 0 } else { v.to_bits() };
+    for point in input {
+        let key =
+            (!point[0].is_nan() && !point[1].is_nan()).then(|| [bits(point[0]), bits(point[1])]);
+        if let Some(&index) = key.as_ref().and_then(|key| seen.get(key)) {
+            indices.push(index);
+            continue;
+        }
+        if let Some(key) = key {
+            seen.insert(key, points.len());
+        }
+        indices.push(points.len());
+        points.push(*point);
+    }
+    (points, indices)
+}
+
+/// A Bowyer–Watson triangulation in progress.
+///
+/// Each triangle keeps an id for life, ids in creation order, and `alive`
+/// lists the live ones in that order, which is the order the triangle list
+/// would hold them in. Each keeps its circumcircle, worked out once, and
+/// the directed edges map to the live triangle holding them.
+struct Mesh {
+    triangles: Vec<[usize; 3]>,
+    circles: Vec<Option<(f64, f64, f64)>>,
+    bad: Vec<bool>,
+    alive: Vec<usize>,
+    edges: rustc_hash::FxHashMap<(usize, usize), usize>,
+    /// Whether every directed edge belongs to one live triangle, so the
+    /// edge map holds each one's only triangle.
+    unique: bool,
+    swallowed: Vec<usize>,
+    boundary: Vec<(usize, usize)>,
+}
+
+impl Mesh {
+    fn new(all: &[Point2], first: [usize; 3]) -> Self {
+        let mut mesh = Mesh {
+            triangles: Vec::new(),
+            circles: Vec::new(),
+            bad: Vec::new(),
+            alive: Vec::new(),
+            edges: Default::default(),
+            unique: true,
+            swallowed: Vec::new(),
+            boundary: Vec::new(),
+        };
+        mesh.add(all, first);
+        mesh
+    }
+
+    fn add(&mut self, all: &[Point2], triangle: [usize; 3]) {
+        let id = self.triangles.len();
+        self.triangles.push(triangle);
+        self.circles.push(circumcircle(all, &triangle));
+        self.bad.push(false);
+        self.alive.push(id);
+        for k in 0..3 {
+            if self
+                .edges
+                .insert((triangle[k], triangle[(k + 1) % 3]), id)
+                .is_some()
+            {
+                self.unique = false;
+            }
+        }
+    }
+
+    /// Insert `all[point]` as [`insert_rebuilding`] does.
+    fn insert(&mut self, all: &[Point2], point: usize) {
+        let p = all[point];
+        self.swallowed.clear();
+        for &id in &self.alive {
+            if self.circles[id].is_some_and(|circle| contains(circle, p)) {
+                self.swallowed.push(id);
+            }
+        }
+        if self.swallowed.is_empty() {
+            return;
+        }
+        for &id in &self.swallowed {
+            self.bad[id] = true;
+        }
+        // The hole's boundary, as `insert_rebuilding` finds it: the reverse
+        // edge's triangle is the one its half-edge map would give.
+        self.boundary.clear();
+        for &id in &self.swallowed {
+            let triangle = self.triangles[id];
+            for k in 0..3 {
+                let (a, b) = (triangle[k], triangle[(k + 1) % 3]);
+                if self
+                    .edges
+                    .get(&(b, a))
+                    .is_none_or(|&other| !self.bad[other])
+                {
+                    self.boundary.push((a, b));
+                }
+            }
+        }
+        for &id in &self.swallowed {
+            let triangle = self.triangles[id];
+            for k in 0..3 {
+                self.edges.remove(&(triangle[k], triangle[(k + 1) % 3]));
+            }
+        }
+        let bad = &self.bad;
+        self.alive.retain(|id| !bad[*id]);
+        let boundary = std::mem::take(&mut self.boundary);
+        for &(a, b) in &boundary {
+            let area = signed_area(&all[a], &all[b], &all[point]);
+            if area > 0. {
+                self.add(all, [a, b, point]);
+            } else if area < 0. {
+                self.add(all, [b, a, point]);
+            }
+        }
+        self.boundary = boundary;
+    }
+}
+
+/// Insert `all[point]` into `triangles`: delete the triangles whose
+/// circumcircle it falls inside, then join it to the hole left behind.
+/// Every insertion rebuilds the half-edges, which stays right when two
+/// triangles share a directed edge.
+fn insert_rebuilding(all: &[Point2], triangles: &mut Vec<[usize; 3]>, point: usize) {
+    // Which triangles' circumcircles swallow the new point.
+    let bad: Vec<bool> = triangles
+        .iter()
+        .map(|triangle| {
+            circumcircle(all, triangle).is_some_and(|circle| contains(circle, all[point]))
+        })
+        .collect();
+    if !bad.iter().any(|bad| *bad) {
+        return;
+    }
+    let halfedges = halfedges(triangles);
+    // The hole's boundary: an edge of a deleted triangle whose other side
+    // survives. It keeps the deleted triangle's direction, so the new
+    // triangles built on it come out counter-clockwise.
+    let mut boundary: Vec<(usize, usize)> = Vec::new();
+    for (index, triangle) in triangles.iter().enumerate() {
+        if !bad[index] {
+            continue;
+        }
+        for k in 0..3 {
+            let opposite = halfedges[3 * index + k];
+            let survives = opposite >= 0 && !bad[opposite as usize / 3];
+            if opposite < 0 || survives {
+                boundary.push((triangle[k], triangle[(k + 1) % 3]));
+            }
+        }
+    }
+    let mut index = 0;
+    triangles.retain(|_| {
+        index += 1;
+        !bad[index - 1]
+    });
+    for (a, b) in boundary {
+        // A collinear boundary edge adds no area, so it draws nothing;
+        // otherwise the triangle joins the hole in whichever direction keeps
+        // it counter-clockwise.
+        let area = signed_area(&all[a], &all[b], &all[point]);
+        if area > 0. {
+            triangles.push([a, b, point]);
+        } else if area < 0. {
+            triangles.push([b, a, point]);
+        }
     }
 }
 
@@ -207,28 +348,67 @@ pub fn voronoi_cells(points: &[Point2], bounds: [f64; 4]) -> Vec<Vec<Point2>> {
         .enumerate()
         .map(|(site, point)| {
             let mut cell = rect.clone();
+            let mut beyond = beyond_reach(&cell, *point);
             for (other, other_point) in points.iter().enumerate() {
                 if other == site || *other_point == *point {
                     continue;
                 }
                 // Keep the side of the bisector nearer `point`.
                 let normal = [other_point[0] - point[0], other_point[1] - point[1]];
+                // A point this far away puts its bisector well past every
+                // vertex of the cell: the clip would keep the cell as it is.
+                let d2 = normal[0] * normal[0] + normal[1] * normal[1];
+                if d2.is_finite() && d2 > beyond {
+                    continue;
+                }
                 let midpoint = [
                     (other_point[0] + point[0]) / 2.,
                     (other_point[1] + point[1]) / 2.,
                 ];
-                cell = clip(
-                    &cell,
-                    normal,
-                    midpoint[0] * normal[0] + midpoint[1] * normal[1],
-                );
+                let offset = midpoint[0] * normal[0] + midpoint[1] * normal[1];
+                // Every vertex already inside (as `clip` tests it): the clip
+                // would return the same polygon.
+                if cell
+                    .iter()
+                    .all(|v| v[0] * normal[0] + v[1] * normal[1] - offset <= 0.)
+                {
+                    continue;
+                }
+                cell = clip(&cell, normal, offset);
                 if cell.is_empty() {
                     break;
                 }
+                beyond = beyond_reach(&cell, *point);
             }
             cell
         })
         .collect()
+}
+
+/// The squared distance past which another point cannot clip `cell`, the
+/// Voronoi cell of `site` so far.
+///
+/// The bisector of `site` and a point `d` away sits `d / 2` from `site`, and
+/// every vertex is within `reach` of it, so for `d > 2 reach` every vertex
+/// lies strictly inside the half-plane, by `d (d / 2 - reach)`. The slack
+/// keeps that margin far above the rounding `clip`'s test makes (relative to
+/// the coordinates' size), so each vertex tests inside there too and the
+/// clip would change nothing. A non-finite vertex or site never skips.
+fn beyond_reach(cell: &[Point2], site: Point2) -> f64 {
+    let mut finite = site[0].is_finite() && site[1].is_finite();
+    let mut scale = site[0].abs().max(site[1].abs());
+    let mut reach2: f64 = 0.;
+    for v in cell {
+        finite &= v[0].is_finite() && v[1].is_finite();
+        scale = scale.max(v[0].abs()).max(v[1].abs());
+        let (dx, dy) = (v[0] - site[0], v[1] - site[1]);
+        reach2 = reach2.max(dx * dx + dy * dy);
+    }
+    if !finite {
+        return f64::INFINITY;
+    }
+    let far = 2. * reach2.sqrt() * (1. + 1e-9) + 1e-6 + 1e-9 * scale;
+    far * far
 }
 
 /// The edges of every Voronoi cell once, as pairs of endpoints.
@@ -350,8 +530,8 @@ fn signed_area(a: &Point2, b: &Point2, c: &Point2) -> f64 {
 
 /// The half-edge opposite each half-edge of `triangles`, or `-1` on the hull.
 fn halfedges(triangles: &[[usize; 3]]) -> Vec<i32> {
-    let mut map: std::collections::HashMap<(usize, usize), usize> =
-        std::collections::HashMap::with_capacity(triangles.len() * 3);
+    let mut map: rustc_hash::FxHashMap<(usize, usize), usize> = Default::default();
+    map.reserve(triangles.len() * 3);
     let mut result = vec![-1; triangles.len() * 3];
     for (index, triangle) in triangles.iter().enumerate() {
         for k in 0..3 {
@@ -480,6 +660,329 @@ mod tests {
         assert!(cells[0].iter().all(|point| point[0] <= 245. + 1e-9));
         assert!(cells[1].iter().all(|point| point[0] >= 245. - 1e-9));
         assert!(!cells[0].is_empty() && !cells[1].is_empty());
+    }
+
+    /// `Triangulation::new` as it was before the edge map: a linear search
+    /// for coincident points, every circumcircle recomputed and the
+    /// half-edges rebuilt (by a std map) on every insertion.
+    fn triangulate_rebuilding(input: &[Point2]) -> Triangulation {
+        let halfedges_std = |triangles: &[[usize; 3]]| -> Vec<i32> {
+            let mut map: std::collections::HashMap<(usize, usize), usize> =
+                std::collections::HashMap::with_capacity(triangles.len() * 3);
+            let mut result = vec![-1; triangles.len() * 3];
+            for (index, triangle) in triangles.iter().enumerate() {
+                for k in 0..3 {
+                    map.insert((triangle[k], triangle[(k + 1) % 3]), 3 * index + k);
+                }
+            }
+            for (index, triangle) in triangles.iter().enumerate() {
+                for k in 0..3 {
+                    if let Some(&opposite) = map.get(&(triangle[(k + 1) % 3], triangle[k])) {
+                        result[3 * index + k] = opposite as i32;
+                    }
+                }
+            }
+            result
+        };
+        let mut points: Vec<Point2> = Vec::new();
+        let mut indices = Vec::with_capacity(input.len());
+        for point in input {
+            let found = points.iter().position(|existing| *existing == *point);
+            indices.push(match found {
+                Some(index) => index,
+                None => {
+                    points.push(*point);
+                    points.len() - 1
+                }
+            });
+        }
+        let n = points.len();
+        if n < 3 {
+            return Triangulation {
+                points,
+                indices,
+                ..Triangulation::default()
+            };
+        }
+        let mut all = points.clone();
+        let (min_x, max_x, min_y, max_y) = bounds(&points);
+        let size = (max_x - min_x).max(max_y - min_y).max(1.);
+        let (mid_x, mid_y) = ((min_x + max_x) / 2., (min_y + max_y) / 2.);
+        let base = all.len();
+        all.extend([
+            [mid_x - 20. * size, mid_y - size],
+            [mid_x + 20. * size, mid_y - size],
+            [mid_x, mid_y + 20. * size],
+        ]);
+        let mut triangles: Vec<[usize; 3]> = vec![[base, base + 1, base + 2]];
+        for point in 0..n {
+            let bad: Vec<bool> = triangles
+                .iter()
+                .map(|t| circumcircle(&all, t).is_some_and(|c| contains(c, all[point])))
+                .collect();
+            if !bad.iter().any(|bad| *bad) {
+                continue;
+            }
+            let halfedges = halfedges_std(&triangles);
+            let mut boundary: Vec<(usize, usize)> = Vec::new();
+            for (index, triangle) in triangles.iter().enumerate() {
+                if !bad[index] {
+                    continue;
+                }
+                for k in 0..3 {
+                    let opposite = halfedges[3 * index + k];
+                    let survives = opposite >= 0 && !bad[opposite as usize / 3];
+                    if opposite < 0 || survives {
+                        boundary.push((triangle[k], triangle[(k + 1) % 3]));
+                    }
+                }
+            }
+            triangles = triangles
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| !bad[*index])
+                .map(|(_, triangle)| triangle)
+                .collect();
+            for (a, b) in boundary {
+                let area = signed_area(&all[a], &all[b], &all[point]);
+                if area > 0. {
+                    triangles.push([a, b, point]);
+                } else if area < 0. {
+                    triangles.push([b, a, point]);
+                }
+            }
+        }
+        triangles.retain(|triangle| triangle.iter().all(|index| *index < n));
+        let halfedges = halfedges_std(&triangles);
+        Triangulation {
+            points,
+            indices,
+            triangles,
+            halfedges,
+        }
+    }
+
+    /// Point sets from a seeded generator: scattered, grid-snapped (many
+    /// duplicates, collinear runs and cocircular quads), f32 pixels, and
+    /// awkward values.
+    fn awkward_point_sets() -> Vec<Vec<Point2>> {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut sets: Vec<Vec<Point2>> = Vec::new();
+        for n in [3, 5, 50, 300, 1500] {
+            sets.push((0..n).map(|_| [next() * 640., next() * 400.]).collect());
+            sets.push(
+                (0..n)
+                    .map(|_| [(next() * 12.).floor() * 10., (next() * 8.).floor() * 10.])
+                    .collect(),
+            );
+            sets.push(
+                (0..n)
+                    .map(|_| [(next() * 640.) as f32 as f64, (next() * 400.) as f32 as f64])
+                    .collect(),
+            );
+        }
+        // A full lattice: every quad cocircular.
+        sets.push(
+            (0..400)
+                .map(|i| [(i % 20) as f64 * 7., (i / 20) as f64 * 7.])
+                .collect(),
+        );
+        // Collinear, and nearly so.
+        sets.push((0..50).map(|i| [i as f64, 2. * i as f64]).collect());
+        sets.push(
+            (0..50)
+                .map(|i| [i as f64, 1e-12 * (i % 3) as f64])
+                .collect(),
+        );
+        let mut odd: Vec<Point2> = (0..80).map(|_| [next() * 10., next() * 10.]).collect();
+        odd.extend([
+            [0., 0.],
+            [-0., 0.],
+            [0., -0.],
+            [f64::NAN, 1.],
+            [f64::NAN, 1.],
+            [2., f64::NAN],
+            [f64::INFINITY, 3.],
+            [5., 5.],
+            [5., 5.],
+        ]);
+        sets.push(odd);
+        sets
+    }
+
+    type TriangulationBits = (Vec<[u64; 2]>, Vec<usize>, Vec<[usize; 3]>, Vec<i32>);
+
+    fn triangulation_bits(t: &Triangulation) -> TriangulationBits {
+        (
+            t.points
+                .iter()
+                .map(|p| [p[0].to_bits(), p[1].to_bits()])
+                .collect::<Vec<_>>(),
+            t.indices.clone(),
+            t.triangles.clone(),
+            t.halfedges.clone(),
+        )
+    }
+
+    #[test]
+    fn the_edge_map_triangulates_as_the_rebuild_did() {
+        let mut fell_back = 0;
+        for points in awkward_point_sets() {
+            let fast = Triangulation::new(&points);
+            let slow = triangulate_rebuilding(&points);
+            assert_eq!(
+                triangulation_bits(&fast),
+                triangulation_bits(&slow),
+                "{} points",
+                points.len()
+            );
+            // Which sets leave the edge map for the rebuild.
+            let (distinct, _) = distinct(&points);
+            if distinct.len() >= 3 {
+                let mut all = distinct.clone();
+                let (min_x, max_x, min_y, max_y) = bounds(&distinct);
+                let size = (max_x - min_x).max(max_y - min_y).max(1.);
+                let (mid_x, mid_y) = ((min_x + max_x) / 2., (min_y + max_y) / 2.);
+                let base = all.len();
+                all.extend([
+                    [mid_x - 20. * size, mid_y - size],
+                    [mid_x + 20. * size, mid_y - size],
+                    [mid_x, mid_y + 20. * size],
+                ]);
+                let mut mesh = Mesh::new(&all, [base, base + 1, base + 2]);
+                for point in 0..distinct.len() {
+                    mesh.insert(&all, point);
+                }
+                fell_back += usize::from(!mesh.unique);
+            }
+        }
+        // None of these sets has two triangles share a directed edge, so
+        // the hand-over is pinned below by forcing it.
+        assert_eq!(fell_back, 0);
+    }
+
+    #[test]
+    fn the_rebuild_takes_over_from_the_edge_map_at_any_point() {
+        for points in awkward_point_sets().iter().filter(|p| p.len() <= 400) {
+            let slow = triangulation_bits(&triangulate_rebuilding(points));
+            for at in [
+                0,
+                1,
+                2,
+                3,
+                7,
+                points.len() / 2,
+                points.len().saturating_sub(1),
+            ] {
+                let handed = Triangulation::triangulate(points, at);
+                assert_eq!(
+                    triangulation_bits(&handed),
+                    slow,
+                    "{} points, at {at}",
+                    points.len()
+                );
+            }
+        }
+    }
+
+    /// `voronoi_cells` as it was before it skipped the clips that change
+    /// nothing: every other point clips the cell.
+    fn voronoi_cells_clipping_all(points: &[Point2], bounds: [f64; 4]) -> Vec<Vec<Point2>> {
+        let [x0, y0, x1, y1] = bounds;
+        let rect = vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        points
+            .iter()
+            .enumerate()
+            .map(|(site, point)| {
+                let mut cell = rect.clone();
+                for (other, other_point) in points.iter().enumerate() {
+                    if other == site || *other_point == *point {
+                        continue;
+                    }
+                    let normal = [other_point[0] - point[0], other_point[1] - point[1]];
+                    let midpoint = [
+                        (other_point[0] + point[0]) / 2.,
+                        (other_point[1] + point[1]) / 2.,
+                    ];
+                    cell = clip(
+                        &cell,
+                        normal,
+                        midpoint[0] * normal[0] + midpoint[1] * normal[1],
+                    );
+                    if cell.is_empty() {
+                        break;
+                    }
+                }
+                cell
+            })
+            .collect()
+    }
+
+    fn bits(cells: &[Vec<Point2>]) -> Vec<Vec<[u64; 2]>> {
+        cells
+            .iter()
+            .map(|cell| {
+                cell.iter()
+                    .map(|p| [p[0].to_bits(), p[1].to_bits()])
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn skipping_far_points_keeps_every_cell_bit_for_bit() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let bounds = [0., 0., 640., 400.];
+        let mut sets: Vec<Vec<Point2>> = Vec::new();
+        for n in [50, 300, 2000] {
+            // Scattered, and some beyond the bounds.
+            sets.push(
+                (0..n)
+                    .map(|_| [next() * 800. - 80., next() * 500. - 50.])
+                    .collect(),
+            );
+            // Snapped to a coarse grid: duplicates and collinear runs.
+            sets.push(
+                (0..n)
+                    .map(|_| [(next() * 16.).floor() * 40., (next() * 10.).floor() * 40.])
+                    .collect(),
+            );
+        }
+        // f32 pixels, as `render::delaunay` projects them.
+        sets.push(
+            (0..500)
+                .map(|_| [(next() * 640.) as f32 as f64, (next() * 400.) as f32 as f64])
+                .collect(),
+        );
+        // A cluster far from the bounds, a lone far point and non-finite ones.
+        let mut odd: Vec<Point2> = (0..200).map(|_| [1e6 + next(), 1e6 + next()]).collect();
+        odd.extend((0..200).map(|_| [next() * 640., next() * 400.]));
+        odd.extend([
+            [f64::NAN, 10.],
+            [f64::INFINITY, 20.],
+            [30., f64::NEG_INFINITY],
+            [-0., 0.],
+            [0., -0.],
+            [3e38, -3e38],
+        ]);
+        sets.push(odd);
+        for points in &sets {
+            let fast = voronoi_cells(points, bounds);
+            let slow = voronoi_cells_clipping_all(points, bounds);
+            assert_eq!(bits(&fast), bits(&slow), "{} points", points.len());
+        }
     }
 
     #[test]

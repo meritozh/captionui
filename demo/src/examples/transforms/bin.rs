@@ -158,7 +158,15 @@ fn e11() -> Plot {
 
 /// The sports ordered by their athletes' median weight, the docs'
 /// `d3.groupSort(…, (g) => d3.median(g, (d) => d.weight), (d) => d.sport)`.
+/// Worked out once per thread, like the dataset it reads.
 fn sports_by_median_weight() -> Vec<Value> {
+    thread_local! {
+        static SPORTS: std::cell::OnceCell<Vec<Value>> = const { std::cell::OnceCell::new() };
+    }
+    SPORTS.with(|sports| sports.get_or_init(group_sports_by_median_weight).clone())
+}
+
+fn group_sports_by_median_weight() -> Vec<Value> {
     let mut groups: Vec<(Value, Vec<f64>)> = Vec::new();
     for row in data::olympians().rows() {
         let Some(weight) = row.number("weight") else {

@@ -41,6 +41,9 @@ pub struct Table {
 /// record lacked; the rest is where it would have sat.
 const ABSENT_HINT: usize = 1 << (usize::BITS - 1);
 
+/// Up to how many fields [`Table::get`] scans rather than searches.
+const LINEAR_GET_FIELDS: usize = 16;
+
 impl Table {
     /// A table from name/value pairs. Later pairs with the same name replace
     /// earlier ones, matching an object literal's behaviour.
@@ -99,7 +102,22 @@ impl Table {
 
     /// Read a field by name.
     pub fn get(&self, name: &str) -> Option<&Value> {
-        self.position(name).ok().map(|i| &self.fields[i].1)
+        let fields = &**self.fields;
+        // A record of a few fields is faster to scan than to search: most
+        // names differ from the one sought in length or first byte, which
+        // rules them out without comparing the rest. Names are unique, so
+        // the scan finds the field the search would.
+        if fields.len() <= LINEAR_GET_FIELDS {
+            let name = name.as_bytes();
+            return fields
+                .iter()
+                .find(|(key, _)| {
+                    let key = key.as_bytes();
+                    key.len() == name.len() && key.first() == name.first() && key == name
+                })
+                .map(|(_, value)| value);
+        }
+        self.position(name).ok().map(|i| &fields[i].1)
     }
 
     /// [`Table::get`], trying `hint` first: the field's position in the last
@@ -544,6 +562,31 @@ mod tests {
         );
         let accessor = Channel::Accessor(std::rc::Rc::new(|row: &Table| row.value("v")));
         assert_eq!(accessor.read(&row), Value::Number(4.));
+    }
+
+    #[test]
+    fn get_scans_and_searches_alike() {
+        // Names that share lengths, first bytes and prefixes, the empty name
+        // and non-ASCII ones, in tables on both sides of the scan's limit.
+        let pool = [
+            "", "a", "b", "ab", "ba", "aa", "abc", "abd", "x", "x1", "x2", "y", "y1", "y2", "z",
+            "fill", "fx", "fy", "geometry", "date", "Date", "é", "éa", "ア", "$in:x", "$box:q",
+            "carat", "cut", "color", "clarity", "price",
+        ];
+        let mut seed = 17_u64;
+        for size in 0..=pool.len() {
+            for _ in 0..8 {
+                let row = Table::new((0..size).map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let name = pool[(seed >> 33) as usize % pool.len()];
+                    (name, Value::text(name))
+                }));
+                for name in pool.iter().copied().chain(["q", "abcd", "fil", "fills"]) {
+                    let searched = row.position(name).ok().map(|i| &row.fields[i].1);
+                    assert_eq!(row.get(name), searched, "{name:?} in {row:?}");
+                }
+            }
+        }
     }
 
     #[test]

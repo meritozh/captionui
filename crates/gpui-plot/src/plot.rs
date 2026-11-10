@@ -108,6 +108,10 @@ impl Default for Interaction {
 /// How the plot resolves a tooltip's content for a datum.
 pub type TooltipFormatter = Rc<dyn Fn(&Table, &mut Window, &mut App) -> AnyElement>;
 
+/// What the transform pipeline resolves, [`Plot::prepare_marks`]: the facet
+/// grid, each facet's marks and which facets hold any faceted rows.
+pub(crate) type Prepared = (Grid, Vec<Vec<PreparedMark>>, Vec<bool>);
+
 /// A plot: data, marks and the frame around them.
 ///
 /// ```
@@ -185,6 +189,10 @@ pub struct Plot {
     frame_cache: Option<Frame>,
     /// How far the marks have drawn in this frame, from `0` to `1`.
     appear_progress: f32,
+    /// The pipeline's result a retained plot's `natural_height` resolved
+    /// before its first frame, which that frame's `prepaint` takes instead
+    /// of running the pipeline again (see `RetainedPlot::natural_height`).
+    primed: std::cell::RefCell<Option<Prepared>>,
 }
 
 /// Every scale's options, Plot's `x`, `y`, `fx`, `fy`, `color`, `r`,
@@ -242,6 +250,7 @@ impl Plot {
             hover_progress: 0.,
             frame_cache: None,
             appear_progress: 1.,
+            primed: Default::default(),
         }
     }
 
@@ -409,7 +418,7 @@ impl Plot {
     /// marks (their facet scales' intervals applied) resolved in each facet
     /// of the grid, through the scales' `transform`s, with which facets hold
     /// any faceted rows.
-    fn prepare_marks(&self) -> (Grid, Vec<Vec<PreparedMark>>, Vec<bool>) {
+    fn prepare_marks(&self) -> Prepared {
         let bucketed = self.interval_marks();
         // The facet channels the grid reads, which the partitions then reuse.
         let mut reads = crate::facet::FacetReads::default();
@@ -434,7 +443,13 @@ impl Plot {
     /// with no y at all, or what `aspectRatio` asks for) plus the title,
     /// legend and caption above and below it.
     pub fn natural_height(&self, width: f32) -> f32 {
-        let (grid, facets, _) = self.prepare_marks();
+        self.natural_height_prepared(width).0
+    }
+
+    /// [`Plot::natural_height`] with the pipeline's result it worked from,
+    /// which reads neither the width nor the theme.
+    pub(crate) fn natural_height_prepared(&self, width: f32) -> (f32, Prepared) {
+        let (grid, facets, populated) = self.prepare_marks();
         let [mt, mr, mb, ml] = self.plot_margins(&grid);
         // The x and y values the scales read are gathered only by the
         // branches below that read them, and only as far as they read.
@@ -562,7 +577,14 @@ impl Plot {
         if self.caption.is_some() {
             extras += 18.;
         }
-        chart + extras
+        (chart + extras, (grid, facets, populated))
+    }
+
+    /// Have the next `prepaint` take `prepared`, the result of this plot's
+    /// own pipeline, rather than run it again. Sound only while the plot's
+    /// marks and data stay as they were, as a retained plot's do.
+    pub(crate) fn prime(&self, prepared: Prepared) {
+        *self.primed.borrow_mut() = Some(prepared);
     }
 
     /// Move what `prepaint` resolved by `delta`, for a plot drawn again at
@@ -612,18 +634,18 @@ impl Plot {
             hover_progress: 0.,
             frame_cache: None,
             appear_progress: 1.,
+            primed: Default::default(),
         }
     }
 
-    /// Whether the plot's color scale is a continuous ramp.
+    /// Whether the plot's color scale is a continuous ramp, as the scale
+    /// `plot_colors` builds would be, without building it.
     fn color_is_continuous(&self, facets: &[Vec<PreparedMark>]) -> bool {
         let theme = PlotTheme {
             palette: ColorRange::observable10_colors(),
             ..PlotTheme::from_theme(&gpui_kit::component::Theme::default())
         };
-        self.plot_colors(&theme, facets)
-            .scale
-            .is_some_and(|scale| !scale.is_ordinal())
+        render::color::color_scale_is_continuous(&theme, facets, &self.scales.color)
     }
 
     /// The height the plot asked for with [`Plot::height`], if any.
@@ -1643,8 +1665,11 @@ impl Plot {
                 return w.clone();
             }
             let original = channel.clone();
+            // The facet channel is read over every record in turn, which
+            // keep a field at one position.
+            let hint = std::cell::Cell::new(0);
             let w = crate::table::Channel::Accessor(Rc::new(move |row: &Table| {
-                let value = channel.read(row);
+                let value = channel.read_hinted(row, &hint);
                 match interval.extent(&value) {
                     Some((start, _)) => match value {
                         Value::Date(_) => Value::date_from_millis(start as i64),
@@ -3733,7 +3758,8 @@ impl Plot {
         Frame,
         Grid,
     ) {
-        let (mut grid, mut facets, populated) = self.prepare_marks();
+        let (mut grid, mut facets, populated) =
+            self.primed.take().unwrap_or_else(|| self.prepare_marks());
         grid.set_empty(&populated);
         render::apply_quantity_scales(&mut facets, &self.scales.r, &self.scales.opacity);
         render::apply_symbol_scale(&mut facets, &self.scales.symbol);
@@ -4629,6 +4655,160 @@ impl IntoElement for Plot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pipeline result as the dump harness prints it.
+    fn dump_prepared((grid, facets, populated): &Prepared) -> String {
+        let mut out = String::new();
+        crate::debug_dump::grid(&mut out, grid, Some(populated));
+        for (cell, marks) in facets.iter().enumerate() {
+            out.push_str(&format!("facet {cell}\n"));
+            for (index, mark) in marks.iter().enumerate() {
+                crate::debug_dump::mark(&mut out, index, mark);
+                for (i, row) in mark.rows.iter().enumerate() {
+                    crate::debug_dump::row(&mut out, i, row);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn color_continuity_is_what_the_built_scale_says() {
+        use crate::options::ScaleType;
+        let theme = PlotTheme {
+            palette: ColorRange::observable10_colors(),
+            ..PlotTheme::from_theme(&gpui_kit::component::Theme::default())
+        };
+        let row = |i: usize| {
+            let date = crate::value::Value::Date(
+                chrono::DateTime::from_timestamp_millis(i as i64 * 86_400_000).unwrap(),
+            );
+            Table::empty()
+                .with("x", Value::Number(i as f64))
+                .with("n", Value::Number(i as f64 * 1.5 - 3.))
+                .with("t", Value::text(["a", "b", "c"][i % 3]))
+                .with("css", Value::text(["red", "#00f", "steelblue"][i % 3]))
+                .with(
+                    "mixed",
+                    if i == 3 {
+                        Value::text("odd")
+                    } else {
+                        Value::Number(i as f64)
+                    },
+                )
+                .with("b", Value::Bool(i.is_multiple_of(2)))
+                .with("d", date)
+                .with("nulls", Value::Null)
+        };
+        let data = || (0..8).map(row).collect::<Vec<_>>();
+        let fields = ["n", "t", "css", "mixed", "b", "d", "nulls", "missing"];
+        let types = [
+            None,
+            Some(ScaleType::Linear),
+            Some(ScaleType::Log),
+            Some(ScaleType::Ordinal),
+            Some(ScaleType::Categorical),
+            Some(ScaleType::Band),
+            Some(ScaleType::Point),
+            Some(ScaleType::Diverging),
+            Some(ScaleType::Threshold),
+            Some(ScaleType::Quantize),
+            Some(ScaleType::Quantile),
+            Some(ScaleType::Identity),
+            Some(ScaleType::Utc),
+        ];
+        let domains: [Option<Vec<Value>>; 5] = [
+            None,
+            Some(vec![]),
+            Some(vec![Value::Number(0.), Value::Number(9.)]),
+            Some(vec![
+                Value::Number(0.),
+                Value::Number(4.),
+                Value::Number(9.),
+            ]),
+            Some(vec![Value::text("a"), Value::Null]),
+        ];
+        let mut checked = 0;
+        for field in fields {
+            for kind in types {
+                for domain in &domains {
+                    for colors in [None, Some(2), Some(3)] {
+                        for transform in [false, true] {
+                            let plot = Plot::new(data())
+                                .dot(|m| m.x("x").y("x").fill(field))
+                                .line(|m| m.x("x").y("n").stroke(field));
+                            let mut options = crate::options::ScaleOptions::default();
+                            if transform {
+                                // Negative numbers become NaN.
+                                options = options.transform(f64::sqrt);
+                            }
+                            options.r#type = kind;
+                            options.domain = domain.clone();
+                            options.colors = colors.map(|n| vec![gpui::red(); n]);
+                            let options = &options;
+                            let (_, facets, _) = plot.prepare_marks();
+                            let built =
+                                render::color::PlotColors::new(&theme, &facets, None, options)
+                                    .scale
+                                    .is_some_and(|scale| !scale.is_ordinal());
+                            let inferred =
+                                render::color::color_scale_is_continuous(&theme, &facets, options);
+                            assert_eq!(
+                                inferred, built,
+                                "{field} {kind:?} {domain:?} {colors:?} {transform}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000);
+    }
+
+    #[test]
+    fn natural_height_hands_back_the_marks_it_measured() {
+        let data = || {
+            (0..40).map(|i| {
+                Table::empty()
+                    .with("x", Value::Number(i as f64 * 0.37))
+                    .with("y", Value::Number((i * 7 % 11) as f64))
+                    .with("g", Value::text(["a", "b", "c"][i % 3]))
+            })
+        };
+        let plots = [
+            Plot::new(data()).dot(|m| m.x("x").y("y").fill("g")),
+            Plot::new(data()).fx("g").title("faceted").mark(
+                crate::marks::rect_y(Dataset::new(data()))
+                    .x("x")
+                    .bin_output("y", crate::GroupReducer::Count),
+            ),
+            Plot::new(data())
+                .aspect_ratio(1.)
+                .line(|m| m.x("x").y("y").stroke("y")),
+        ];
+        for plot in &plots {
+            let (height, prepared) = plot.natural_height_prepared(640.);
+            assert_eq!(height.to_bits(), plot.natural_height(640.).to_bits());
+            assert_eq!(
+                dump_prepared(&prepared),
+                dump_prepared(&plot.prepare_marks())
+            );
+            // Primed, the next resolve takes it once; the one after runs the
+            // pipeline again.
+            plot.prime(prepared);
+            assert!(plot.primed.take().is_some());
+            assert!(plot.primed.borrow().is_none());
+        }
+        // A retained plot primes its first frame from the height it measures.
+        let retained = Plot::new(data()).dot(|m| m.x("x").y("y")).retained();
+        let height = retained.natural_height(640.);
+        retained.with_plot(|plot| {
+            assert_eq!(height.to_bits(), plot.natural_height(640.).to_bits());
+            let primed = plot.primed.take().expect("primed before the first frame");
+            assert_eq!(dump_prepared(&primed), dump_prepared(&plot.prepare_marks()));
+        });
+    }
 
     #[test]
     fn tip_and_furniture_marks_prepare() {

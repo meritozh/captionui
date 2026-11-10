@@ -57,14 +57,32 @@ impl Plot {
 
 impl RetainedPlot {
     /// [`Plot::natural_height`], remembered per width.
+    ///
+    /// Before the plot's first frame, the marks it resolved to measure are
+    /// kept for that frame's `prepaint`, so a chart laid out by its height
+    /// runs its pipeline once rather than twice. The plot's marks and data
+    /// never change, and the pipeline reads neither the width nor the
+    /// theme, so the frame resolves the same marks either way.
     pub fn natural_height(&self, width: f32) -> f32 {
         let mut inner = self.0.borrow_mut();
         if let Some(&(_, height)) = inner.heights.iter().find(|(w, _)| *w == width.to_bits()) {
             return height;
         }
-        let height = inner.plot.natural_height(width);
+        let height = if inner.prepared.is_none() {
+            let (height, prepared) = inner.plot.natural_height_prepared(width);
+            inner.plot.prime(prepared);
+            height
+        } else {
+            inner.plot.natural_height(width)
+        };
         inner.heights.push((width.to_bits(), height));
         height
+    }
+
+    /// Read the plot it keeps.
+    #[cfg(test)]
+    pub(crate) fn with_plot<R>(&self, read: impl FnOnce(&Plot) -> R) -> R {
+        read(&self.0.borrow().plot)
     }
 
     /// Whether the plot has resolved its marks at least once.

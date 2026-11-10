@@ -19,6 +19,107 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Tessellated paths by exactly what they were built from, so a plot that
+/// paints the same shapes again (each repaint while the pointer moves) takes
+/// them from here rather than tessellating them again.
+///
+/// A path is a pure function of its builder's input: its kind (a fill, the
+/// even-odd fill of several rings, or a stroke and its width) and its
+/// contours' points. An entry is used only when all of those are equal bit
+/// for bit, so a hit is the path the builder would build. Failures (an
+/// outline the tessellator gives up on) are kept too. A path is kept the
+/// second time it is built, so a shape painted once (a plot's first frame)
+/// pays only for its hash. When the entries hold more points than
+/// [`TESSELLATION_BUDGET`], they are dropped and the cache starts again.
+#[derive(Default)]
+struct Tessellations {
+    entries: rustc_hash::FxHashMap<u64, (TessellationKey, Option<Path<Pixels>>)>,
+    /// The hashes of the inputs built once and not kept yet.
+    seen: rustc_hash::FxHashSet<u64>,
+    held: usize,
+}
+
+/// What a tessellated path was built from.
+#[derive(PartialEq)]
+struct TessellationKey {
+    /// 0 for a fill, 1 for an even-odd fill of rings, else 2 and a stroke's
+    /// width bits.
+    kind: (u8, u32),
+    /// Each contour's length, then every point's bits.
+    lengths: Vec<usize>,
+    points: Vec<[u32; 2]>,
+}
+
+/// How many points (of the keys and the paths' vertices) the cache holds.
+const TESSELLATION_BUDGET: usize = 1 << 21;
+
+thread_local! {
+    static TESSELLATIONS: std::cell::RefCell<Tessellations> = Default::default();
+}
+
+/// The path `build` makes from `contours`, from the cache when it already
+/// built one from the same input.
+fn tessellated(
+    kind: (u8, u32),
+    contours: &[&[Point<Pixels>]],
+    build: impl FnOnce() -> Option<Path<Pixels>>,
+) -> Option<Path<Pixels>> {
+    use std::hash::{Hash, Hasher};
+    let bits = |p: &Point<Pixels>| [p.x.as_f32().to_bits(), p.y.as_f32().to_bits()];
+    let mut hasher = rustc_hash::FxHasher::default();
+    kind.hash(&mut hasher);
+    for contour in contours {
+        hasher.write_usize(contour.len());
+        for point in *contour {
+            let [x, y] = bits(point);
+            hasher.write_u64(u64::from(x) << 32 | u64::from(y));
+        }
+    }
+    let hash = hasher.finish();
+    let matches = |key: &TessellationKey| {
+        key.kind == kind
+            && key.lengths.len() == contours.len()
+            && key.lengths.iter().zip(contours).all(|(n, c)| *n == c.len())
+            && key
+                .points
+                .iter()
+                .zip(contours.iter().flat_map(|c| c.iter()))
+                .all(|(kept, point)| *kept == bits(point))
+    };
+    if let Some(path) = TESSELLATIONS.with_borrow(|cache| {
+        cache
+            .entries
+            .get(&hash)
+            .filter(|(key, _)| matches(key))
+            .map(|(_, path)| path.clone())
+    }) {
+        return path;
+    }
+    let path = build();
+    let points: usize = contours.iter().map(|c| c.len()).sum();
+    let size = points + path.as_ref().map_or(0, |p| p.vertices.len());
+    TESSELLATIONS.with_borrow_mut(|cache| {
+        if cache.held + size > TESSELLATION_BUDGET || cache.seen.len() > TESSELLATION_BUDGET / 8 {
+            cache.entries.clear();
+            cache.seen.clear();
+            cache.held = 0;
+        }
+        if size > TESSELLATION_BUDGET / 4 || cache.seen.insert(hash) {
+            return;
+        }
+        let key = TessellationKey {
+            kind,
+            lengths: contours.iter().map(|c| c.len()).collect(),
+            points: contours.iter().flat_map(|c| c.iter()).map(bits).collect(),
+        };
+        cache.held += size;
+        if let Some((old, path)) = cache.entries.insert(hash, (key, path.clone())) {
+            cache.held -= old.points.len() + path.map_or(0, |p| p.vertices.len());
+        }
+    });
+    path
+}
+
 /// Run `f` with fills and strokes clipped to `ring`, when it is a convex
 /// polygon; a concave outline (a conic's sphere) leaves the mark unclipped.
 pub fn with_clip_polygon<R>(ring: Option<Vec<Point<Pixels>>>, f: impl FnOnce() -> R) -> R {
@@ -154,9 +255,12 @@ pub fn fill_path(points: &[Point<Pixels>], color: Hsla) -> Option<Path<Pixels>> 
     if points.len() < 3 || !finite(points) {
         return None;
     }
-    let mut builder = PathBuilder::fill();
-    builder.add_polygon(points, true);
-    builder.build().ok().map(|path| with_alpha(path, color))
+    tessellated((0, 0), &[points], || {
+        let mut builder = PathBuilder::fill();
+        builder.add_polygon(points, true);
+        builder.build().ok()
+    })
+    .map(|path| with_alpha(path, color))
 }
 
 /// Fill a polygon by SVG's `nonzero` rule, scanline by scanline: the
@@ -215,26 +319,33 @@ pub fn stroke_path(points: &[Point<Pixels>], width: f32, color: Hsla) -> Option<
     if points.is_empty() || !finite(points) {
         return None;
     }
-    let mut builder = PathBuilder::stroke(px(width.max(0.1)));
+    let width = width.max(0.1);
     let clipped = CLIP.with_borrow(Option::is_some);
-    if !clipped {
-        builder.move_to(points[0]);
-        for point in &points[1..] {
-            builder.line_to(*point);
-        }
-    } else {
+    let runs = if clipped {
         let runs = clip_polyline(points);
         if runs.is_empty() {
             return None;
         }
-        for run in runs {
+        Some(runs)
+    } else {
+        None
+    };
+    // Each run is a contour: moved to its first point, lined to the rest.
+    let contours: Vec<&[Point<Pixels>]> = match &runs {
+        Some(runs) => runs.iter().map(Vec::as_slice).collect(),
+        None => vec![points],
+    };
+    tessellated((2, width.to_bits()), &contours, || {
+        let mut builder = PathBuilder::stroke(px(width));
+        for run in &contours {
             builder.move_to(run[0]);
             for point in &run[1..] {
                 builder.line_to(*point);
             }
         }
-    }
-    builder.build().ok().map(|path| with_alpha(path, color))
+        builder.build().ok()
+    })
+    .map(|path| with_alpha(path, color))
 }
 
 /// Whether every point is finite, which the tessellator requires.
@@ -588,20 +699,24 @@ pub fn paint_dashed_path(
 /// Fill several rings as one shape with the even-odd rule, so a polygon's
 /// holes stay open.
 pub fn paint_fill_rings(rings: &[Vec<Point<Pixels>>], color: Hsla, window: &mut Window) {
-    let mut builder = PathBuilder::fill();
-    let mut any = false;
-    for ring in rings.iter().filter(|r| r.len() >= 3 && finite(r)) {
-        let ring = clip_polygon(ring);
-        if ring.len() < 3 {
-            continue;
-        }
-        builder.add_polygon(&ring, true);
-        any = true;
-    }
-    if !any {
+    let clipped: Vec<std::borrow::Cow<'_, [Point<Pixels>]>> = rings
+        .iter()
+        .filter(|r| r.len() >= 3 && finite(r))
+        .map(|ring| clip_polygon(ring))
+        .filter(|ring| ring.len() >= 3)
+        .collect();
+    if clipped.is_empty() {
         return;
     }
-    if let Ok(path) = builder.build() {
+    let contours: Vec<&[Point<Pixels>]> = clipped.iter().map(|ring| ring.as_ref()).collect();
+    let path = tessellated((1, 0), &contours, || {
+        let mut builder = PathBuilder::fill();
+        for ring in &contours {
+            builder.add_polygon(ring, true);
+        }
+        builder.build().ok()
+    });
+    if let Some(path) = path {
         window.paint_path(with_alpha(path, color), color);
     }
 }

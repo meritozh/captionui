@@ -2205,12 +2205,27 @@ impl Mark {
     /// Plot's `geoCentroid` transform: `x` and `y` are the longitude and
     /// latitude of each record's geometry's spherical centroid.
     pub fn geo_centroid(mut self) -> Self {
+        // The x and y accessors read the same centroid: the last geometry's
+        // is kept, with its `Rc` so its address cannot be reused while it is
+        // remembered, and the y read right after the x one reuses it.
+        type Last = Option<(std::rc::Rc<crate::geo::Geometry>, Option<[f64; 2]>)>;
+        let last: std::rc::Rc<std::cell::RefCell<Last>> = Default::default();
         let centroid = |axis: usize| {
+            let last = last.clone();
             move |row: &crate::table::Table| {
-                row.get("geometry")
-                    .and_then(crate::value::Value::as_geo)
-                    .and_then(crate::geo::centroid)
-                    .map(|c| crate::value::Value::Number(c[axis]))
+                let Some(crate::value::Value::Geo(geometry)) = row.get("geometry") else {
+                    return crate::value::Value::Null;
+                };
+                let mut last = last.borrow_mut();
+                let c = match &*last {
+                    Some((kept, c)) if std::rc::Rc::ptr_eq(kept, geometry) => *c,
+                    _ => {
+                        let c = crate::geo::centroid(geometry);
+                        *last = Some((geometry.clone(), c));
+                        c
+                    }
+                };
+                c.map(|c| crate::value::Value::Number(c[axis]))
                     .unwrap_or(crate::value::Value::Null)
             }
         };
@@ -4023,6 +4038,58 @@ impl Mark {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geo_centroid_reads_each_records_own_centroid() {
+        use crate::geo::Geometry;
+        use crate::table::Table;
+        let shape = |dx: f64| {
+            std::rc::Rc::new(Geometry::Polygon(vec![vec![
+                [dx, 0.],
+                [dx + 10., 0.],
+                [dx + 10., 10.],
+                [dx, 10.],
+                [dx, 0.],
+            ]]))
+        };
+        let (a, b) = (shape(0.), shape(40.));
+        let row = |g: &std::rc::Rc<Geometry>| {
+            Table::empty().with("geometry", crate::value::Value::Geo(g.clone()))
+        };
+        // Two records sharing one geometry, a different one, a record with
+        // none and one whose geometry has no centroid.
+        let none = std::rc::Rc::new(Geometry::Sphere);
+        let rows = [
+            row(&a),
+            row(&a),
+            row(&b),
+            Table::empty(),
+            row(&none),
+            row(&a),
+        ];
+        let mark = Mark::new(MarkKind::Geo).geo_centroid();
+        let (x, y) = (
+            mark.channels.x.clone().unwrap(),
+            mark.channels.y.clone().unwrap(),
+        );
+        let expect = |r: &Table, axis: usize| {
+            r.get("geometry")
+                .and_then(crate::value::Value::as_geo)
+                .and_then(crate::geo::centroid)
+                .map_or(crate::value::Value::Null, |c| {
+                    crate::value::Value::Number(c[axis])
+                })
+        };
+        // x then y per record, y alone, and x twice: each read is its own
+        // record's.
+        for order in [[0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0], [1; 12], [0; 12]] {
+            for (i, r) in rows.iter().cycle().take(12).enumerate() {
+                let axis = order[i];
+                let read = if axis == 0 { x.read(r) } else { y.read(r) };
+                assert_eq!(read, expect(r, axis), "record {i} axis {axis}");
+            }
+        }
+    }
 
     #[test]
     fn category_classifies_every_kind() {
