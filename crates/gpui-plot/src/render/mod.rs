@@ -2358,36 +2358,27 @@ pub fn resolve_raster(
         });
     // Interpolating thousands of samples (or sampling a function per cell) is
     // the costly part, and a plot repaints on every pointer move with the same
-    // inputs; remember the last few grids by a hash of what they were built
-    // from.
-    let key = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (size, how as u8, spec.blur.to_bits()).hash(&mut h);
-        extent.map(f64::to_bits).hash(&mut h);
-        if let Some(f) = &spec.function {
-            // A function is rebuilt with its plot, so probe it instead of
-            // keying by its address.
-            for i in 0..5 {
-                for j in 0..5 {
-                    let x = extent[0] + (extent[2] - extent[0]) * (i as f64 + 0.37) / 5.;
-                    let y = extent[1] + (extent[3] - extent[1]) * (j as f64 + 0.61) / 5.;
-                    f(x, y).key().hash(&mut h);
-                }
-            }
-        }
-        for (x, y, v) in &samples {
-            (x.to_bits(), y.to_bits()).hash(&mut h);
-            v.key().hash(&mut h);
-        }
-        h.finish()
+    // inputs; remember the last few grids by exactly what they were built
+    // from. A function is known by its `Rc`, which the entry holds so the
+    // address cannot be reused: a retained plot keeps the same function from
+    // frame to frame, and a rebuilt one simply resolves again.
+    let key = RasterKey {
+        size,
+        how,
+        blur: spec.blur.to_bits(),
+        extent: extent.map(f64::to_bits),
+        function: spec.function.clone(),
+        samples: samples
+            .iter()
+            .map(|(x, y, v)| (x.to_bits(), y.to_bits(), v.key()))
+            .collect(),
     };
     thread_local! {
-        static GRIDS: std::cell::RefCell<Vec<(u64, std::rc::Rc<crate::raster::RasterGrid>)>> =
+        static GRIDS: std::cell::RefCell<Vec<(RasterKey, std::rc::Rc<crate::raster::RasterGrid>)>> =
             const { std::cell::RefCell::new(Vec::new()) };
     }
     if let Some(grid) = GRIDS.with_borrow(|grids| {
-        grids.iter().find(|(k, _)| *k == key).map(|(_, g)| g.clone())
+        grids.iter().find(|(k, _)| k.same(&key)).map(|(_, g)| g.clone())
     }) {
         return Some(grid);
     }
@@ -2403,6 +2394,31 @@ pub fn resolve_raster(
         grids.truncate(8);
     });
     Some(grid)
+}
+
+/// Everything a resolved raster grid was built from, compared exactly.
+struct RasterKey {
+    size: (usize, usize),
+    how: crate::raster::Interpolate,
+    blur: u64,
+    extent: [u64; 4],
+    function: Option<std::rc::Rc<dyn Fn(f64, f64) -> Value>>,
+    samples: Vec<(u64, u64, crate::value::ValueKey)>,
+}
+
+impl RasterKey {
+    fn same(&self, other: &Self) -> bool {
+        self.size == other.size
+            && self.how == other.how
+            && self.blur == other.blur
+            && self.extent == other.extent
+            && match (&self.function, &other.function) {
+                (Some(a), Some(b)) => std::rc::Rc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+            && self.samples == other.samples
+    }
 }
 
 /// The channel names a transform output can read from the mark itself.
@@ -5310,5 +5326,47 @@ mod equivalence_tests {
         }
         assert!(naive.len() > 20);
         assert_eq!(hashed, naive);
+    }
+}
+
+#[cfg(test)]
+mod raster_key_tests {
+    use super::*;
+
+    fn key(function: Option<std::rc::Rc<dyn Fn(f64, f64) -> Value>>) -> RasterKey {
+        RasterKey {
+            size: (4, 3),
+            how: crate::raster::Interpolate::None,
+            blur: 0f64.to_bits(),
+            extent: [0., 0., 1., 1.].map(f64::to_bits),
+            function,
+            samples: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn functions_are_told_apart_by_identity_not_by_sampling() {
+        // Two functions that agree almost everywhere must not share a grid.
+        let f: std::rc::Rc<dyn Fn(f64, f64) -> Value> = std::rc::Rc::new(|x, _| Value::number(x));
+        let g: std::rc::Rc<dyn Fn(f64, f64) -> Value> =
+            std::rc::Rc::new(|x, y| Value::number(if y > 0.99 { -x } else { x }));
+        assert!(key(Some(f.clone())).same(&key(Some(f.clone()))));
+        assert!(!key(Some(f.clone())).same(&key(Some(g))));
+        assert!(!key(Some(f)).same(&key(None)));
+    }
+
+    #[test]
+    fn samples_and_parameters_compare_exactly() {
+        let mut a = key(None);
+        a.samples = vec![(1f64.to_bits(), 2f64.to_bits(), Value::number(3.).key())];
+        let mut b = key(None);
+        b.samples = a.samples.clone();
+        assert!(a.same(&b));
+        b.samples[0].2 = Value::number(3.000_000_1).key();
+        assert!(!a.same(&b));
+        let mut c = key(None);
+        c.samples = a.samples.clone();
+        c.blur = 2f64.to_bits();
+        assert!(!a.same(&c));
     }
 }
