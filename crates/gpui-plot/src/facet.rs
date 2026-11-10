@@ -18,6 +18,49 @@ pub const FACET_LABEL_GAP: f32 = 6.;
 /// Plot's inner padding between facets, as a fraction of a band's step.
 const FACET_PADDING: f32 = 0.1;
 
+/// The values facet channels read from each row of their data, kept by
+/// (dataset, channel) so the grid and the facet partitions read each pair
+/// once. Each value is the channel's [`read`](crate::table::Channel::read)
+/// of that row, which is all a partition reads.
+#[derive(Default)]
+pub(crate) struct FacetReads(Vec<(crate::table::Dataset, crate::table::Channel, Vec<Value>)>);
+
+impl FacetReads {
+    /// The values `channel` read from each row of `data`, if they were read.
+    pub(crate) fn get(
+        &self,
+        data: &crate::table::Dataset,
+        channel: &crate::table::Channel,
+    ) -> Option<&[Value]> {
+        self.0
+            .iter()
+            .find(|(d, c, _)| d.same_rows(data) && c.same(channel))
+            .map(|(_, _, values)| values.as_slice())
+    }
+
+    /// The values `channel` reads from each row of `data`, read now unless
+    /// they already were.
+    pub(crate) fn read(
+        &mut self,
+        data: &crate::table::Dataset,
+        channel: &crate::table::Channel,
+    ) -> &[Value] {
+        let index = match self
+            .0
+            .iter()
+            .position(|(d, c, _)| d.same_rows(data) && c.same(channel))
+        {
+            Some(index) => index,
+            None => {
+                let values = data.rows().iter().map(|row| channel.read(row)).collect();
+                self.0.push((data.clone(), channel.clone(), values));
+                self.0.len() - 1
+            }
+        };
+        &self.0[index].2
+    }
+}
+
 /// One facet of the grid.
 ///
 /// A cell with no key on a channel stands for every value of that channel,
@@ -226,6 +269,18 @@ impl Grid {
         fx: Option<&crate::table::Channel>,
         fy: Option<&crate::table::Channel>,
     ) -> Vec<Vec<crate::table::Table>> {
+        self.partition_reading(data, fx, fy, &FacetReads::default())
+    }
+
+    /// [`Grid::partition_channels`], taking a channel's values from `reads`
+    /// when building the grid already read it over `data`.
+    pub(crate) fn partition_reading(
+        &self,
+        data: &crate::table::Dataset,
+        fx: Option<&crate::table::Channel>,
+        fy: Option<&crate::table::Channel>,
+        reads: &FacetReads,
+    ) -> Vec<Vec<crate::table::Table>> {
         let mut groups: Vec<Vec<crate::table::Table>> = vec![Vec::new(); self.cells.len()];
         // The facets each pair of keys lands in, in the grid's order. An axis
         // without a channel is a wildcard (`None`), matching every facet
@@ -242,13 +297,19 @@ impl Grid {
                 lookup.entry((x, y)).or_default().push(index);
             }
         }
-        for row in data.rows() {
-            let key = |channel: Option<&crate::table::Channel>| {
-                channel.map(|channel| channel.read(row).key())
+        // Each channel with the values it read when the grid was built.
+        let fx = fx.map(|channel| (channel, reads.get(data, channel)));
+        let fy = fy.map(|channel| (channel, reads.get(data, channel)));
+        for (index, row) in data.rows().iter().enumerate() {
+            let key = |side: Option<(&crate::table::Channel, Option<&[Value]>)>| {
+                side.map(|(channel, values)| match values {
+                    Some(values) => values[index].key(),
+                    None => channel.read(row).key(),
+                })
             };
             if let Some(cells) = lookup.get(&(key(fx), key(fy))) {
-                for &index in cells {
-                    groups[index].push(row.clone());
+                for &cell in cells {
+                    groups[cell].push(row.clone());
                 }
             }
         }
@@ -383,6 +444,41 @@ mod tests {
     }
 
     #[test]
+    fn facet_reads_are_kept_by_dataset_and_channel() {
+        use crate::table::{Channel, Dataset, Table};
+        let rows = (0..5).map(|i| Table::new([("v", Value::Number(i as f64))]));
+        let data = Dataset::new(rows.clone());
+        // The same records in another dataset are read on their own.
+        let other = Dataset::new(rows);
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = calls.clone();
+        let accessor = Channel::Accessor(std::rc::Rc::new(move |row: &Table| {
+            counted.set(counted.get() + 1);
+            row.value("v")
+        }));
+        let field = Channel::from("v");
+        let mut reads = FacetReads::default();
+        assert!(reads.get(&data, &accessor).is_none());
+        let read: Vec<Value> = reads.read(&data, &accessor).to_vec();
+        assert_eq!(
+            read,
+            data.rows()
+                .iter()
+                .map(|r| accessor.read(r))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(calls.get(), 10);
+        reads.read(&data, &accessor);
+        assert_eq!(calls.get(), 10, "a pair already read is not read again");
+        assert!(reads.get(&other, &accessor).is_none());
+        assert!(reads.get(&data, &field).is_none());
+        assert_eq!(
+            reads.get(&data.clone(), &accessor.clone()),
+            Some(read.as_slice())
+        );
+    }
+
+    #[test]
     fn partitions_match_a_cell_by_cell_scan() {
         use crate::table::{Channel, Dataset, Table};
         // Keys that only a careful lookup keeps apart or together: null, -0
@@ -428,9 +524,14 @@ mod tests {
             None => true,
             Some(channel) => have.as_ref() == Some(&channel.read(row).key()),
         };
+        // The values the grid's build reads, which a partition then reuses.
+        let mut reads = FacetReads::default();
+        reads.read(&data, &fx);
+        reads.read(&data, &fy);
         for grid in &grids {
             for (cx, cy) in [(Some(&fx), Some(&fy)), (Some(&fx), None), (None, Some(&fy))] {
                 let groups = grid.partition_channels(&data, cx, cy);
+                assert_eq!(groups, grid.partition_reading(&data, cx, cy, &reads));
                 assert_eq!(groups.len(), grid.cells.len());
                 for (cell, rows) in grid.cells.iter().zip(&groups) {
                     let expected: Vec<&Table> = data

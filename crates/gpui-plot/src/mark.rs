@@ -4303,27 +4303,26 @@ mark_builder!(
     MarkKind::BollingerY
 );
 
-/// The quartiles of numbers, d3's R-7 quantiles.
-fn quartiles(values: &[crate::value::Value]) -> Option<(f64, f64)> {
-    let mut v: Vec<f64> = values
-        .iter()
-        .filter_map(crate::value::Value::as_number)
-        .collect();
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_by(f64::total_cmp);
-    let q = |p: f64| {
-        let h = (v.len() - 1) as f64 * p;
-        let (lo, hi) = (h.floor() as usize, h.ceil() as usize);
-        v[lo] + (v[hi] - v[lo]) * (h - h.floor())
-    };
-    Some((q(0.25), q(0.75)))
+/// The quartiles of the numbers among `values`, d3's R-7 quantiles.
+fn quartiles(
+    values: &[crate::value::Value],
+    order: &mut crate::transform::OrderStatistics,
+) -> Option<(f64, f64)> {
+    Some((order.quantile(values, 0.25)?, order.quantile(values, 0.75)?))
 }
 
 /// Plot's `loqr1`: the least value within 1.5 IQR below the first quartile.
 pub fn whisker_low(values: &[crate::value::Value]) -> crate::value::Value {
-    let Some((q1, q3)) = quartiles(values) else {
+    whisker_low_with(values, &mut Default::default())
+}
+
+/// [`whisker_low`], reading the quartiles through `order`, which only ever
+/// reads these `values`.
+pub(crate) fn whisker_low_with(
+    values: &[crate::value::Value],
+    order: &mut crate::transform::OrderStatistics,
+) -> crate::value::Value {
+    let Some((q1, q3)) = quartiles(values, order) else {
         return crate::value::Value::Null;
     };
     let lo = q1 * 2.5 - q3 * 1.5;
@@ -4338,7 +4337,16 @@ pub fn whisker_low(values: &[crate::value::Value]) -> crate::value::Value {
 
 /// Plot's `hiqr2`: the greatest value within 1.5 IQR above the third.
 pub fn whisker_high(values: &[crate::value::Value]) -> crate::value::Value {
-    let Some((q1, q3)) = quartiles(values) else {
+    whisker_high_with(values, &mut Default::default())
+}
+
+/// [`whisker_high`], reading the quartiles through `order`, which only ever
+/// reads these `values`.
+pub(crate) fn whisker_high_with(
+    values: &[crate::value::Value],
+    order: &mut crate::transform::OrderStatistics,
+) -> crate::value::Value {
+    let Some((q1, q3)) = quartiles(values, order) else {
         return crate::value::Value::Null;
     };
     let hi = q3 * 2.5 - q1 * 1.5;
@@ -4402,17 +4410,14 @@ pub fn expand_box(mark: Mark) -> Vec<Mark> {
         ("x1", "x2", "x1", "x2", "x")
     };
     let input = if vertical { "y" } else { "x" };
-    let custom = |f: fn(&[crate::value::Value]) -> crate::value::Value| {
-        GroupReducer::custom(move |values, _| f(values))
-    };
     let stroke = mark.channels.stroke.clone();
     let mut rule = group(base(if vertical {
         MarkKind::RuleX
     } else {
         MarkKind::RuleY
     }))
-    .group_output(lo, custom(whisker_low))
-    .group_output(hi, custom(whisker_high));
+    .group_output(lo, GroupReducer::WhiskerLow)
+    .group_output(hi, GroupReducer::WhiskerHigh);
     let mut bar = group(base(if vertical {
         MarkKind::BarY
     } else {

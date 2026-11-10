@@ -168,6 +168,19 @@ pub fn prepare_facets(
     fx: Option<&str>,
     fy: Option<&str>,
 ) -> (Vec<Vec<PreparedMark>>, Vec<bool>) {
+    prepare_facets_reading(data, marks, grid, fx, fy, &Default::default())
+}
+
+/// [`prepare_facets`], taking a facet channel's values over a mark's data
+/// from `reads` when building the grid already read them.
+pub(crate) fn prepare_facets_reading(
+    data: &Dataset,
+    marks: &[Mark],
+    grid: &Grid,
+    fx: Option<&str>,
+    fy: Option<&str>,
+    reads: &crate::facet::FacetReads,
+) -> (Vec<Vec<PreparedMark>>, Vec<bool>) {
     if !grid.is_faceted() {
         return (vec![prepare(data, marks)], Vec::new());
     }
@@ -212,7 +225,7 @@ pub fn prepare_facets(
         });
         let cached = cached.unwrap_or_else(|| {
             let groups = grid
-                .partition_channels(source, mark_fx.as_ref(), mark_fy.as_ref())
+                .partition_reading(source, mark_fx.as_ref(), mark_fy.as_ref(), reads)
                 .into_iter()
                 .map(Dataset::new)
                 .collect();
@@ -495,18 +508,32 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         channels
     };
     let facts = RowFacts::new(channels, mark);
-    let mut rows: Vec<PreparedRow> = source
-        .rows()
-        .iter()
-        .enumerate()
-        .map(|(index, row)| resolve_row(row, index, channels, mark, &facts))
-        .collect();
+    // Each consumer below gets its own closure, so each inlines the resolve.
+    let raw = || source.rows().iter().enumerate();
     // A transform output reads the mark's own channel of that name unless it
     // names an input (Plot's `maybeInput`): `binX({fill: "x"}, {fill:
     // "Anomaly"})` averages Anomaly. The output reads `$in:<name>`, which the
     // group or bin resolves against the original mark's channel (see
     // [`bound_input`]).
     let bound_channels = &original.channels;
+    // A grouped mark whose raw rows no transform reads before the grouping
+    // streams them straight into their groups, without collecting them; the
+    // transforms below up to the grouping are then all no-ops.
+    let streamed = mark
+        .group
+        .as_ref()
+        .filter(|_| mark.sort.is_none() && !transforms_before_group(mark));
+    let mut rows: Vec<PreparedRow> = match streamed {
+        Some(config) => collapse_groups(
+            raw().map(|(index, row)| resolve_row(row, index, channels, mark, &facts)),
+            mark,
+            config,
+            bound_channels,
+        ),
+        None => raw()
+            .map(|(index, row)| resolve_row(row, index, channels, mark, &facts))
+            .collect(),
+    };
 
     // A mark's own ordering decides where its shapes land, and a line's order
     // is its path, so sorting happens before anything positional.
@@ -534,7 +561,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
 
     // A grouping collapses the rows sharing a category into one row each,
     // Plot's `groupX`/`groupY`/`groupZ`.
-    if let Some(config) = &mark.group {
+    if let Some(config) = mark.group.as_ref().filter(|_| streamed.is_none()) {
         rows = collapse_groups(rows, mark, config, bound_channels);
     }
 
@@ -604,51 +631,61 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
 
 /// Keep each `z` group's rows beyond its whiskers, Plot's box outliers.
 fn outlier_rows(mut rows: Vec<PreparedRow>, axis: Axis) -> Vec<PreparedRow> {
-    let read = |row: &PreparedRow| {
+    let read = |row: &PreparedRow| -> Value {
         if axis == Axis::X {
             row.x_value().clone()
         } else {
             row.y_value().clone()
         }
     };
-    let mut groups: Vec<(crate::value::ValueKey, Vec<Value>)> = Vec::new();
-    for row in &rows {
-        let key = row
-            .z
-            .as_ref()
-            .map(Value::key)
-            .unwrap_or_else(|| Value::Null.key());
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, values)) => values.push(read(row)),
-            None => groups.push((key, vec![read(row)])),
-        }
+    // Each `z` group's first row and values, in row order, and each row's
+    // group and number. A row whose `z` equals the `z` of the previous row's
+    // group is in that group, since equal values have equal keys; any other
+    // asks the map.
+    let mut groups: Vec<(usize, Vec<Value>)> = Vec::new();
+    let mut slots: rustc_hash::FxHashMap<crate::value::ValueKey, usize> = Default::default();
+    let mut members: Vec<(usize, Option<f64>)> = Vec::with_capacity(rows.len());
+    let mut last: Option<usize> = None;
+    for (index, row) in rows.iter().enumerate() {
+        let group = match last {
+            Some(group) if rows[groups[group].0].z == row.z => group,
+            _ => {
+                let key = row
+                    .z
+                    .as_ref()
+                    .map(Value::key)
+                    .unwrap_or_else(|| Value::Null.key());
+                *slots.entry(key).or_insert_with(|| {
+                    groups.push((index, Vec::new()));
+                    groups.len() - 1
+                })
+            }
+        };
+        last = Some(group);
+        let value = read(row);
+        members.push((group, value.as_number()));
+        groups[group].1.push(value);
     }
-    let bounds: Vec<(crate::value::ValueKey, f64, f64)> = groups
+    let bounds: Vec<(f64, f64)> = groups
         .into_iter()
-        .map(|(key, values)| {
-            let lo = crate::mark::whisker_low(&values)
+        .map(|(_, values)| {
+            let mut order = transform::OrderStatistics::default();
+            let lo = crate::mark::whisker_low_with(&values, &mut order)
                 .as_number()
                 .unwrap_or(f64::NEG_INFINITY);
-            let hi = crate::mark::whisker_high(&values)
+            let hi = crate::mark::whisker_high_with(&values, &mut order)
                 .as_number()
                 .unwrap_or(f64::INFINITY);
-            (key, lo, hi)
+            (lo, hi)
         })
         .collect();
-    // Kept in place, so only the outliers move.
-    rows.retain(|row| {
-        let key = row
-            .z
-            .as_ref()
-            .map(Value::key)
-            .unwrap_or_else(|| Value::Null.key());
-        let Some(v) = read(row).as_number() else {
-            return false;
-        };
-        bounds
-            .iter()
-            .find(|(k, _, _)| *k == key)
-            .is_some_and(|(_, lo, hi)| v < *lo || v > *hi)
+    // Kept in place, so only the outliers move; `retain` visits the rows in
+    // order, as `members` lists them.
+    let mut members = members.into_iter();
+    rows.retain(|_| {
+        let (group, value) = members.next().expect("a member per row");
+        let (lo, hi) = bounds[group];
+        value.is_some_and(|v| v < lo || v > hi)
     });
     rows
 }
@@ -1259,10 +1296,68 @@ struct RowFacts {
     constant_symbol: Option<crate::style::Symbol>,
     r_unscaled: bool,
     opacity_unscaled: bool,
+    /// Whether a raw row runs [`derive_intervals`]: see [`derives_intervals`].
+    derive: bool,
     /// Where the field each positional channel reads (x, y, x1, x2, y1, y2,
     /// z) sat in the last record, which the next record of the same shape
     /// shares: see [`Table::get_hinted`].
     slots: [std::cell::Cell<usize>; 7],
+}
+
+/// Whether [`derive_intervals`] on a mark's raw rows can change anything the
+/// pipeline reads. Skipping it changes no result in two cases:
+///
+/// - It writes nothing: the mark has no `interval` and is none of the kinds
+///   it grows an interval for.
+/// - The mark groups, names no interval channel, and runs none of the
+///   [`transforms_before_group`], which read or rewrite an interval. With no
+///   interval channel a raw row's ends start empty, and every derivation
+///   that fills one needs that axis's value to be non-null, so
+///   [`PreparedRow::x_value`] and [`PreparedRow::y_value`] — all a sort, the
+///   group keys and [`group_input`] read when no interval channel is named —
+///   return the value either way. [`collapse_groups`] then drops the raw
+///   rows' ends and derives each grouped row's afresh.
+fn derives_intervals(channels: &Channels, mark: &Mark) -> bool {
+    use MarkKind::*;
+    let writes = mark.interval.is_some()
+        || matches!(
+            mark.kind,
+            RuleX
+                | RuleY
+                | DifferenceX
+                | DifferenceY
+                | BarX
+                | BarY
+                | AreaX
+                | AreaY
+                | WaffleX
+                | WaffleY
+                | RectX
+                | RectY
+                | Cell
+        );
+    let grouped_away = mark.group.is_some()
+        && channels.x1.is_none()
+        && channels.x2.is_none()
+        && channels.y1.is_none()
+        && channels.y2.is_none()
+        && !transforms_before_group(mark);
+    writes && !grouped_away
+}
+
+/// Whether any transform between resolving a mark's rows and grouping them,
+/// besides its sort, applies: a window, a normalize (a `normalizeX`/`Y`
+/// normalizes before only an unbinned mark), an outlier filter or a select
+/// on an axis. Each reads or rewrites the rows' values and interval ends.
+fn transforms_before_group(mark: &Mark) -> bool {
+    mark.window.is_some()
+        || mark.normalize
+        || (mark.normalize_by.is_some() && mark.bin.is_none())
+        || mark.outliers.is_some()
+        || mark
+            .select
+            .as_ref()
+            .is_some_and(|config| config.axis.is_some())
 }
 
 impl RowFacts {
@@ -1294,12 +1389,15 @@ impl RowFacts {
             constant_symbol: channels.symbol.as_ref().and_then(constant_symbol),
             r_unscaled: channels.r.as_ref().is_some_and(|c| !c.is_scaled()),
             opacity_unscaled: channels.opacity.as_ref().is_some_and(|c| !c.is_scaled()),
+            derive: derives_intervals(channels, mark),
             slots: Default::default(),
         }
     }
 }
 
-#[inline]
+// Inlined into each loop that resolves rows, which then builds every row
+// where it lands rather than copying it out of a call.
+#[inline(always)]
 fn resolve_row(
     row: &Table,
     index: usize,
@@ -1331,7 +1429,9 @@ fn resolve_row(
     let mut x2 = (!x2.is_null()).then_some(x2);
     let mut y1 = (!y1.is_null()).then_some(y1);
     let mut y2 = (!y2.is_null()).then_some(y2);
-    derive_intervals(mark, &x, &y, &mut x1, &mut x2, &mut y1, &mut y2);
+    if facts.derive {
+        derive_intervals(mark, &x, &y, &mut x1, &mut x2, &mut y1, &mut y2);
+    }
 
     if facts.index_y {
         y = Value::Number(index as f64);
@@ -1701,8 +1801,12 @@ fn group_input(row: &PreparedRow, mark: &Mark, name: &str) -> Value {
 ///
 /// An output's `$in:<name>` input reads that channel of `bound`, the mark's
 /// channels before its outputs replaced them (see [`bound_input`]).
+///
+/// The rows arrive one at a time and only each group's first row is kept:
+/// the others leave the values their outputs read, so a mark whose raw rows
+/// nothing else reads can stream them in without collecting them first.
 fn collapse_groups(
-    rows: Vec<PreparedRow>,
+    rows: impl IntoIterator<Item = PreparedRow>,
     mark: &Mark,
     config: &crate::mark::GroupConfig,
     bound: &Channels,
@@ -1729,20 +1833,6 @@ fn collapse_groups(
             row.z.as_ref().map(Value::key).unwrap_or(none),
         )
     };
-    let total = rows.len().max(1) as f64;
-    // Each group's member indices, in first-appearance order, and members in
-    // row order.
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    let mut slots: rustc_hash::FxHashMap<_, usize> = Default::default();
-    for (index, row) in rows.iter().enumerate() {
-        match slots.entry(key(row)) {
-            std::collections::hash_map::Entry::Occupied(slot) => groups[*slot.get()].push(index),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(groups.len());
-                groups.push(vec![index]);
-            }
-        }
-    }
     // Plot's default output: a count into the channel the grouping leaves
     // free — y for groupX, x for groupY, fill for group and groupZ.
     let default_outputs;
@@ -1760,12 +1850,110 @@ fn collapse_groups(
     } else {
         &config.outputs
     };
-
+    // The inputs the outputs read, each once, with the bound channel a `$in:`
+    // input reads: a box's bar reads its q1 and q3 from one column. Each
+    // output's column, or none for a count or proportion, which read no
+    // value.
+    let mut inputs: Vec<(&str, Option<usize>)> = Vec::new();
+    let output_columns: Vec<Option<usize>> = outputs
+        .iter()
+        .map(|output| match output.reducer {
+            transform::GroupReducer::Proportion | transform::GroupReducer::Count => None,
+            _ => {
+                let name = output.input.as_deref().unwrap_or(&output.name);
+                Some(match inputs.iter().position(|(n, _)| *n == name) {
+                    Some(column) => column,
+                    None => {
+                        inputs.push((name, bound_slot(name)));
+                        inputs.len() - 1
+                    }
+                })
+            }
+        })
+        .collect();
     let needs_records = outputs.iter().any(|output| output.reducer.reads_records());
+
+    // One group: its first row, its size, the values each input reads from
+    // its members in row order, and the members' records when a reducer
+    // reads them.
+    struct Group {
+        first: PreparedRow,
+        len: usize,
+        columns: Vec<Vec<Value>>,
+        records: Vec<Table>,
+    }
+    // The groups in first-appearance order.
+    let mut groups: Vec<Group> = Vec::new();
+    let mut slots: rustc_hash::FxHashMap<_, usize> = Default::default();
+    // Whether a row has the same key as a group's first row, without building
+    // either key. Consecutive rows often share a group (a `groupZ` without a
+    // `z` puts every row in one), and comparing values is cheaper than
+    // hashing their keys. Equal values have equal keys (a key only forgets a
+    // date's sub-millisecond part), so a match is the group the map would
+    // find; a mismatch asks the map.
+    let same_group = |row: &PreparedRow, first: &PreparedRow| {
+        (!by_x || row.x_value() == first.x_value())
+            && (!by_y || row.y_value() == first.y_value())
+            && row.z == first.z
+    };
+    // The group of the last row.
+    let mut last: Option<usize> = None;
+    let mut total = 0usize;
+    // Internal iteration hands each resolved row to the body where it was
+    // built, rather than moving it out through `next`.
+    rows.into_iter().for_each(|row| {
+        total += 1;
+        let read = |&(name, input_slot): &(&str, Option<usize>)| match input_slot {
+            // A `$in:` input reads the mark's own channel.
+            Some(channel) => bound_input(bound, channel, name, &row.row),
+            None => group_input(&row, mark, name),
+        };
+        let found = match last {
+            Some(slot) if same_group(&row, &groups[slot].first) => Some(slot),
+            _ => slots.get(&key(&row)).copied(),
+        };
+        match found {
+            Some(slot) => {
+                let group = &mut groups[slot];
+                group.len += 1;
+                for (column, input) in group.columns.iter_mut().zip(&inputs) {
+                    column.push(read(input));
+                }
+                if needs_records {
+                    group.records.push(row.row.clone());
+                }
+                last = Some(slot);
+            }
+            None => {
+                let slot = groups.len();
+                slots.insert(key(&row), slot);
+                last = Some(slot);
+                let columns = inputs.iter().map(|input| vec![read(input)]).collect();
+                let records = if needs_records {
+                    vec![row.row.clone()]
+                } else {
+                    Vec::new()
+                };
+                groups.push(Group {
+                    first: row,
+                    len: 1,
+                    columns,
+                    records,
+                });
+            }
+        }
+    });
+    let total = total.max(1) as f64;
+
     groups
         .into_iter()
-        .map(|members| {
-            let first = rows[members[0]].clone();
+        .map(|group| {
+            let Group {
+                first,
+                len,
+                columns,
+                records,
+            } = group;
             let mut grouped = PreparedRow {
                 x: if by_x {
                     first.x_value().clone()
@@ -1783,43 +1971,22 @@ fn collapse_groups(
                 y2: None,
                 ..first
             };
-            let records: Vec<&Table> = if needs_records {
-                members.iter().map(|&index| &rows[index].row).collect()
-            } else {
-                Vec::new()
-            };
-            // The values an input reads, per input name: a box's bar reads
-            // its q1 and q3 from one column.
-            let mut columns: Vec<(&str, Vec<Value>)> = Vec::new();
-            for output in outputs {
-                let reduced = match output.reducer {
+            let records: Vec<&Table> = records.iter().collect();
+            // Each column's order, which its outputs share: a box's quartiles
+            // and whiskers gather the column's numbers once and select each
+            // quartile once.
+            let mut order: Vec<transform::OrderStatistics> =
+                columns.iter().map(|_| Default::default()).collect();
+            for (output, column) in outputs.iter().zip(&output_columns) {
+                let reduced = match (column, &output.reducer) {
                     // Plot's `proportion`: the group's share of every row.
-                    transform::GroupReducer::Proportion => {
-                        Value::Number(members.len() as f64 / total)
+                    (None, transform::GroupReducer::Proportion) => {
+                        Value::Number(len as f64 / total)
                     }
                     // A count counts every member, null or not.
-                    transform::GroupReducer::Count => Value::Number(members.len() as f64),
-                    _ => {
-                        let name = output.input.as_deref().unwrap_or(&output.name);
-                        let slot = match columns.iter().position(|(n, _)| *n == name) {
-                            Some(slot) => slot,
-                            None => {
-                                // A `$in:` input reads the mark's own channel.
-                                let input_slot = bound_slot(name);
-                                let values = members
-                                    .iter()
-                                    .map(|&index| match input_slot {
-                                        Some(channel) => {
-                                            bound_input(bound, channel, name, &rows[index].row)
-                                        }
-                                        None => group_input(&rows[index], mark, name),
-                                    })
-                                    .collect();
-                                columns.push((name, values));
-                                columns.len() - 1
-                            }
-                        };
-                        output.reducer.reduce(&columns[slot].1, &records)
+                    (None, _) => Value::Number(len as f64),
+                    (Some(column), reducer) => {
+                        reducer.reduce_with(&columns[*column], &mut order[*column], &records)
                     }
                 };
                 match &*output.name {
@@ -4020,6 +4187,355 @@ mod equivalence_tests {
                 .collect();
             let want: Vec<f64> = expected.iter().map(|r| r.num("n")).collect();
             assert_eq!(got, want, "{field:?} {descending} {reverse}");
+        }
+    }
+
+    /// The kinds [`derive_intervals`] writes for, and two that only an
+    /// interval makes it write for.
+    fn deriving_marks() -> Vec<Mark> {
+        use MarkKind::*;
+        let mut marks: Vec<Mark> = [
+            RuleX,
+            RuleY,
+            DifferenceX,
+            DifferenceY,
+            BarX,
+            BarY,
+            AreaX,
+            AreaY,
+            WaffleX,
+            WaffleY,
+            RectX,
+            RectY,
+            Cell,
+        ]
+        .into_iter()
+        .map(Mark::new)
+        .collect();
+        marks.push(Mark::new(Rect).interval(crate::mark::Interval::Step(2.)));
+        marks.push(Mark::new(Dot).interval(crate::mark::Interval::Step(2.)));
+        marks
+    }
+
+    #[test]
+    fn deriving_on_a_raw_row_never_changes_the_value_it_reads() {
+        // With no interval channel, every derivation that fills an end needs
+        // that axis's value, so `x_value` and `y_value` read the same either
+        // way: what lets a grouped mark skip it.
+        let values = [
+            Value::Null,
+            Value::Number(-0.),
+            Value::Number(3.),
+            Value::Number(f64::NAN),
+            Value::text("a"),
+            Value::date_from_millis(86_400_000),
+            Value::Bool(true),
+        ];
+        for mark in deriving_marks() {
+            for x in &values {
+                for y in &values {
+                    let row = PreparedRow {
+                        row: Table::empty(),
+                        index: 0,
+                        x: x.clone(),
+                        y: y.clone(),
+                        x1: None,
+                        x2: None,
+                        y1: None,
+                        y2: None,
+                        z: None,
+                        path: None,
+                        r: None,
+                        symbol: None,
+                        opacity: None,
+                        r_value: None,
+                        opacity_value: None,
+                        dodge_offset: None,
+                        pixel: None,
+                    };
+                    let mut derived = row.clone();
+                    derive_intervals(
+                        &mark,
+                        &derived.x,
+                        &derived.y,
+                        &mut derived.x1,
+                        &mut derived.x2,
+                        &mut derived.y1,
+                        &mut derived.y2,
+                    );
+                    assert!(x.is_null() <= (derived.x1.is_none() && derived.x2.is_none()));
+                    assert!(y.is_null() <= (derived.y1.is_none() && derived.y2.is_none()));
+                    assert_eq!(
+                        derived.x_value().key(),
+                        row.x_value().key(),
+                        "{:?}",
+                        mark.kind
+                    );
+                    assert_eq!(
+                        derived.y_value().key(),
+                        row.y_value().key(),
+                        "{:?}",
+                        mark.kind
+                    );
+                }
+            }
+        }
+    }
+
+    /// A grouped mark's rows, resolved with or without [`derive_intervals`]
+    /// on the raw rows, then grouped: what [`prepare_mark`] does for a mark
+    /// that streams its rows into the grouping.
+    fn grouped_rows(data: &Dataset, mark: &Mark, derive: bool) -> String {
+        let mut facts = RowFacts::new(&mark.channels, mark);
+        facts.derive = derive;
+        let rows = data
+            .rows()
+            .iter()
+            .enumerate()
+            .map(|(index, row)| resolve_row(row, index, &mark.channels, mark, &facts));
+        let grouped = collapse_groups(rows, mark, mark.group.as_ref().unwrap(), &mark.channels);
+        format!("{grouped:?}")
+    }
+
+    #[test]
+    fn a_grouped_mark_s_raw_rows_need_no_intervals() {
+        let rows = records();
+        let data = Dataset::new(rows.clone());
+        let mut checked = 0;
+        for base in deriving_marks() {
+            for group in 0..3 {
+                let mark = base.clone().x("c").y("v").fill("g");
+                let mut mark = match group {
+                    0 => mark.group_x(),
+                    1 => mark.group_y(),
+                    _ => mark.group_z(),
+                };
+                // Every input a grouping reads from the resolved row, and a
+                // field from the record.
+                let config = mark.group.as_mut().unwrap();
+                for (name, input) in [
+                    ("x", "x"),
+                    ("y", "y"),
+                    ("x1", "x1"),
+                    ("x2", "x2"),
+                    ("y1", "y1"),
+                    ("y2", "y2"),
+                    ("z", "z"),
+                    ("w", "w"),
+                ] {
+                    config
+                        .outputs
+                        .push(GroupOutput::new(name, GroupReducer::First).input(input));
+                }
+                config
+                    .outputs
+                    .push(GroupOutput::new("lo", GroupReducer::Min).input("y"));
+                assert!(!derives_intervals(&mark.channels, &mark), "{:?}", mark.kind);
+                assert_eq!(
+                    grouped_rows(&data, &mark, true),
+                    grouped_rows(&data, &mark, false),
+                    "{:?} {group}",
+                    mark.kind
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 45);
+        // An interval channel, or a transform before the grouping, keeps the
+        // derivation.
+        let grouped = Mark::new(MarkKind::BarY).x("c").y("v").group_x();
+        assert!(derives_intervals(
+            &grouped.clone().y2("w").channels,
+            &grouped.clone().y2("w")
+        ));
+        let mut windowed = grouped.clone();
+        windowed.window = Some((3, crate::transform::WindowReducer::Mean, Anchor::Middle));
+        assert!(derives_intervals(&windowed.channels, &windowed));
+        let mut outliers = grouped.clone();
+        outliers.outliers = Some(Axis::Y);
+        assert!(derives_intervals(&outliers.channels, &outliers));
+        let mut normalized = grouped.clone();
+        normalized.normalize = true;
+        assert!(derives_intervals(&normalized.channels, &normalized));
+        // A kind it writes nothing for skips it without grouping.
+        assert!(!derives_intervals(
+            &Mark::new(MarkKind::Dot).x("c").channels,
+            &Mark::new(MarkKind::Dot).x("c")
+        ));
+    }
+
+    /// Records whose group keys come in runs, where the grouping compares a
+    /// row with the last group's first row: `-0` after `+0`, NaNs, two dates
+    /// in one millisecond (equal keys, unequal values), nulls and text.
+    fn runs() -> Vec<Table> {
+        let within_a_millisecond = |nanos: u32| {
+            Value::Date(chrono::DateTime::from_timestamp(1_000, nanos).expect("a valid instant"))
+        };
+        let keys = [
+            Value::Number(0.),
+            Value::Number(-0.),
+            Value::Number(f64::NAN),
+            Value::Number(f64::NAN),
+            within_a_millisecond(100),
+            within_a_millisecond(200_000),
+            Value::Null,
+            Value::text("a"),
+            Value::text("a"),
+            Value::Number(1.),
+            Value::Number(0.),
+            within_a_millisecond(300_000),
+            Value::text("b"),
+            Value::Null,
+        ];
+        (0..keys.len() * 3)
+            .map(|i| {
+                Table::new([
+                    ("c", keys[(i / 3) % keys.len()].clone()),
+                    ("z", Value::text(["p", "q"][(i / 7) % 2])),
+                    ("v", Value::Number(((i * 37) % 23) as f64)),
+                    ("n", Value::Number(i as f64)),
+                ])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn runs_of_equal_keys_group_as_the_keys_do() {
+        let rows = runs();
+        let refs: Vec<&Table> = rows.iter().collect();
+        for with_z in [false, true] {
+            let mut mark = Mark::new(MarkKind::Dot)
+                .x(|row: &Table| row.value("c"))
+                .group_x()
+                .group_output("total", GroupReducer::Sum);
+            mark.group.as_mut().unwrap().outputs[0].input = Some("v".into());
+            if with_z {
+                mark.channels.z = Some(Channel::from("z"));
+            }
+            let prepared = &prepare(&Dataset::new(rows.clone()), &[mark])[0];
+            // The groups by first appearance of each (category, series) key.
+            let mut keyed: Vec<((ValueKey, ValueKey), Vec<usize>)> = Vec::new();
+            for (i, row) in refs.iter().enumerate() {
+                let z = if with_z {
+                    row.value("z").key()
+                } else {
+                    Value::Null.key()
+                };
+                let key = (row.value("c").key(), z);
+                match keyed.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, members)) => members.push(i),
+                    None => keyed.push((key, vec![i])),
+                }
+            }
+            let groups: Vec<Vec<usize>> = keyed.into_iter().map(|(_, m)| m).collect();
+            assert_eq!(prepared.rows.len(), groups.len(), "z: {with_z}");
+            for (row, members) in prepared.rows.iter().zip(&groups) {
+                assert_eq!(row.x.key(), rows[members[0]].value("c").key());
+                let total: f64 = members.iter().map(|&i| rows[i].num("v")).sum();
+                assert_eq!(row.row.number("total"), Some(total));
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_and_collected_groupings_agree() {
+        // A sort by the row index keeps the order but collects the rows
+        // before grouping them, so the two paths must agree exactly.
+        for rows in [records(), runs()] {
+            let data = Dataset::new(rows);
+            for base in [
+                Mark::new(MarkKind::BarY).x("c").y("v").group_x(),
+                Mark::new(MarkKind::RuleX).x("c").y("v").fill("g").group_x(),
+                Mark::new(MarkKind::Dot).x("c").y("v").group_z(),
+            ] {
+                let mut mark = base
+                    .group_output("y1", GroupReducer::Quantile(0.25))
+                    .group_output("y2", GroupReducer::WhiskerHigh)
+                    .group_output("found", GroupReducer::find(|row| row.num("n") > 4.))
+                    .group_output("share", GroupReducer::Proportion);
+                for output in mark.group.as_mut().unwrap().outputs.iter_mut() {
+                    output.input = Some("v".into());
+                }
+                let streamed = prepare(&data, std::slice::from_ref(&mark));
+                let collected = prepare(&data, &[mark.clone().sort("n", false)]);
+                assert_eq!(
+                    format!("{:?}", streamed[0].rows),
+                    format!("{:?}", collected[0].rows),
+                    "{:?}",
+                    mark.kind
+                );
+            }
+        }
+    }
+
+    /// Plot's box outliers as they were read before the single pass: each
+    /// `z` group's whiskers, then every row tested against its group's.
+    fn naive_outliers(rows: &[PreparedRow], axis: Axis) -> Vec<usize> {
+        let read = |row: &PreparedRow| {
+            if axis == Axis::X {
+                row.x_value().clone()
+            } else {
+                row.y_value().clone()
+            }
+        };
+        let key = |row: &PreparedRow| row.z.as_ref().map(Value::key).unwrap_or(Value::Null.key());
+        let mut groups: Vec<(ValueKey, Vec<Value>)> = Vec::new();
+        for row in rows {
+            match groups.iter_mut().find(|(k, _)| *k == key(row)) {
+                Some((_, values)) => values.push(read(row)),
+                None => groups.push((key(row), vec![read(row)])),
+            }
+        }
+        let bounds: Vec<(ValueKey, f64, f64)> = groups
+            .into_iter()
+            .map(|(k, values)| {
+                let lo = crate::mark::whisker_low(&values).as_number();
+                let hi = crate::mark::whisker_high(&values).as_number();
+                (
+                    k,
+                    lo.unwrap_or(f64::NEG_INFINITY),
+                    hi.unwrap_or(f64::INFINITY),
+                )
+            })
+            .collect();
+        rows.iter()
+            .filter(|row| {
+                let Some(v) = read(row).as_number() else {
+                    return false;
+                };
+                bounds
+                    .iter()
+                    .find(|(k, _, _)| *k == key(row))
+                    .is_some_and(|(_, lo, hi)| v < *lo || v > *hi)
+            })
+            .map(|row| row.index)
+            .collect()
+    }
+
+    #[test]
+    fn outliers_keep_the_rows_beyond_their_group_s_whiskers() {
+        // Spread values with a few far ones, so each group has outliers.
+        let mut rows = records();
+        rows.extend(runs());
+        for (i, row) in rows.iter_mut().enumerate() {
+            if i % 11 == 0 {
+                row.set("v", Value::Number(if i % 2 == 0 { 400. } else { -400. }));
+            }
+        }
+        let data = Dataset::new(rows);
+        for (axis, mark) in [
+            (Axis::Y, Mark::new(MarkKind::Dot).x("c").y("v").z("c")),
+            (Axis::Y, Mark::new(MarkKind::Dot).x("c").y("v").z("g")),
+            (Axis::X, Mark::new(MarkKind::Dot).y("c").x("v")),
+        ] {
+            let plain = &prepare(&data, std::slice::from_ref(&mark))[0];
+            let expected = naive_outliers(&plain.rows, axis);
+            assert!(!expected.is_empty());
+            let mut filtered = mark.clone();
+            filtered.outliers = Some(axis);
+            let kept = &prepare(&data, &[filtered])[0];
+            let got: Vec<usize> = kept.rows.iter().map(|row| row.index).collect();
+            assert_eq!(got, expected, "{axis:?}");
         }
     }
 }

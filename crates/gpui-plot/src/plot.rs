@@ -411,15 +411,18 @@ impl Plot {
     /// any faceted rows.
     fn prepare_marks(&self) -> (Grid, Vec<Vec<PreparedMark>>, Vec<bool>) {
         let bucketed = self.interval_marks();
-        let grid = self.facet_grid_with(bucketed.as_deref());
+        // The facet channels the grid reads, which the partitions then reuse.
+        let mut reads = crate::facet::FacetReads::default();
+        let grid = self.facet_grid_reading(bucketed.as_deref(), Some(&mut reads));
         let marks = bucketed.as_deref().unwrap_or(&self.marks);
         let resolved = self.resolve_facet_axes(marks, &grid);
-        let (mut facets, populated) = render::prepare_facets(
+        let (mut facets, populated) = render::prepare_facets_reading(
             &self.data,
             resolved.as_deref().unwrap_or(marks),
             &grid,
             self.fx.as_deref(),
             self.fy.as_deref(),
+            &reads,
         );
         self.apply_scale_transforms(&mut facets);
         (grid, facets, populated)
@@ -1904,6 +1907,16 @@ impl Plot {
     /// [`Plot::facet_grid`] given the plot's [`Plot::interval_marks`], so a
     /// caller that already has them doesn't compute them twice.
     fn facet_grid_with(&self, bucketed: Option<&[Mark]>) -> Grid {
+        self.facet_grid_reading(bucketed, None)
+    }
+
+    /// [`Plot::facet_grid_with`], keeping the values each mark's facet
+    /// channels read in `reads`, when given, for the facet partitions.
+    fn facet_grid_reading(
+        &self,
+        bucketed: Option<&[Mark]>,
+        mut reads: Option<&mut crate::facet::FacetReads>,
+    ) -> Grid {
         // The domains are every facet value a mark could draw: the plot's
         // `fx`/`fy` over its data, and each mark's own facet channels over
         // the mark's data. Only each key's first value is kept, since the
@@ -1918,6 +1931,14 @@ impl Plot {
             fn push(&mut self, value: Value) {
                 if self.seen.insert(value.key()) {
                     self.values.push(value);
+                }
+            }
+            /// [`Distinct::push`] for a borrowed value, cloned only when it
+            /// is new. A value equal to the last one kept has that one's key,
+            /// already seen, so it is skipped without hashing.
+            fn push_ref(&mut self, value: &Value) {
+                if self.values.last() != Some(value) && self.seen.insert(value.key()) {
+                    self.values.push(value.clone());
                 }
             }
         }
@@ -1949,9 +1970,16 @@ impl Plot {
                     continue;
                 }
                 read.push((x, data, channel));
-                data.rows()
-                    .iter()
-                    .for_each(|row| values.push(channel.read(row)));
+                match reads.as_deref_mut() {
+                    Some(reads) => reads
+                        .read(data, channel)
+                        .iter()
+                        .for_each(|value| values.push_ref(value)),
+                    None => data
+                        .rows()
+                        .iter()
+                        .for_each(|row| values.push(channel.read(row))),
+                }
             }
         }
         let (mut fx, mut fy) = (fx.values, fy.values);
@@ -4925,5 +4953,75 @@ mod tests {
         let grid = plot.facet_grid();
         assert_eq!(grid.fx_labels(), vec!["0", "10", "20"]);
         assert_eq!(grid.fy.as_ref().map(Vec::len), Some(8));
+    }
+
+    #[test]
+    fn a_grid_that_keeps_its_reads_is_the_grid_and_partitions_alike() {
+        // Facet keys in runs, where the grid skips a value equal to the last
+        // one kept: -0 after +0, NaNs (an accessor keeps them), null, text
+        // and two dates in one millisecond.
+        let instant = |nanos: u32| {
+            Value::Date(chrono::DateTime::from_timestamp(5, nanos).expect("a valid instant"))
+        };
+        let keys = [
+            Value::Number(0.),
+            Value::Number(-0.),
+            Value::Number(f64::NAN),
+            Value::Null,
+            Value::text("a"),
+            Value::text("a"),
+            instant(100),
+            instant(200_000),
+            Value::Number(0.),
+            Value::Bool(true),
+        ];
+        let data: Vec<Table> = (0..60)
+            .map(|i| {
+                Table::new([
+                    ("k", keys[(i / 2) % keys.len()].clone()),
+                    ("j", keys[(i / 5) % keys.len()].clone()),
+                    ("v", Value::Number(i as f64)),
+                ])
+            })
+            .collect();
+        let accessor = |field: &'static str| {
+            crate::table::Channel::Accessor(Rc::new(move |row: &Table| row.value(field)))
+        };
+        let (k, j) = (accessor("k"), accessor("j"));
+        let plots = [
+            Plot::new(data.clone())
+                .mark(Mark::new(MarkKind::Dot).x("v").fx(k.clone()))
+                .mark(Mark::new(MarkKind::Dot).x("v").fx(k.clone()).fy(j.clone())),
+            Plot::new(data.clone())
+                .mark(Mark::new(MarkKind::Dot).x("v").fx("k").fy("j"))
+                .mark(Mark::new(MarkKind::Dot).x("v").fy("k")),
+            Plot::new(data.clone())
+                .fx("j")
+                .fx_scale(|s| s.interval(crate::mark::Interval::Step(10.)))
+                .mark(Mark::new(MarkKind::Dot).x("v").fx("v"))
+                .mark(Mark::new(MarkKind::Dot).x("v")),
+        ];
+        for plot in plots {
+            let bucketed = plot.interval_marks();
+            let mut reads = crate::facet::FacetReads::default();
+            let kept = plot.facet_grid_reading(bucketed.as_deref(), Some(&mut reads));
+            let plain = plot.facet_grid_with(bucketed.as_deref());
+            assert_eq!(kept.cells, plain.cells);
+            assert_eq!(kept.fx, plain.fx);
+            assert_eq!(kept.fy, plain.fy);
+            let marks = bucketed.as_deref().unwrap_or(&plot.marks);
+            let (with_reads, populated) = render::prepare_facets_reading(
+                &plot.data,
+                marks,
+                &plain,
+                plot.fx.as_deref(),
+                None,
+                &reads,
+            );
+            let (without, populated_without) =
+                render::prepare_facets(&plot.data, marks, &plain, plot.fx.as_deref(), None);
+            assert_eq!(populated, populated_without);
+            assert_eq!(format!("{with_reads:?}"), format!("{without:?}"));
+        }
     }
 }
