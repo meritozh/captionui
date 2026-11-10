@@ -3688,10 +3688,11 @@ pub fn draw_contour_grid(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         )))
     };
     // A grid's rings at a threshold are the same on every repaint: the last
-    // few grids' rings are kept, each entry holding its grid so the address
-    // it is found by can't be reused while it lives.
+    // few grids' rings are kept. Each entry holds its grid weakly, which
+    // keeps the address it is found by from being reused without keeping
+    // the grid's cells alive; an entry whose grid is gone is dropped.
     type Rings = std::rc::Rc<Vec<Vec<[f64; 2]>>>;
-    type Entry = (std::rc::Rc<crate::raster::RasterGrid>, u64, Rings);
+    type Entry = (std::rc::Weak<crate::raster::RasterGrid>, u64, Rings);
     thread_local! {
         static CONTOURS: std::cell::RefCell<Vec<Entry>> =
             const { std::cell::RefCell::new(Vec::new()) };
@@ -3700,14 +3701,17 @@ pub fn draw_contour_grid(prepared: &PreparedMark, ctx: &mut DrawContext<'_>) {
         let bits = threshold.to_bits();
         if let Some(rings) = CONTOURS.with_borrow(|kept| {
             kept.iter()
-                .find(|(g, t, _)| *t == bits && std::rc::Rc::ptr_eq(g, &grid))
+                .find(|(g, t, _)| {
+                    *t == bits && std::ptr::eq(g.as_ptr(), std::rc::Rc::as_ptr(&grid))
+                })
                 .map(|(_, _, rings)| rings.clone())
         }) {
             return rings;
         }
         let rings = std::rc::Rc::new(grid.contour(threshold));
         CONTOURS.with_borrow_mut(|kept| {
-            kept.insert(0, (grid.clone(), bits, rings.clone()));
+            kept.retain(|(g, _, _)| g.strong_count() > 0);
+            kept.insert(0, (std::rc::Rc::downgrade(&grid), bits, rings.clone()));
             kept.truncate(64);
         });
         rings
