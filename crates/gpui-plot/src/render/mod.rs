@@ -490,12 +490,13 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // field is quantitative (numbers or dates), so a continuous fill colors
     // rows without splitting them into series.
     let dropped_z;
+    let z_hint = std::cell::Cell::new(0);
     let channels = if mark.implied_z
         && let Some(z) = &channels.z
         && source
             .rows()
             .iter()
-            .map(|row| z.read(row))
+            .map(|row| z.read_hinted(row, &z_hint))
             .find(|v| !v.is_null())
             .is_some_and(|v| v.kind().is_quantitative())
     {
@@ -573,9 +574,12 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
         rows = reduce_rows(rows, mark, reducer);
     }
 
-    // Binning replaces the rows with one row per bin.
+    // Binning replaces the rows with one row per bin. Unless a transform
+    // above rewrote them, the rows' x and y are still what their channels
+    // read.
     if mark.bin.is_some() {
-        rows = bin_rows(mark, &rows, bound_channels);
+        let resolved = mark.group.is_none() && !transforms_before_group(mark);
+        rows = bin_rows(mark, &rows, bound_channels, resolved);
         if let Some((axis, basis)) = mark.normalize_by {
             stack::normalize(&mut rows, axis, basis);
         }
@@ -950,8 +954,10 @@ pub fn apply_hexbin(facets: &mut [Vec<PreparedMark>], frame: &Frame) {
         };
         let dx = width as f64;
         let dy = dx * 1.5 / 3f64.sqrt();
-        type Bins = Vec<((Option<crate::value::ValueKey>, i64, i64), Vec<usize>)>;
-        let mut bins: Bins = Vec::new();
+        type BinKey = (Option<crate::value::ValueKey>, i64, i64);
+        // The bins by first appearance, each with its rows in row order.
+        let mut bins: Vec<(BinKey, Vec<usize>)> = Vec::new();
+        let mut slots: rustc_hash::FxHashMap<BinKey, usize> = Default::default();
         for (index, row) in prepared.rows.iter().enumerate() {
             let Some(p) = crate::render::basic::position_in(prepared, frame, row) else {
                 continue;
@@ -976,9 +982,12 @@ pub fn apply_hexbin(facets: &mut [Vec<PreparedMark>], frame: &Frame) {
             }
             let _ = (&mut px, &mut py);
             let key = (row.z.as_ref().map(Value::key), (pi * 2.) as i64, pj as i64);
-            match bins.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, members)) => members.push(index),
-                None => bins.push((key, vec![index])),
+            match slots.get(&key) {
+                Some(&slot) => bins[slot].1.push(index),
+                None => {
+                    slots.insert(key.clone(), bins.len());
+                    bins.push((key, vec![index]));
+                }
             }
         }
         let mark = prepared.mark.clone();
@@ -2495,23 +2504,45 @@ type BinCells = std::collections::BTreeMap<(usize, usize), Vec<usize>>;
 ///
 /// An output's `$in:<name>` input reads that channel of `bound`, as a
 /// group's does.
-fn bin_rows(mark: &Mark, rows: &[PreparedRow], bound: &Channels) -> Vec<PreparedRow> {
+///
+/// `resolved` says the rows' `x` and `y` are still what the mark's `x` and
+/// `y` channels read from their records, which no transform has rewritten.
+fn bin_rows(
+    mark: &Mark,
+    rows: &[PreparedRow],
+    bound: &Channels,
+    resolved: bool,
+) -> Vec<PreparedRow> {
     let Some(bin) = &mark.bin else {
         return rows.to_vec();
     };
     let (bin_x, bin_y) = bin_axes(mark);
     let (x_channel, y_channel) = bin_channels(mark);
     // Each bin channel's number per row, read once for both the edges and
-    // the slots.
-    let numbers = |channel: Option<&crate::table::Channel>| {
+    // the slots. A field the rows already resolved as their own position
+    // (`own`) is read from the row rather than its record: the same value,
+    // without a second lookup.
+    let numbers = |channel: Option<&crate::table::Channel>,
+                   own: Option<&crate::table::Channel>,
+                   along_x: bool| {
         channel.map(|channel| {
+            let field = matches!(channel, crate::table::Channel::Field(_));
+            if resolved && field && own.is_some_and(|own| std::ptr::eq(own, channel)) {
+                return rows
+                    .iter()
+                    .map(|row| if along_x { &row.x } else { &row.y }.as_number())
+                    .collect::<Vec<_>>();
+            }
             let hint = std::cell::Cell::new(0);
             rows.iter()
                 .map(|row| channel.read_hinted(&row.row, &hint).as_number())
                 .collect::<Vec<_>>()
         })
     };
-    let (xs, ys) = (numbers(x_channel), numbers(y_channel));
+    let (xs, ys) = (
+        numbers(x_channel, mark.channels.x.as_ref(), true),
+        numbers(y_channel, mark.channels.y.as_ref(), false),
+    );
     let (x_edges, y_edges) = bin_edges_of(mark, xs.as_deref(), ys.as_deref());
     if (bin_x && x_edges.is_none()) || (bin_y && y_edges.is_none()) {
         return Vec::new();
@@ -4537,5 +4568,101 @@ mod equivalence_tests {
             let got: Vec<usize> = kept.rows.iter().map(|row| row.index).collect();
             assert_eq!(got, expected, "{axis:?}");
         }
+    }
+
+    /// A bin reads the same numbers from its rows' resolved positions as
+    /// from their records, for each way it picks its channels: both axes,
+    /// one axis, the other axis's channel standing in (a `rectY` with only
+    /// a `y`), an accessor, and values that are text, null, NaN, -0, dates
+    /// and booleans.
+    #[test]
+    fn bins_read_resolved_positions_as_their_records() {
+        let mut data = records();
+        for (i, row) in data.iter_mut().enumerate() {
+            let when = chrono::DateTime::from_timestamp_millis(i as i64 * 86_400_000 * 3);
+            row.set("t", when.map_or(Value::Null, Value::Date));
+            if i % 5 == 0 {
+                row.set("n", Value::Number(-0.));
+            }
+        }
+        let bin = |mark: Mark| mark.bin(Thresholds::Count(6));
+        let marks = [
+            bin(Mark::new(MarkKind::Dot).x("v").y("n")).bin_output("r", GroupReducer::Count),
+            bin(Mark::new(MarkKind::Rect).x("n").y("v").z("g"))
+                .bin_output("fill", GroupReducer::Count),
+            bin(Mark::new(MarkKind::RectY).x("n")).bin_output("y", GroupReducer::Sum),
+            bin(Mark::new(MarkKind::RectY).y("n")),
+            bin(Mark::new(MarkKind::RectX).y("t").x("w")).bin_output("x", GroupReducer::Mean),
+            bin(Mark::new(MarkKind::Dot).y("c")),
+            bin(Mark::new(MarkKind::Dot).x("c").y("n")),
+            bin(Mark::new(MarkKind::Dot)
+                .x(|row: &Table| row.value("v"))
+                .y("w")),
+            bin(Mark::new(MarkKind::BarY).x("v").fill("f")).bin_cumulative(1),
+        ];
+        for mark in marks {
+            let facts = RowFacts::new(&mark.channels, &mark);
+            let rows: Vec<PreparedRow> = data
+                .iter()
+                .enumerate()
+                .map(|(i, row)| resolve_row(row, i, &mark.channels, &mark, &facts))
+                .collect();
+            let from_rows = bin_rows(&mark, &rows, &mark.channels, true);
+            let from_records = bin_rows(&mark, &rows, &mark.channels, false);
+            assert!(!from_records.is_empty(), "{:?}", mark.kind);
+            assert_eq!(
+                format!("{from_rows:?}"),
+                format!("{from_records:?}"),
+                "{:?}",
+                mark.kind
+            );
+        }
+    }
+
+    /// A hexbin's bins, hashed on their series and cell, are the bins a
+    /// linear search by equality finds: the keys that compare equal (-0 and
+    /// +0, every NaN) hash alike, and the bins keep their first appearance.
+    #[test]
+    fn hashed_bin_keys_group_as_equality_does() {
+        let zs = [
+            None,
+            Some(Value::Number(0.)),
+            Some(Value::Number(-0.)),
+            Some(Value::Number(f64::NAN)),
+            Some(Value::Number(-f64::NAN)),
+            Some(Value::Number(f64::from_bits(0x7ff8_0000_0000_0001))),
+            Some(Value::Null),
+            Some(Value::text("a")),
+            Some(Value::text("a")),
+            Some(Value::Bool(false)),
+            Some(Value::Number(1.)),
+        ];
+        type Key = (Option<ValueKey>, i64, i64);
+        let keys: Vec<Key> = (0..400)
+            .map(|i: i64| {
+                let z = zs[(i as usize * 7) % zs.len()].as_ref().map(Value::key);
+                (z, (i * 13) % 5 - 2, (i * 3) % 4)
+            })
+            .collect();
+        let mut naive: Vec<(Key, Vec<usize>)> = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            match naive.iter_mut().find(|(k, _)| k == key) {
+                Some((_, members)) => members.push(i),
+                None => naive.push((key.clone(), vec![i])),
+            }
+        }
+        let mut hashed: Vec<(Key, Vec<usize>)> = Vec::new();
+        let mut slots: rustc_hash::FxHashMap<Key, usize> = Default::default();
+        for (i, key) in keys.iter().enumerate() {
+            match slots.get(key) {
+                Some(&slot) => hashed[slot].1.push(i),
+                None => {
+                    slots.insert(key.clone(), hashed.len());
+                    hashed.push((key.clone(), vec![i]));
+                }
+            }
+        }
+        assert!(naive.len() > 20);
+        assert_eq!(hashed, naive);
     }
 }

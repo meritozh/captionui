@@ -10,6 +10,7 @@
 use crate::mark::{Axis, Mark, MarkKind};
 use crate::render::PreparedRow;
 use crate::value::{Value, ValueKey};
+use rustc_hash::FxHashMap;
 
 /// Which value a stack outputs as the row's position, Plot's `stackY`,
 /// `stackY1` and `stackY2`.
@@ -200,114 +201,121 @@ pub fn stack(rows: &mut [PreparedRow], spec: &StackSpec) {
             row.y_value().key()
         }
     };
+    let values: Vec<f64> = rows.iter().map(value_of).collect();
 
-    // The series order.
+    // The series in first-appearance order, and each row's series.
     let mut series: Vec<ValueKey> = Vec::new();
-    for row in rows.iter() {
-        let key = row
-            .z
-            .as_ref()
-            .map(Value::key)
-            .unwrap_or_else(|| Value::Null.key());
-        if !series.contains(&key) {
-            series.push(key);
+    let mut series_slots: FxHashMap<ValueKey, usize> = FxHashMap::default();
+    let row_series: Vec<usize> = rows
+        .iter()
+        .map(|row| {
+            let key = row
+                .z
+                .as_ref()
+                .map(Value::key)
+                .unwrap_or_else(|| Value::Null.key());
+            match series_slots.get(&key) {
+                Some(&slot) => slot,
+                None => {
+                    series_slots.insert(key.clone(), series.len());
+                    series.push(key);
+                    series.len() - 1
+                }
+            }
+        })
+        .collect();
+    // Each series' total, its finite values summed in row order (from the
+    // float sum's own zero, so an all `-0` series totals what `sum` gives).
+    let totals = || -> Vec<f64> {
+        let mut totals = vec![std::iter::empty::<f64>().sum::<f64>(); series.len()];
+        for (&slot, &v) in row_series.iter().zip(&values) {
+            if v.is_finite() {
+                totals[slot] += v;
+            }
         }
-    }
-    let total = |key: &ValueKey| -> f64 {
-        rows.iter()
-            .filter(|row| {
-                row.z
-                    .as_ref()
-                    .map(Value::key)
-                    .unwrap_or_else(|| Value::Null.key())
-                    == *key
-            })
-            .map(value_of)
-            .filter(|v| v.is_finite())
-            .sum()
+        totals
     };
+
+    // The series order, as slots into `series`. Each key below is computed
+    // once per series; the sorts are stable, so ties keep appearance order.
+    let mut order: Vec<usize> = (0..series.len()).collect();
     match &spec.order {
         StackOrder::Input => {}
-        StackOrder::Z => series.sort(),
+        StackOrder::Z => order.sort_by(|a, b| series[*a].cmp(&series[*b])),
         StackOrder::Value | StackOrder::Sum => {
-            series.sort_by(|a, b| total(a).total_cmp(&total(b)));
+            let totals = totals();
+            order.sort_by(|a, b| totals[*a].total_cmp(&totals[*b]));
         }
         StackOrder::Appearance | StackOrder::InsideOut => {
-            // Where each series peaks, by its index's position in the data.
-            let peak = |key: &ValueKey| -> usize {
-                let mut best = (f64::NEG_INFINITY, usize::MAX);
-                for (i, row) in rows.iter().enumerate() {
-                    if row
-                        .z
-                        .as_ref()
-                        .map(Value::key)
-                        .unwrap_or_else(|| Value::Null.key())
-                        == *key
-                    {
-                        let v = value_of(row);
-                        if v > best.0 {
-                            best = (v, i);
-                        }
-                    }
+            // Where each series peaks, by its index's position in the data:
+            // the first row holding its largest value.
+            let mut peaks = vec![(f64::NEG_INFINITY, usize::MAX); series.len()];
+            for (i, (&slot, &v)) in row_series.iter().zip(&values).enumerate() {
+                if v > peaks[slot].0 {
+                    peaks[slot] = (v, i);
                 }
-                best.1
-            };
-            series.sort_by_key(peak);
+            }
+            order.sort_by_key(|slot| peaks[*slot].1);
             if spec.order == StackOrder::InsideOut {
                 // d3's insideOut: alternate the series onto the top and the
                 // bottom, the heaviest nearest the middle.
+                let totals = totals();
                 let (mut top, mut bottom) = (Vec::new(), Vec::new());
                 let (mut top_sum, mut bottom_sum) = (0., 0.);
-                for key in series.iter() {
+                for &slot in order.iter() {
                     if top_sum < bottom_sum {
-                        top_sum += total(key);
-                        top.push(key.clone());
+                        top_sum += totals[slot];
+                        top.push(slot);
                     } else {
-                        bottom_sum += total(key);
-                        bottom.push(key.clone());
+                        bottom_sum += totals[slot];
+                        bottom.push(slot);
                     }
                 }
                 bottom.reverse();
-                series = bottom.into_iter().chain(top).collect();
+                order = bottom.into_iter().chain(top).collect();
             }
         }
-        StackOrder::Explicit(order) => {
-            let rank = |key: &ValueKey| {
-                order
-                    .iter()
-                    .position(|v| v.key() == *key)
-                    .unwrap_or(usize::MAX)
-            };
-            series.sort_by_key(rank);
+        StackOrder::Explicit(explicit) => {
+            // Each key's first position in the explicit order; a series it
+            // leaves out sorts last.
+            let mut positions: FxHashMap<ValueKey, usize> = FxHashMap::default();
+            for (position, value) in explicit.iter().enumerate() {
+                positions.entry(value.key()).or_insert(position);
+            }
+            let ranks: Vec<usize> = series
+                .iter()
+                .map(|key| positions.get(key).copied().unwrap_or(usize::MAX))
+                .collect();
+            order.sort_by_key(|slot| ranks[*slot]);
         }
     }
     if spec.reverse {
-        series.reverse();
+        order.reverse();
     }
-    let rank = |row: &PreparedRow| {
-        let key = row
-            .z
-            .as_ref()
-            .map(Value::key)
-            .unwrap_or_else(|| Value::Null.key());
-        series.iter().position(|k| *k == key).unwrap_or(0)
-    };
+    // Each row's rank, its series' place in the order.
+    let mut series_rank = vec![0; series.len()];
+    for (rank, &slot) in order.iter().enumerate() {
+        series_rank[slot] = rank;
+    }
+    let ranks: Vec<usize> = row_series.iter().map(|slot| series_rank[*slot]).collect();
 
-    // Group the rows by their index, keeping each group in series order.
-    let mut groups: Vec<(ValueKey, Vec<usize>)> = Vec::new();
+    // Group the rows by their index, by first appearance, keeping each group
+    // in series order.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_slots: FxHashMap<ValueKey, usize> = FxHashMap::default();
     for (i, row) in rows.iter().enumerate() {
-        let key = index_of(row);
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, members)) => members.push(i),
-            None => groups.push((key, vec![i])),
-        }
+        let group = *group_slots.entry(index_of(row)).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[group].push(i);
     }
     let mut intervals: Vec<(f64, f64)> = vec![(f64::NAN, f64::NAN); rows.len()];
-    for (_, members) in groups.iter_mut() {
-        members.sort_by_key(|i| rank(&rows[*i]));
+    for members in groups.iter_mut() {
+        members.sort_by_key(|i| ranks[*i]);
         let (mut positive, mut negative) = (0.0_f64, 0.0_f64);
         for &i in members.iter() {
-            let v = value_of(&rows[i]);
+            let v = values[i];
             if !v.is_finite() {
                 continue;
             }
@@ -340,16 +348,15 @@ pub fn stack(rows: &mut [PreparedRow], spec: &StackSpec) {
         }
     }
     if spec.offset == Offset::Wiggle {
-        wiggle(rows, &groups, &mut intervals, &rank);
+        wiggle(&groups, &mut intervals, &ranks);
     }
     if let Offset::Custom(CustomOffset(offset)) = &spec.offset {
-        let stacks: Vec<Vec<usize>> = groups.iter().map(|(_, members)| members.clone()).collect();
         let (mut x1, mut x2): (Vec<f64>, Vec<f64>) = intervals.iter().copied().unzip();
         let z: Vec<Value> = rows
             .iter()
             .map(|row| row.z.clone().unwrap_or(Value::Null))
             .collect();
-        offset(&stacks, &mut x1, &mut x2, &z);
+        offset(&groups, &mut x1, &mut x2, &z);
         intervals = x1.into_iter().zip(x2).collect();
     }
 
@@ -380,25 +387,22 @@ pub fn stack(rows: &mut [PreparedRow], spec: &StackSpec) {
 
 /// d3's `stackOffsetWiggle`, after centering: shift each stack so the
 /// weighted slope of its layers is as flat as can be, then lift the whole
-/// streamgraph so its lowest point sits at zero.
-fn wiggle(
-    rows: &[PreparedRow],
-    groups: &[(ValueKey, Vec<usize>)],
-    intervals: &mut [(f64, f64)],
-    rank: &dyn Fn(&PreparedRow) -> usize,
-) {
+/// streamgraph so its lowest point sits at zero. `ranks` holds each row's
+/// series rank.
+fn wiggle(groups: &[Vec<usize>], intervals: &mut [(f64, f64)], ranks: &[usize]) {
     if groups.len() < 2 {
         return;
     }
-    // A layer's thickness at a group, by series rank.
-    let thickness = |group: &[usize], series: usize, intervals: &[(f64, f64)]| -> f64 {
-        group
-            .iter()
-            .filter(|i| rank(&rows[**i]) == series)
-            .map(|i| (intervals[*i].1 - intervals[*i].0).abs())
-            .sum()
+    let n = ranks.iter().copied().max().unwrap_or(0) + 1;
+    // Each layer's thickness at a group, by series rank: its rows' widths
+    // summed in the group's order, from the float sum's own zero.
+    let thickness = |group: &[usize], intervals: &[(f64, f64)], out: &mut Vec<f64>| {
+        out.clear();
+        out.resize(n, std::iter::empty::<f64>().sum::<f64>());
+        for &i in group {
+            out[ranks[i]] += (intervals[i].1 - intervals[i].0).abs();
+        }
     };
-    let n = rows.iter().map(rank).max().unwrap_or(0) + 1;
     let mut y = 0.0_f64;
     // The first stack starts at zero.
     let base = |group: &[usize], intervals: &[(f64, f64)]| -> f64 {
@@ -413,17 +417,23 @@ fn wiggle(
             intervals[i].1 += by;
         }
     };
-    let first = base(&groups[0].1, intervals);
-    shift(&groups[0].1, intervals, -first);
+    let first = base(&groups[0], intervals);
+    shift(&groups[0], intervals, -first);
+    let (mut previous_layers, mut current_layers) = (Vec::new(), Vec::new());
     for j in 1..groups.len() {
-        let (previous, current) = (&groups[j - 1].1, &groups[j].1);
+        let (previous, current) = (&groups[j - 1], &groups[j]);
+        // The previous stack is weighed again rather than carried over from
+        // the last step: its shift moved its ends, which can change the
+        // float difference between them.
+        thickness(previous, intervals, &mut previous_layers);
+        thickness(current, intervals, &mut current_layers);
         let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
         for i in 0..n {
-            let si = thickness(current, i, intervals);
-            let sij0 = thickness(previous, i, intervals);
+            let si = current_layers[i];
+            let sij0 = previous_layers[i];
             let mut s3 = (si - sij0) / 2.;
             for k in 0..i {
-                s3 += thickness(current, k, intervals) - thickness(previous, k, intervals);
+                s3 += current_layers[k] - previous_layers[k];
             }
             s1 += si;
             s2 += s3 * si;
@@ -469,17 +479,20 @@ pub enum NormalizeBasis {
 /// by the series' basis.
 pub fn normalize(rows: &mut [PreparedRow], axis: Axis, basis: NormalizeBasis) {
     let along_x = axis == Axis::X;
-    let mut series: Vec<(ValueKey, Vec<usize>)> = Vec::new();
+    // Each series' rows, by first appearance, in row order.
+    let mut series: Vec<Vec<usize>> = Vec::new();
+    let mut slots: FxHashMap<ValueKey, usize> = FxHashMap::default();
     for (i, row) in rows.iter().enumerate() {
         let key = row
             .z
             .as_ref()
             .map(Value::key)
             .unwrap_or_else(|| Value::Null.key());
-        match series.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, members)) => members.push(i),
-            None => series.push((key, vec![i])),
-        }
+        let slot = *slots.entry(key).or_insert_with(|| {
+            series.push(Vec::new());
+            series.len() - 1
+        });
+        series[slot].push(i);
     }
     // Plot's normalizeY maps each of y, y1 and y2 on its own basis; a mark
     // with a value normalizes that (and drops its interval), one with only
@@ -500,7 +513,7 @@ pub fn normalize(rows: &mut [PreparedRow], axis: Axis, basis: NormalizeBasis) {
 /// start, `2` its end, per series.
 fn normalize_field(
     rows: &mut [PreparedRow],
-    series: &[(ValueKey, Vec<usize>)],
+    series: &[Vec<usize>],
     along_x: bool,
     basis: NormalizeBasis,
     field: usize,
@@ -517,7 +530,7 @@ fn normalize_field(
     };
     let read =
         |row: &PreparedRow| -> f64 { slot(row).and_then(|v| v.as_number()).unwrap_or(f64::NAN) };
-    for (_, members) in series {
+    for members in series {
         let values: Vec<f64> = members.iter().map(|i| read(&rows[*i])).collect();
         if field != 0 && values.iter().all(|v| *v == 0. || !v.is_finite()) {
             continue;
@@ -600,6 +613,560 @@ fn normalize_field(
                 (false, 1) => row.y1 = Some(normalized),
                 (true, _) => row.x2 = Some(normalized),
                 (false, _) => row.y2 = Some(normalized),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table::Table;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The stack as it was before the series keys were precomputed: every
+    /// key below is recomputed per comparison, and the groups and series are
+    /// found by linear search.
+    fn naive_stack(rows: &mut [PreparedRow], spec: &StackSpec) {
+        let along_y = spec.axis == Axis::Y;
+        let value_of = |row: &PreparedRow| -> f64 {
+            // The value to stack: the channel itself, Plot's `y` for stackY. A
+            // derived `[0, y]` interval stands for the same value.
+            let value = if along_y { &row.y } else { &row.x };
+            let value = if value.is_null() {
+                if along_y {
+                    row.y2.as_ref()
+                } else {
+                    row.x2.as_ref()
+                }
+                .unwrap_or(value)
+            } else {
+                value
+            };
+            value.as_number().unwrap_or(f64::NAN)
+        };
+        let index_of = |row: &PreparedRow| -> ValueKey {
+            if along_y {
+                row.x_value().key()
+            } else {
+                row.y_value().key()
+            }
+        };
+
+        // The series order.
+        let mut series: Vec<ValueKey> = Vec::new();
+        for row in rows.iter() {
+            let key = row
+                .z
+                .as_ref()
+                .map(Value::key)
+                .unwrap_or_else(|| Value::Null.key());
+            if !series.contains(&key) {
+                series.push(key);
+            }
+        }
+        let total = |key: &ValueKey| -> f64 {
+            rows.iter()
+                .filter(|row| {
+                    row.z
+                        .as_ref()
+                        .map(Value::key)
+                        .unwrap_or_else(|| Value::Null.key())
+                        == *key
+                })
+                .map(value_of)
+                .filter(|v| v.is_finite())
+                .sum()
+        };
+        match &spec.order {
+            StackOrder::Input => {}
+            StackOrder::Z => series.sort(),
+            StackOrder::Value | StackOrder::Sum => {
+                series.sort_by(|a, b| total(a).total_cmp(&total(b)));
+            }
+            StackOrder::Appearance | StackOrder::InsideOut => {
+                // Where each series peaks, by its index's position in the data.
+                let peak = |key: &ValueKey| -> usize {
+                    let mut best = (f64::NEG_INFINITY, usize::MAX);
+                    for (i, row) in rows.iter().enumerate() {
+                        if row
+                            .z
+                            .as_ref()
+                            .map(Value::key)
+                            .unwrap_or_else(|| Value::Null.key())
+                            == *key
+                        {
+                            let v = value_of(row);
+                            if v > best.0 {
+                                best = (v, i);
+                            }
+                        }
+                    }
+                    best.1
+                };
+                series.sort_by_key(peak);
+                if spec.order == StackOrder::InsideOut {
+                    // d3's insideOut: alternate the series onto the top and the
+                    // bottom, the heaviest nearest the middle.
+                    let (mut top, mut bottom) = (Vec::new(), Vec::new());
+                    let (mut top_sum, mut bottom_sum) = (0., 0.);
+                    for key in series.iter() {
+                        if top_sum < bottom_sum {
+                            top_sum += total(key);
+                            top.push(key.clone());
+                        } else {
+                            bottom_sum += total(key);
+                            bottom.push(key.clone());
+                        }
+                    }
+                    bottom.reverse();
+                    series = bottom.into_iter().chain(top).collect();
+                }
+            }
+            StackOrder::Explicit(order) => {
+                let rank = |key: &ValueKey| {
+                    order
+                        .iter()
+                        .position(|v| v.key() == *key)
+                        .unwrap_or(usize::MAX)
+                };
+                series.sort_by_key(rank);
+            }
+        }
+        if spec.reverse {
+            series.reverse();
+        }
+        let rank = |row: &PreparedRow| {
+            let key = row
+                .z
+                .as_ref()
+                .map(Value::key)
+                .unwrap_or_else(|| Value::Null.key());
+            series.iter().position(|k| *k == key).unwrap_or(0)
+        };
+
+        // Group the rows by their index, keeping each group in series order.
+        let mut groups: Vec<(ValueKey, Vec<usize>)> = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            let key = index_of(row);
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, members)) => members.push(i),
+                None => groups.push((key, vec![i])),
+            }
+        }
+        let mut intervals: Vec<(f64, f64)> = vec![(f64::NAN, f64::NAN); rows.len()];
+        for (_, members) in groups.iter_mut() {
+            members.sort_by_key(|i| rank(&rows[*i]));
+            let (mut positive, mut negative) = (0.0_f64, 0.0_f64);
+            for &i in members.iter() {
+                let v = value_of(&rows[i]);
+                if !v.is_finite() {
+                    continue;
+                }
+                if v >= 0. {
+                    intervals[i] = (positive, positive + v);
+                    positive += v;
+                } else {
+                    intervals[i] = (negative, negative + v);
+                    negative += v;
+                }
+            }
+            match spec.offset {
+                Offset::Zero | Offset::Custom(_) => {}
+                Offset::Normalize => {
+                    let span = positive - negative;
+                    if span > 0. {
+                        for &i in members.iter() {
+                            let (a, b) = intervals[i];
+                            intervals[i] = ((a - negative) / span, (b - negative) / span);
+                        }
+                    }
+                }
+                Offset::Center | Offset::Wiggle => {
+                    let mid = (positive + negative) / 2.;
+                    for &i in members.iter() {
+                        let (a, b) = intervals[i];
+                        intervals[i] = (a - mid, b - mid);
+                    }
+                }
+            }
+        }
+        if spec.offset == Offset::Wiggle {
+            naive_wiggle(rows, &groups, &mut intervals, &rank);
+        }
+        if let Offset::Custom(CustomOffset(offset)) = &spec.offset {
+            let stacks: Vec<Vec<usize>> =
+                groups.iter().map(|(_, members)| members.clone()).collect();
+            let (mut x1, mut x2): (Vec<f64>, Vec<f64>) = intervals.iter().copied().unzip();
+            let z: Vec<Value> = rows
+                .iter()
+                .map(|row| row.z.clone().unwrap_or(Value::Null))
+                .collect();
+            offset(&stacks, &mut x1, &mut x2, &z);
+            intervals = x1.into_iter().zip(x2).collect();
+        }
+
+        for (row, (a, b)) in rows.iter_mut().zip(intervals) {
+            if !a.is_finite() {
+                continue;
+            }
+            let position = match spec.anchor {
+                StackAnchor::Middle => (a + b) / 2.,
+                StackAnchor::Start => a,
+                StackAnchor::End => b,
+            };
+            if along_y {
+                row.y1 = Some(Value::Number(a));
+                row.y2 = Some(Value::Number(b));
+                if !spec.keep_value {
+                    row.y = Value::Number(position);
+                }
+            } else {
+                row.x1 = Some(Value::Number(a));
+                row.x2 = Some(Value::Number(b));
+                if !spec.keep_value {
+                    row.x = Value::Number(position);
+                }
+            }
+        }
+    }
+
+    /// d3's `stackOffsetWiggle`, after centering: shift each stack so the
+    /// weighted slope of its layers is as flat as can be, then lift the whole
+    /// streamgraph so its lowest point sits at zero.
+    fn naive_wiggle(
+        rows: &[PreparedRow],
+        groups: &[(ValueKey, Vec<usize>)],
+        intervals: &mut [(f64, f64)],
+        rank: &dyn Fn(&PreparedRow) -> usize,
+    ) {
+        if groups.len() < 2 {
+            return;
+        }
+        // A layer's thickness at a group, by series rank.
+        let thickness = |group: &[usize], series: usize, intervals: &[(f64, f64)]| -> f64 {
+            group
+                .iter()
+                .filter(|i| rank(&rows[**i]) == series)
+                .map(|i| (intervals[*i].1 - intervals[*i].0).abs())
+                .sum()
+        };
+        let n = rows.iter().map(rank).max().unwrap_or(0) + 1;
+        let mut y = 0.0_f64;
+        // The first stack starts at zero.
+        let base = |group: &[usize], intervals: &[(f64, f64)]| -> f64 {
+            group
+                .iter()
+                .map(|i| intervals[*i].0.min(intervals[*i].1))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let shift = |group: &[usize], intervals: &mut [(f64, f64)], by: f64| {
+            for &i in group {
+                intervals[i].0 += by;
+                intervals[i].1 += by;
+            }
+        };
+        let first = base(&groups[0].1, intervals);
+        shift(&groups[0].1, intervals, -first);
+        for j in 1..groups.len() {
+            let (previous, current) = (&groups[j - 1].1, &groups[j].1);
+            let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
+            for i in 0..n {
+                let si = thickness(current, i, intervals);
+                let sij0 = thickness(previous, i, intervals);
+                let mut s3 = (si - sij0) / 2.;
+                for k in 0..i {
+                    s3 += thickness(current, k, intervals) - thickness(previous, k, intervals);
+                }
+                s1 += si;
+                s2 += s3 * si;
+            }
+            if s1 != 0. {
+                y -= s2 / s1;
+            }
+            let current_base = base(current, intervals);
+            shift(current, intervals, y - current_base);
+        }
+        let lowest = intervals
+            .iter()
+            .filter(|(a, _)| a.is_finite())
+            .map(|(a, b)| a.min(*b))
+            .fold(f64::INFINITY, f64::min);
+        if lowest.is_finite() {
+            for interval in intervals.iter_mut() {
+                interval.0 -= lowest;
+                interval.1 -= lowest;
+            }
+        }
+    }
+
+    fn row(z: Option<Value>, x: Value, y: Value) -> PreparedRow {
+        PreparedRow {
+            row: Table::new([("k", Value::Number(0.))]),
+            index: 0,
+            x,
+            y,
+            x1: None,
+            x2: None,
+            y1: None,
+            y2: None,
+            z,
+            path: None,
+            r: None,
+            symbol: None,
+            opacity: None,
+            r_value: None,
+            opacity_value: None,
+            dodge_offset: None,
+            pixel: None,
+        }
+    }
+
+    /// Rows with awkward series keys (text, null, -0 and +0, a NaN, a
+    /// boolean, a missing z), awkward index keys (text, -0 and +0, a null
+    /// that falls back to the interval's start), and values that are
+    /// negative, zero, -0, NaN, null (some falling back to the interval's
+    /// end) and of very different magnitudes, so any change in the order
+    /// of a float sum shows.
+    fn awkward_rows(along_y: bool) -> Vec<PreparedRow> {
+        let zs = [
+            Some(Value::text("b")),
+            None,
+            Some(Value::text("a")),
+            Some(Value::Number(-0.)),
+            Some(Value::Number(0.)),
+            Some(Value::Number(f64::NAN)),
+            Some(Value::Bool(true)),
+            Some(Value::Null),
+            Some(Value::text("c")),
+        ];
+        let indexes = [
+            Value::text("p"),
+            Value::Number(-0.),
+            Value::Number(0.),
+            Value::text("q"),
+            Value::Null,
+            Value::Number(3.),
+        ];
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        (0..160)
+            .map(|i| {
+                let r = next();
+                let value = match r % 11 {
+                    0 => Value::Null,
+                    1 => Value::Number(f64::NAN),
+                    2 => Value::Number(-0.),
+                    3 => Value::Number(0.),
+                    4 => Value::Number(-(((r >> 8) % 1000) as f64) * 0.1),
+                    5 => Value::Number(1e16 + (r % 7) as f64),
+                    6 => Value::Number(((r >> 8) % 997) as f64 / 7.),
+                    _ => Value::Number(((r >> 8) % 100) as f64 * 0.3 + 0.1),
+                };
+                let index = indexes[(r >> 20) as usize % indexes.len()].clone();
+                let z = zs[(i * 7 + (r >> 30) as usize) % zs.len()].clone();
+                let mut row = if along_y {
+                    row(z, index.clone(), value)
+                } else {
+                    row(z, value, index.clone())
+                };
+                // A null index reads the interval's start; a null value
+                // stacks the interval's end.
+                if index.is_null() {
+                    let start = Some(Value::Number((r % 3) as f64));
+                    if along_y {
+                        row.x1 = start;
+                    } else {
+                        row.y1 = start;
+                    }
+                }
+                if r % 13 == 0 {
+                    let end = Some(Value::Number(((r >> 4) % 50) as f64 - 10.));
+                    if along_y {
+                        row.y = Value::Null;
+                        row.y2 = end;
+                    } else {
+                        row.x = Value::Null;
+                        row.x2 = end;
+                    }
+                }
+                row
+            })
+            .collect()
+    }
+
+    /// A streamgraph's rows: many series over many positions, some
+    /// positions missing a series, so wiggle weighs uneven stacks.
+    fn stream_rows() -> Vec<PreparedRow> {
+        let mut rows = Vec::new();
+        for x in 0..40 {
+            for s in 0..17 {
+                if (x * 3 + s * 5) % 7 == 0 {
+                    continue;
+                }
+                let v = ((x * 31 + s * 17) % 23) as f64 * 1.37 + (s as f64).sqrt();
+                rows.push(row(
+                    Some(Value::text(format!("s{}", (s * 5) % 17))),
+                    Value::Number(x as f64),
+                    Value::Number(v),
+                ));
+            }
+        }
+        rows
+    }
+
+    fn channels(rows: &[PreparedRow]) -> Vec<String> {
+        rows.iter()
+            .map(|r| format!("{:?}", (&r.x, &r.y, &r.x1, &r.x2, &r.y1, &r.y2)))
+            .collect()
+    }
+
+    /// The stacks and z a custom offset was handed, and a shift it applies.
+    fn recording_offset(log: Rc<RefCell<Vec<String>>>) -> Offset {
+        Offset::custom(move |stacks, x1, x2, z| {
+            log.borrow_mut().push(format!("{stacks:?} {z:?}"));
+            for (n, stack) in stacks.iter().enumerate() {
+                for &i in stack {
+                    x1[i] -= n as f64 * 0.5;
+                    x2[i] -= n as f64 * 0.5;
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn stack_matches_the_naive_stack_for_every_order_and_offset() {
+        let orders = [
+            StackOrder::Input,
+            StackOrder::Value,
+            StackOrder::Sum,
+            StackOrder::Appearance,
+            StackOrder::InsideOut,
+            StackOrder::Z,
+            // Duplicates keep their first place; missing series sort last.
+            StackOrder::Explicit(vec![
+                Value::text("c"),
+                Value::Number(0.),
+                Value::text("a"),
+                Value::text("c"),
+                Value::Null,
+                Value::text("absent"),
+            ]),
+            StackOrder::Explicit(vec![
+                Value::text("s4"),
+                Value::text("s9"),
+                Value::text("s0"),
+            ]),
+        ];
+        let mut cases = 0;
+        for along_y in [true, false] {
+            for data in [awkward_rows(along_y), stream_rows()] {
+                if !along_y && data.len() == stream_rows().len() {
+                    continue;
+                }
+                for order in &orders {
+                    for offset_kind in 0..5 {
+                        for reverse in [false, true] {
+                            for anchor in
+                                [StackAnchor::Middle, StackAnchor::Start, StackAnchor::End]
+                            {
+                                for keep_value in [false, true] {
+                                    let (log_a, log_b) = Default::default();
+                                    let offsets: [Offset; 2] = match offset_kind {
+                                        0 => [Offset::Zero, Offset::Zero],
+                                        1 => [Offset::Normalize, Offset::Normalize],
+                                        2 => [Offset::Center, Offset::Center],
+                                        3 => [Offset::Wiggle, Offset::Wiggle],
+                                        _ => [
+                                            recording_offset(Rc::clone(&log_a)),
+                                            recording_offset(Rc::clone(&log_b)),
+                                        ],
+                                    };
+                                    let [offset_a, offset_b] = offsets;
+                                    let spec = |offset: Offset| StackSpec {
+                                        axis: if along_y { Axis::Y } else { Axis::X },
+                                        anchor,
+                                        offset,
+                                        order: order.clone(),
+                                        reverse,
+                                        keep_value,
+                                    };
+                                    let (mut fast, mut naive) = (data.clone(), data.clone());
+                                    stack(&mut fast, &spec(offset_a));
+                                    naive_stack(&mut naive, &spec(offset_b));
+                                    assert_eq!(
+                                        channels(&fast),
+                                        channels(&naive),
+                                        "{order:?} offset {offset_kind} reverse {reverse} y {along_y}"
+                                    );
+                                    assert_eq!(*log_a.borrow(), *log_b.borrow());
+                                    cases += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(cases > 500);
+    }
+
+    #[test]
+    fn empty_single_and_zero_total_stacks_match_the_naive_stack() {
+        for data in [
+            Vec::new(),
+            vec![row(None, Value::Number(1.), Value::Number(-0.))],
+            vec![
+                row(None, Value::Number(1.), Value::Number(-0.)),
+                row(None, Value::Number(1.), Value::Number(-0.)),
+                row(None, Value::Number(2.), Value::Number(f64::NAN)),
+            ],
+            // Totals of +0 (`1 - 1`), -0 and nothing: `total_cmp` puts -0
+            // (an empty float sum) below +0, and the -0 series' empty
+            // interval lands below or above the +0 series' bar, so the zero
+            // a total starts from shows.
+            vec![
+                row(Some(Value::text("c")), Value::Number(1.), Value::Number(1.)),
+                row(
+                    Some(Value::text("a")),
+                    Value::Number(1.),
+                    Value::Number(-0.),
+                ),
+                row(
+                    Some(Value::text("b")),
+                    Value::Number(1.),
+                    Value::Number(f64::NAN),
+                ),
+                row(
+                    Some(Value::text("c")),
+                    Value::Number(2.),
+                    Value::Number(-1.),
+                ),
+                row(Some(Value::text("d")), Value::Number(2.), Value::Number(1.)),
+            ],
+        ] {
+            for order in [
+                StackOrder::Value,
+                StackOrder::InsideOut,
+                StackOrder::Appearance,
+            ] {
+                for offset in [Offset::Zero, Offset::Wiggle, Offset::Normalize] {
+                    let spec = StackSpec {
+                        order: order.clone(),
+                        offset,
+                        ..StackSpec::new(Axis::Y)
+                    };
+                    let (mut fast, mut naive) = (data.clone(), data.clone());
+                    stack(&mut fast, &spec);
+                    naive_stack(&mut naive, &spec);
+                    assert_eq!(channels(&fast), channels(&naive));
+                }
             }
         }
     }

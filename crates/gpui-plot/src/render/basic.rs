@@ -2424,49 +2424,61 @@ fn bundle(builder: &mut PathBuilder, points: &[Point<Pixels>]) {
 
 /// The extent a mark contributes to the x domain.
 pub fn x_values(prepared: &PreparedMark) -> Vec<Value> {
-    if let Some([x1, _, x2, _]) = crate::render::raster_extent(&prepared.mark)
-        && matches!(prepared.mark.kind, MarkKind::Raster | MarkKind::Contour)
-    {
-        return vec![Value::Number(x1), Value::Number(x2)];
-    }
-    prepared
-        .rows
+    domain::<true>(prepared).collect()
+}
+
+/// The extent a mark contributes to the y domain.
+pub fn y_values(prepared: &PreparedMark) -> Vec<Value> {
+    domain::<false>(prepared).collect()
+}
+
+/// [`y_values`], lazily, for a reader that may stop early.
+pub fn y_domain(prepared: &PreparedMark) -> impl Iterator<Item = Value> + '_ {
+    domain::<false>(prepared)
+}
+
+/// The values a mark contributes to the x (`X`) or y domain: a raster's
+/// extent, else each row's interval (or its value) and then the values of
+/// the rows a filter dropped.
+fn domain<const X: bool>(prepared: &PreparedMark) -> impl Iterator<Item = Value> + '_ {
+    let raster = crate::render::raster_extent(&prepared.mark)
+        .filter(|_| matches!(prepared.mark.kind, MarkKind::Raster | MarkKind::Contour));
+    let extent =
+        raster.map(|[x1, y1, x2, y2]| if X { [x1, x2] } else { [y1, y2] }.map(Value::Number));
+    // A raster's extent stands for its rows.
+    let (rows, filtered): (&[PreparedRow], &[Value]) = match raster {
+        Some(_) => (&[], &[]),
+        None => (
+            &prepared.rows,
+            &prepared.filtered_domain[if X { 0 } else { 1 }],
+        ),
+    };
+    let rows = rows
         .iter()
         .flat_map(|row| {
             // A row's extent is its interval when it has one: a stacked bar's
             // value has been rewritten into the interval, and the datum's own
             // channel still holds the pre-stack number.
-            if row.x1.is_some() || row.x2.is_some() {
-                return [row.x1.clone(), row.x2.clone()];
+            let (start, end) = if X {
+                (&row.x1, &row.x2)
+            } else {
+                (&row.y1, &row.y2)
+            };
+            if start.is_some() || end.is_some() {
+                return [start.clone(), end.clone()];
             }
-            [Some(row.x_value().clone()), None]
+            [
+                Some(if X { row.x_value() } else { row.y_value() }.clone()),
+                None,
+            ]
         })
         .flatten()
-        .filter(|value| !value.is_null())
-        .chain(prepared.filtered_domain[0].iter().cloned())
-        .collect()
-}
-
-/// The extent a mark contributes to the y domain.
-pub fn y_values(prepared: &PreparedMark) -> Vec<Value> {
-    if let Some([_, y1, _, y2]) = crate::render::raster_extent(&prepared.mark)
-        && matches!(prepared.mark.kind, MarkKind::Raster | MarkKind::Contour)
-    {
-        return vec![Value::Number(y1), Value::Number(y2)];
-    }
-    prepared
-        .rows
-        .iter()
-        .flat_map(|row| {
-            if row.y1.is_some() || row.y2.is_some() {
-                return [row.y1.clone(), row.y2.clone()];
-            }
-            [Some(row.y_value().clone()), None]
-        })
+        .filter(|value| !value.is_null());
+    extent
+        .into_iter()
         .flatten()
-        .filter(|value| !value.is_null())
-        .chain(prepared.filtered_domain[1].iter().cloned())
-        .collect()
+        .chain(rows)
+        .chain(filtered.iter().cloned())
 }
 
 /// Plot's `tip`: a box around the row's text with a pointer at the datum,

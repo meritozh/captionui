@@ -37,6 +37,10 @@ pub struct Table {
     fields: Rc<Vec<(SharedString, Value)>>,
 }
 
+/// The bit of a [`Table::get_hinted`] hint that marks a field the last
+/// record lacked; the rest is where it would have sat.
+const ABSENT_HINT: usize = 1 << (usize::BITS - 1);
+
 impl Table {
     /// A table from name/value pairs. Later pairs with the same name replace
     /// earlier ones, matching an object literal's behaviour.
@@ -101,16 +105,45 @@ impl Table {
     /// [`Table::get`], trying `hint` first: the field's position in the last
     /// record read, which records of one shape share. A miss searches, and
     /// leaves the position found in `hint`.
+    ///
+    /// A field the last record lacked leaves where it would have sat, marked
+    /// [`ABSENT_HINT`]: a record of the same shape lacks it too when its
+    /// neighbours there bracket the name, which the fields' sorted order
+    /// proves in two comparisons rather than a search.
     #[inline]
     pub(crate) fn get_hinted(&self, name: &str, hint: &std::cell::Cell<usize>) -> Option<&Value> {
-        if let Some((key, value)) = self.fields.get(hint.get())
-            && key.as_ref() == name
-        {
-            return Some(value);
+        let at = hint.get();
+        if at & ABSENT_HINT == 0 {
+            if let Some((key, value)) = self.fields.get(at)
+                && key.as_ref() == name
+            {
+                return Some(value);
+            }
+        } else {
+            let at = at & !ABSENT_HINT;
+            let after = at == 0
+                || self
+                    .fields
+                    .get(at - 1)
+                    .is_some_and(|(key, _)| key.as_ref() < name);
+            let before = match self.fields.get(at) {
+                Some((key, _)) => name < key.as_ref(),
+                None => at == self.fields.len(),
+            };
+            if after && before {
+                return None;
+            }
         }
-        let i = self.position(name).ok()?;
-        hint.set(i);
-        Some(&self.fields[i].1)
+        match self.position(name) {
+            Ok(i) => {
+                hint.set(i);
+                Some(&self.fields[i].1)
+            }
+            Err(i) => {
+                hint.set(i | ABSENT_HINT);
+                None
+            }
+        }
     }
 
     /// Read a field by name, or [`Value::Null`] when the field is absent.
@@ -532,6 +565,69 @@ mod tests {
         let hint = std::cell::Cell::new(0);
         for row in &rows {
             assert_eq!(channel.read_hinted(row, &hint), channel.read(row));
+        }
+    }
+
+    /// A hint left by an absent field (or a present one) never hides a
+    /// field nor finds one that is not there, whatever shape the next
+    /// record has: absent names before, between and after the fields, in
+    /// empty and one-field tables, from stale hints of either kind.
+    #[test]
+    fn hinted_reads_of_absent_fields_match_plain_reads() {
+        let shapes: Vec<Vec<&str>> = vec![
+            vec!["b", "d", "f"],
+            vec!["b", "d", "f"],
+            vec![],
+            vec!["d"],
+            vec!["a", "b", "c", "d", "e", "f", "g"],
+            vec!["c", "e"],
+            vec!["b", "d", "f"],
+            vec!["g"],
+            vec!["a"],
+            vec!["b", "dd", "f"],
+        ];
+        let rows: Vec<Table> = shapes
+            .iter()
+            .enumerate()
+            .map(|(i, names)| {
+                Table::new(
+                    names
+                        .iter()
+                        .enumerate()
+                        .map(|(j, name)| (*name, Value::Number((i * 10 + j) as f64))),
+                )
+            })
+            .collect();
+        let orders: [Vec<usize>; 3] = [
+            (0..rows.len()).collect(),
+            (0..rows.len()).rev().collect(),
+            (0..rows.len()).map(|i| (i * 7) % rows.len()).collect(),
+        ];
+        let stale = [
+            0,
+            1,
+            3,
+            99,
+            ABSENT_HINT,
+            ABSENT_HINT | 1,
+            ABSENT_HINT | 3,
+            ABSENT_HINT | 99,
+        ];
+        for name in [
+            "", "a", "b", "c", "d", "dd", "de", "e", "f", "g", "h", "0", "~",
+        ] {
+            for order in &orders {
+                for start in stale {
+                    let hint = std::cell::Cell::new(start);
+                    for &i in order {
+                        let row = &rows[i];
+                        assert_eq!(row.get_hinted(name, &hint), row.get(name), "{name} in {i}");
+                        // Twice, so the hint the read left is tried on the
+                        // record it came from.
+                        assert_eq!(row.get_hinted(name, &hint), row.get(name), "{name} in {i}");
+                    }
+                }
+            }
         }
     }
 

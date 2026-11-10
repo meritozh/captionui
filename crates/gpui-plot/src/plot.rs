@@ -436,27 +436,17 @@ impl Plot {
     pub fn natural_height(&self, width: f32) -> f32 {
         let (grid, facets, _) = self.prepare_marks();
         let [mt, mr, mb, ml] = self.plot_margins(&grid);
-        let y_values = self.y_domain_values(&facets);
-        let x_values = self.x_domain_values(&facets);
+        // The x and y values the scales read are gathered only by the
+        // branches below that read them, and only as far as they read.
         let nfy = grid.fy.as_ref().map_or(1, |d| d.len().max(1)) as f32;
         let nfx = grid.fx.as_ref().map_or(1, |d| d.len().max(1)) as f32;
-        let ordinal = |values: &[Value], options: &crate::options::ScaleOptions| {
+        let ordinal = |mut values: &mut dyn Iterator<Item = Value>,
+                       options: &crate::options::ScaleOptions| {
             options.r#type.is_some_and(|t| t.is_discrete())
                 || (options.r#type.is_none()
-                    && values
-                        .iter()
-                        .find(|v| !v.is_null())
+                    && Iterator::find(&mut values, |v| !v.is_null())
                         .is_some_and(|v| !v.kind().is_quantitative()))
         };
-        // Plot's autoHeight counts a y scale whether or not its axis draws.
-        // An axisY or gridY mark reads the y scale even without data; Plot's
-        // `ny` is 1 without one, even when fy facets the plot.
-        let y_scale = y_values.iter().any(|v| !v.is_null())
-            || self
-                .marks
-                .iter()
-                .any(|m| matches!(m.kind, MarkKind::AxisY | MarkKind::GridY));
-        let has_y = !y_values.is_empty() || y_scale || grid.fy.is_some();
         let projected = self.projection.as_ref().map(|p| {
             // Plot's `projectionAspectRatio`: a domain's bounds at 100 × 100,
             // else the projection's own; clamped as Plot clamps it.
@@ -482,8 +472,10 @@ impl Plot {
             (Some(height), _) => height,
             _ if projected.is_some() => projected.unwrap_or(400.),
             (None, Some(ratio)) => {
+                let (y_values, x_values) =
+                    (self.y_domain_values(&facets), self.x_domain_values(&facets));
                 let length = |values: &[Value], options: &crate::options::ScaleOptions| -> f32 {
-                    if ordinal(values, options) {
+                    if ordinal(&mut values.iter().cloned(), options) {
                         let n = crate::scale::dedup(values.iter().map(Value::key))
                             .len()
                             .max(1);
@@ -506,16 +498,27 @@ impl Plot {
                 ratio * w * (1.1 * nfy - 0.1).max(1.) + mt + mb
             }
             (None, None) => {
+                // Plot's autoHeight counts a y scale whether or not its axis
+                // draws. An axisY or gridY mark reads the y scale even
+                // without data; Plot's `ny` is 1 without one, even when fy
+                // facets the plot.
+                let y_scale = self.y_domain_iter(&facets).any(|v| !v.is_null())
+                    || self
+                        .marks
+                        .iter()
+                        .any(|m| matches!(m.kind, MarkKind::AxisY | MarkKind::GridY));
+                let has_y =
+                    self.y_domain_iter(&facets).next().is_some() || y_scale || grid.fy.is_some();
                 // Plot's `ny` counts the y scale alone (one row without one);
                 // fy multiplies it.
                 let ny = if !y_scale {
                     1.
-                } else if ordinal(&y_values, &self.scales.y)
+                } else if ordinal(&mut self.y_domain_iter(&facets), &self.scales.y)
                     // A bar or cell reads its band axis as ordinal, years
                     // and all.
                     || (self.scales.y.r#type.is_none() && marks_use_band(&facets, false))
                 {
-                    crate::scale::dedup(y_values.iter().map(Value::key))
+                    crate::scale::dedup(self.y_domain_iter(&facets).map(|v| v.key()))
                         .len()
                         .max(1) as f32
                 } else {
@@ -2778,6 +2781,14 @@ impl Plot {
             .flatten()
             .flat_map(render::basic::y_values)
             .collect()
+    }
+
+    /// [`Plot::y_domain_values`], lazily.
+    fn y_domain_iter<'a>(
+        &self,
+        facets: &'a [Vec<PreparedMark>],
+    ) -> impl Iterator<Item = Value> + 'a {
+        facets.iter().flatten().flat_map(render::basic::y_domain)
     }
 
     /// The legend's entries: one per series or one per categorical value.
