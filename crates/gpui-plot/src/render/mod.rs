@@ -494,19 +494,19 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     } else {
         channels
     };
+    let facts = RowFacts::new(channels, mark);
     let mut rows: Vec<PreparedRow> = source
         .rows()
         .iter()
         .enumerate()
-        .map(|(index, row)| resolve_row(row, index, channels, mark))
+        .map(|(index, row)| resolve_row(row, index, channels, mark, &facts))
         .collect();
     // A transform output reads the mark's own channel of that name unless it
     // names an input (Plot's `maybeInput`): `binX({fill: "x"}, {fill:
-    // "Anomaly"})` averages Anomaly. The channel's value lands on the record
-    // under `$in:<name>`, which the output reads.
-    if bound.is_some() {
-        materialize_inputs(original, &mut rows);
-    }
+    // "Anomaly"})` averages Anomaly. The output reads `$in:<name>`, which the
+    // group or bin resolves against the original mark's channel (see
+    // [`bound_input`]).
+    let bound_channels = &original.channels;
 
     // A mark's own ordering decides where its shapes land, and a line's order
     // is its path, so sorting happens before anything positional.
@@ -535,7 +535,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     // A grouping collapses the rows sharing a category into one row each,
     // Plot's `groupX`/`groupY`/`groupZ`.
     if let Some(config) = &mark.group {
-        rows = collapse_groups(rows, mark, config);
+        rows = collapse_groups(rows, mark, config, bound_channels);
     }
 
     // A reducer collapses the rows sharing a category, Plot's `groupX`. A
@@ -548,7 +548,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
 
     // Binning replaces the rows with one row per bin.
     if mark.bin.is_some() {
-        rows = bin_rows(mark, &rows);
+        rows = bin_rows(mark, &rows, bound_channels);
         if let Some((axis, basis)) = mark.normalize_by {
             stack::normalize(&mut rows, axis, basis);
         }
@@ -570,8 +570,9 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
     let mut filtered_domain: [Vec<Value>; 2] = [Vec::new(), Vec::new()];
     if !dropped.is_empty() && mark.bin.is_none() && mark.group.is_none() && mark.stack.is_none() {
         let stacked = stack::effective_stack(mark).map(|spec| spec.axis);
+        let facts = RowFacts::new(&mark.channels, mark);
         for (index, table) in dropped.iter().enumerate() {
-            let row = resolve_row(table, index, &mark.channels, mark);
+            let row = resolve_row(table, index, &mark.channels, mark, &facts);
             if stacked != Some(Axis::X) {
                 filtered_domain[0].extend(
                     [Some(row.x.clone()), row.x1.clone(), row.x2.clone()]
@@ -602,7 +603,7 @@ fn prepare_mark(data: &Dataset, mark: &Mark) -> PreparedMark {
 }
 
 /// Keep each `z` group's rows beyond its whiskers, Plot's box outliers.
-fn outlier_rows(rows: Vec<PreparedRow>, axis: Axis) -> Vec<PreparedRow> {
+fn outlier_rows(mut rows: Vec<PreparedRow>, axis: Axis) -> Vec<PreparedRow> {
     let read = |row: &PreparedRow| {
         if axis == Axis::X {
             row.x_value().clone()
@@ -634,22 +635,22 @@ fn outlier_rows(rows: Vec<PreparedRow>, axis: Axis) -> Vec<PreparedRow> {
             (key, lo, hi)
         })
         .collect();
-    rows.into_iter()
-        .filter(|row| {
-            let key = row
-                .z
-                .as_ref()
-                .map(Value::key)
-                .unwrap_or_else(|| Value::Null.key());
-            let Some(v) = read(row).as_number() else {
-                return false;
-            };
-            bounds
-                .iter()
-                .find(|(k, _, _)| *k == key)
-                .is_some_and(|(_, lo, hi)| v < *lo || v > *hi)
-        })
-        .collect()
+    // Kept in place, so only the outliers move.
+    rows.retain(|row| {
+        let key = row
+            .z
+            .as_ref()
+            .map(Value::key)
+            .unwrap_or_else(|| Value::Null.key());
+        let Some(v) = read(row).as_number() else {
+            return false;
+        };
+        bounds
+            .iter()
+            .find(|(k, _, _)| *k == key)
+            .is_some_and(|(_, lo, hi)| v < *lo || v > *hi)
+    });
+    rows
 }
 
 /// Keep the row of each group with the least or greatest value on the
@@ -1239,34 +1240,92 @@ fn interval_value(source: &Value, millis_or_number: f64) -> Value {
     }
 }
 
-fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> PreparedRow {
-    let read = |channel: &Option<crate::table::Channel>| {
-        channel
-            .as_ref()
-            .map(|channel| channel.read(row))
-            .unwrap_or(Value::Null)
+/// Which positional channel a row's `z` shares, so the row reads it once.
+#[derive(Clone, Copy)]
+enum SharedZ {
+    None,
+    X,
+    Y,
+}
+
+/// The facts [`resolve_row`] needs that depend only on the mark and its
+/// channels, worked out once per mark rather than once per row.
+struct RowFacts {
+    /// A one-dimensional mark fills its missing y (or x) with the row index.
+    index_y: bool,
+    index_x: bool,
+    shared_z: SharedZ,
+    /// A symbol channel that names a symbol is a constant.
+    constant_symbol: Option<crate::style::Symbol>,
+    r_unscaled: bool,
+    opacity_unscaled: bool,
+    /// Where the field each positional channel reads (x, y, x1, x2, y1, y2,
+    /// z) sat in the last record, which the next record of the same shape
+    /// shares: see [`Table::get_hinted`].
+    slots: [std::cell::Cell<usize>; 7],
+}
+
+impl RowFacts {
+    fn new(channels: &Channels, mark: &Mark) -> Self {
+        // A one-dimensional mark has no second position channel. Plot fills it
+        // with the datum's index for `lineX`/`rectX`, and leaves it unset for
+        // `dotX`, whose dots all sit in the frame's middle.
+        // A cross channel the mark names wins: `Plot.lineY(data, {x, y})`.
+        let category = mark.kind.category();
+        let index_cross = category.cross == CrossAxis::Index;
+        let index_y = category.single_axis == Some(Axis::X) && index_cross && channels.y.is_none();
+        let index_x = !index_y
+            && category.single_axis == Some(Axis::Y)
+            && index_cross
+            && channels.x.is_none();
+        // A box part's `z` is its category channel, which is also its x (or
+        // y): reuse that read rather than calling the channel twice. Constants
+        // are cheap to read, so only fields and accessors are shared.
+        let shared_z = match &channels.z {
+            Some(crate::table::Channel::Constant(_)) | None => SharedZ::None,
+            Some(z) if channels.x.as_ref().is_some_and(|x| z.same(x)) => SharedZ::X,
+            Some(z) if channels.y.as_ref().is_some_and(|y| z.same(y)) => SharedZ::Y,
+            Some(_) => SharedZ::None,
+        };
+        Self {
+            index_y,
+            index_x,
+            shared_z,
+            constant_symbol: channels.symbol.as_ref().and_then(constant_symbol),
+            r_unscaled: channels.r.as_ref().is_some_and(|c| !c.is_scaled()),
+            opacity_unscaled: channels.opacity.as_ref().is_some_and(|c| !c.is_scaled()),
+            slots: Default::default(),
+        }
+    }
+}
+
+#[inline]
+fn resolve_row(
+    row: &Table,
+    index: usize,
+    channels: &Channels,
+    mark: &Mark,
+    facts: &RowFacts,
+) -> PreparedRow {
+    let read = |channel: &Option<crate::table::Channel>, slot: usize| match channel {
+        Some(channel @ crate::table::Channel::Field(_)) => {
+            channel.read_hinted(row, &facts.slots[slot])
+        }
+        Some(channel) => channel.read(row),
+        None => Value::Null,
     };
 
-    let mut x = read(&channels.x);
-    let mut y = read(&channels.y);
-    // A box part's `z` is its category channel, which is also its x (or y):
-    // reuse that read rather than calling the channel twice. Constants are
-    // cheap to read, so only fields and accessors are shared.
-    let shared_z = channels.z.as_ref().and_then(|z| {
-        if matches!(z, crate::table::Channel::Constant(_)) {
-            None
-        } else if channels.x.as_ref().is_some_and(|x| z.same(x)) {
-            Some(x.clone())
-        } else if channels.y.as_ref().is_some_and(|y| z.same(y)) {
-            Some(y.clone())
-        } else {
-            None
-        }
-    });
-    let x1 = read(&channels.x1);
-    let x2 = read(&channels.x2);
-    let y1 = read(&channels.y1);
-    let y2 = read(&channels.y2);
+    let mut x = read(&channels.x, 0);
+    let mut y = read(&channels.y, 1);
+    let shared_z = match facts.shared_z {
+        SharedZ::None => None,
+        SharedZ::X => Some(x.clone()),
+        SharedZ::Y => Some(y.clone()),
+    };
+    let x1 = read(&channels.x1, 2);
+    let x2 = read(&channels.x2, 3);
+    let y1 = read(&channels.y1, 4);
+    let y2 = read(&channels.y2, 5);
 
     let mut x1 = (!x1.is_null()).then_some(x1);
     let mut x2 = (!x2.is_null()).then_some(x2);
@@ -1274,22 +1333,15 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
     let mut y2 = (!y2.is_null()).then_some(y2);
     derive_intervals(mark, &x, &y, &mut x1, &mut x2, &mut y1, &mut y2);
 
-    // A one-dimensional mark has no second position channel. Plot fills it
-    // with the datum's index for `lineX`/`rectX`, and leaves it unset for
-    // `dotX`, whose dots all sit in the frame's middle.
-    // A cross channel the mark names wins: `Plot.lineY(data, {x, y})`.
-    if mark.kind.is_x_only() && mark.kind.cross_axis() == CrossAxis::Index && channels.y.is_none() {
+    if facts.index_y {
         y = Value::Number(index as f64);
-    } else if mark.kind.is_y_only()
-        && mark.kind.cross_axis() == CrossAxis::Index
-        && channels.x.is_none()
-    {
+    } else if facts.index_x {
         x = Value::Number(index as f64);
     }
 
     let z = match shared_z {
         Some(value) => Some(value),
-        None => channels.z.as_ref().map(|channel| channel.read(row)),
+        None => channels.z.as_ref().map(|_| read(&channels.z, 6)),
     }
     .filter(|v| !v.is_null());
 
@@ -1312,7 +1364,7 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
         r: channels
             .r
             .as_ref()
-            .filter(|channel| !channel.is_scaled())
+            .filter(|_| facts.r_unscaled)
             .map(|channel| channel.read(row)),
         r_value: channels
             .r
@@ -1323,12 +1375,14 @@ fn resolve_row(row: &Table, index: usize, channels: &Channels, mark: &Mark) -> P
             .as_ref()
             .and_then(|channel| channel.data_value(row)),
         symbol: channels.symbol.as_ref().and_then(|channel| {
-            constant_symbol(channel).or_else(|| symbol_from_value(&channel.read(row)))
+            facts
+                .constant_symbol
+                .or_else(|| symbol_from_value(&channel.read(row)))
         }),
         opacity: channels
             .opacity
             .as_ref()
-            .filter(|channel| !channel.is_scaled())
+            .filter(|_| facts.opacity_unscaled)
             .map(|channel| channel.read(row)),
         dodge_offset: None,
         pixel: None,
@@ -1354,40 +1408,40 @@ fn symbol_from_value(value: &Value) -> Option<crate::style::Symbol> {
     }
 }
 
-fn apply_sort(rows: &mut [PreparedRow], mark: &Mark) {
+fn apply_sort(rows: &mut Vec<PreparedRow>, mark: &Mark) {
     let Some(sort) = &mark.sort else {
         return;
     };
-    if let Some(field) = &sort.field {
-        rows.sort_by(|a, b| {
-            let ordering = a.row.value(field).cmp(&b.row.value(field));
-            if sort.descending {
-                ordering.reverse()
-            } else {
-                ordering
-            }
-        });
+    // Each row's key is read once, then a stable sort of the indices by key
+    // orders the rows as a stable sort of the rows would.
+    let keys: Vec<Value> = if let Some(field) = &sort.field {
+        rows.iter().map(|row| row.row.value(field)).collect()
     } else {
         // Sorting without a field sorts by the mark's own value: a bar chart's
         // length, which is Plot's default for a sorted bar chart.
         // The value is on x when the categories are on y (a `barX`), else y.
         let value_on_x = mark.kind.category().band_y;
-        let value = |row: &PreparedRow| {
-            if value_on_x {
-                row.x_value().clone()
-            } else {
-                row.y_value().clone()
-            }
-        };
-        rows.sort_by(|a, b| {
-            let ordering = value(a).cmp(&value(b));
-            if sort.descending {
-                ordering.reverse()
-            } else {
-                ordering
-            }
-        });
-    }
+        rows.iter()
+            .map(|row| {
+                if value_on_x {
+                    row.x_value().clone()
+                } else {
+                    row.y_value().clone()
+                }
+            })
+            .collect()
+    };
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ordering = keys[a].cmp(&keys[b]);
+        if sort.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    });
+    let mut taken: Vec<Option<PreparedRow>> = std::mem::take(rows).into_iter().map(Some).collect();
+    rows.extend(order.into_iter().filter_map(|index| taken[index].take()));
     if sort.reverse {
         rows.reverse();
     }
@@ -1501,7 +1555,7 @@ fn apply_maps(source: &Dataset, mark: &Mark) -> (Dataset, Mark) {
                 }
             }
             for (row, value) in rows.iter_mut().zip(output) {
-                *row = std::mem::take(row).with(&field, value);
+                row.set(&field, value);
             }
             let c = &mut mark.channels;
             match name {
@@ -1608,8 +1662,7 @@ fn normalize_rows(rows: &mut [PreparedRow]) {
 /// input, and `y1`/`y2` fall back to `y` when the mark names no interval —
 /// Plot's `maybeInput` — so `{y1: "min"}` is the smallest y value even though
 /// a bar's interval has already been grown from zero by the time it groups.
-fn group_input(row: &PreparedRow, mark: &Mark, output: &crate::mark::GroupOutput) -> Value {
-    let name = output.input.as_deref().unwrap_or(&output.name);
+fn group_input(row: &PreparedRow, mark: &Mark, name: &str) -> Value {
     match name {
         // An interval's end falls back to the channel it splits, the way
         // Plot's `maybeInput` does.
@@ -1645,10 +1698,14 @@ fn group_input(row: &PreparedRow, mark: &Mark, output: &crate::mark::GroupOutput
 /// stacks. Each group becomes one row: the grouping channels keep their key,
 /// the outputs hold the reductions, and a positional channel neither keeps,
 /// as Plot drops it. The groups keep their first appearance's order.
+///
+/// An output's `$in:<name>` input reads that channel of `bound`, the mark's
+/// channels before its outputs replaced them (see [`bound_input`]).
 fn collapse_groups(
     rows: Vec<PreparedRow>,
     mark: &Mark,
     config: &crate::mark::GroupConfig,
+    bound: &Channels,
 ) -> Vec<PreparedRow> {
     let by_x = config.both || config.axis == Some(Axis::X);
     let by_y = config.both || config.axis == Some(Axis::Y);
@@ -1673,12 +1730,17 @@ fn collapse_groups(
         )
     };
     let total = rows.len().max(1) as f64;
-    let mut groups: Vec<(_, Vec<PreparedRow>)> = Vec::new();
-    for row in rows {
-        let k = key(&row);
-        match groups.iter_mut().find(|(existing, _)| *existing == k) {
-            Some((_, members)) => members.push(row),
-            None => groups.push((k, vec![row])),
+    // Each group's member indices, in first-appearance order, and members in
+    // row order.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut slots: rustc_hash::FxHashMap<_, usize> = Default::default();
+    for (index, row) in rows.iter().enumerate() {
+        match slots.entry(key(row)) {
+            std::collections::hash_map::Entry::Occupied(slot) => groups[*slot.get()].push(index),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(groups.len());
+                groups.push(vec![index]);
+            }
         }
     }
     // Plot's default output: a count into the channel the grouping leaves
@@ -1699,10 +1761,11 @@ fn collapse_groups(
         &config.outputs
     };
 
+    let needs_records = outputs.iter().any(|output| output.reducer.reads_records());
     groups
         .into_iter()
-        .map(|(_, members)| {
-            let first = members[0].clone();
+        .map(|members| {
+            let first = rows[members[0]].clone();
             let mut grouped = PreparedRow {
                 x: if by_x {
                     first.x_value().clone()
@@ -1720,18 +1783,44 @@ fn collapse_groups(
                 y2: None,
                 ..first
             };
-            let records: Vec<&Table> = members.iter().map(|row| &row.row).collect();
+            let records: Vec<&Table> = if needs_records {
+                members.iter().map(|&index| &rows[index].row).collect()
+            } else {
+                Vec::new()
+            };
+            // The values an input reads, per input name: a box's bar reads
+            // its q1 and q3 from one column.
+            let mut columns: Vec<(&str, Vec<Value>)> = Vec::new();
             for output in outputs {
-                let values: Vec<Value> = members
-                    .iter()
-                    .map(|row| group_input(row, mark, output))
-                    .collect();
                 let reduced = match output.reducer {
                     // Plot's `proportion`: the group's share of every row.
                     transform::GroupReducer::Proportion => {
                         Value::Number(members.len() as f64 / total)
                     }
-                    _ => output.reducer.reduce(&values, &records),
+                    // A count counts every member, null or not.
+                    transform::GroupReducer::Count => Value::Number(members.len() as f64),
+                    _ => {
+                        let name = output.input.as_deref().unwrap_or(&output.name);
+                        let slot = match columns.iter().position(|(n, _)| *n == name) {
+                            Some(slot) => slot,
+                            None => {
+                                // A `$in:` input reads the mark's own channel.
+                                let input_slot = bound_slot(name);
+                                let values = members
+                                    .iter()
+                                    .map(|&index| match input_slot {
+                                        Some(channel) => {
+                                            bound_input(bound, channel, name, &rows[index].row)
+                                        }
+                                        None => group_input(&rows[index], mark, name),
+                                    })
+                                    .collect();
+                                columns.push((name, values));
+                                columns.len() - 1
+                            }
+                        };
+                        output.reducer.reduce(&columns[slot].1, &records)
+                    }
                 };
                 match &*output.name {
                     "x" => grouped.x = reduced.clone(),
@@ -1749,7 +1838,7 @@ fn collapse_groups(
                 }
                 // The record gains every output under its name, so a channel
                 // that reads it — a fill, a text label, a tip — sees it.
-                grouped.row = grouped.row.with(output.name.clone(), reduced);
+                grouped.row.set(output.name.clone(), reduced);
             }
             derive_intervals(
                 mark,
@@ -1922,25 +2011,31 @@ pub fn resolve_raster(
 /// The channel names a transform output can read from the mark itself.
 const BOUND: [&str; 4] = ["fill", "stroke", "text", "title"];
 
-/// Write each bound channel's value onto its row's record as `$in:<name>`.
-fn materialize_inputs(original: &Mark, rows: &mut [PreparedRow]) {
-    let c = &original.channels;
-    for row in rows.iter_mut() {
-        let mut record = row.row.clone();
-        for name in BOUND {
-            let value = match name {
-                "fill" => c.fill.as_ref().and_then(|ch| ch.scaled_value(&row.row)),
-                "stroke" => c.stroke.as_ref().and_then(|ch| ch.scaled_value(&row.row)),
-                "text" => c.text.as_ref().map(|ch| ch.read(&row.row)),
-                "title" => c.title.as_ref().map(|ch| ch.read(&row.row)),
-                _ => None,
-            };
-            if let Some(value) = value {
-                record = record.with(format!("$in:{name}"), value);
-            }
-        }
-        row.row = record;
-    }
+/// The [`BOUND`] channel an input names as `$in:<name>`, the input
+/// [`bind_outputs`] gives an output that reads the mark's own channel.
+fn bound_slot(input: &str) -> Option<usize> {
+    let name = input.strip_prefix("$in:")?;
+    BOUND.iter().position(|bound| *bound == name)
+}
+
+/// The value a `$in:<name>` input reads from `record`: the original mark's
+/// channel of that name (its slot in [`BOUND`], from [`bound_slot`]), else
+/// the record's own field of the input's name.
+fn bound_input(channels: &Channels, slot: usize, input: &str, record: &Table) -> Value {
+    let value = match slot {
+        0 => channels
+            .fill
+            .as_ref()
+            .and_then(|ch| ch.scaled_value(record)),
+        1 => channels
+            .stroke
+            .as_ref()
+            .and_then(|ch| ch.scaled_value(record)),
+        2 => channels.text.as_ref().map(|ch| ch.read(record)),
+        3 => channels.title.as_ref().map(|ch| ch.read(record)),
+        _ => None,
+    };
+    value.unwrap_or_else(|| record.value(input))
 }
 
 /// The mark as its transforms leave it: a group or bin output to `fill`,
@@ -1965,8 +2060,8 @@ fn bind_outputs(mark: &Mark) -> Option<Mark> {
         return None;
     }
     let mut mark = mark.clone();
-    // Outputs with no input read the mark's channel of their name, from the
-    // value [`materialize_inputs`] writes.
+    // Outputs with no input read the mark's channel of their name, through
+    // [`bound_input`].
     let has = |name: &str| match name {
         "fill" => mark
             .channels
@@ -2141,23 +2236,45 @@ fn bin_edges(
     mark: &Mark,
     rows: &[Table],
 ) -> (Option<transform::BinEdges>, Option<transform::BinEdges>) {
+    let (x_channel, y_channel) = bin_channels(mark);
+    let numbers = |channel: Option<&crate::table::Channel>| -> Option<Vec<f64>> {
+        let channel = channel?;
+        Some(
+            rows.iter()
+                .filter_map(|row| channel.read(row).as_number())
+                .collect(),
+        )
+    };
+    bin_edges_with(mark, || numbers(x_channel), || numbers(y_channel))
+}
+
+/// [`bin_edges`] over the numbers each bin channel already read, one per row
+/// (`None` where the channel is absent, or the row's value is not a number).
+fn bin_edges_of(
+    mark: &Mark,
+    xs: Option<&[Option<f64>]>,
+    ys: Option<&[Option<f64>]>,
+) -> (Option<transform::BinEdges>, Option<transform::BinEdges>) {
+    let numbers = |numbers: Option<&[Option<f64>]>| -> Option<Vec<f64>> {
+        Some(numbers?.iter().flatten().copied().collect())
+    };
+    bin_edges_with(mark, || numbers(xs), || numbers(ys))
+}
+
+/// The edges over each bin axis's numbers, which are only gathered when the
+/// mark has no pinned edges on that axis.
+fn bin_edges_with(
+    mark: &Mark,
+    xs: impl FnOnce() -> Option<Vec<f64>>,
+    ys: impl FnOnce() -> Option<Vec<f64>>,
+) -> (Option<transform::BinEdges>, Option<transform::BinEdges>) {
     let Some(bin) = &mark.bin else {
         return (None, None);
     };
-    let (x_channel, y_channel) = bin_channels(mark);
-    let edges = |channel: Option<&crate::table::Channel>, pinned: Option<transform::BinEdges>| {
-        pinned.or_else(|| {
-            let channel = channel?;
-            let values: Vec<f64> = rows
-                .iter()
-                .filter_map(|row| channel.read(row).as_number())
-                .collect();
-            transform::BinEdges::of(&values, bin.thresholds)
-        })
-    };
+    let edges = |numbers: Option<Vec<f64>>| transform::BinEdges::of(&numbers?, bin.thresholds);
     (
-        edges(x_channel, bin.edges[0]),
-        edges(y_channel, bin.edges[1]),
+        bin.edges[0].or_else(|| edges(xs())),
+        bin.edges[1].or_else(|| edges(ys())),
     )
 }
 
@@ -2208,14 +2325,27 @@ type BinCells = std::collections::BTreeMap<(usize, usize), Vec<usize>>;
 /// channel. A one-dimensional count is stacked across the series in each bin,
 /// Plot's implicit `stackY` for `rectY`; an `opacity` or `fillOpacity` output
 /// goes through Plot's default opacity scale, `[0, max] → [0, 1]`.
-fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
+///
+/// An output's `$in:<name>` input reads that channel of `bound`, as a
+/// group's does.
+fn bin_rows(mark: &Mark, rows: &[PreparedRow], bound: &Channels) -> Vec<PreparedRow> {
     let Some(bin) = &mark.bin else {
         return rows.to_vec();
     };
     let (bin_x, bin_y) = bin_axes(mark);
     let (x_channel, y_channel) = bin_channels(mark);
-    let tables: Vec<Table> = rows.iter().map(|row| row.row.clone()).collect();
-    let (x_edges, y_edges) = bin_edges(mark, &tables);
+    // Each bin channel's number per row, read once for both the edges and
+    // the slots.
+    let numbers = |channel: Option<&crate::table::Channel>| {
+        channel.map(|channel| {
+            let hint = std::cell::Cell::new(0);
+            rows.iter()
+                .map(|row| channel.read_hinted(&row.row, &hint).as_number())
+                .collect::<Vec<_>>()
+        })
+    };
+    let (xs, ys) = (numbers(x_channel), numbers(y_channel));
+    let (x_edges, y_edges) = bin_edges_of(mark, xs.as_deref(), ys.as_deref());
     if (bin_x && x_edges.is_none()) || (bin_y && y_edges.is_none()) {
         return Vec::new();
     }
@@ -2247,34 +2377,39 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
     };
 
     // Group the rows by series, then by bin cell. The series keep their
-    // sorted order, the order the color scale and the stack use.
-    let mut series: std::collections::BTreeMap<Option<crate::value::ValueKey>, (usize, BinCells)> =
-        std::collections::BTreeMap::new();
+    // sorted order, the order the color scale and the stack use. A series
+    // gathers its cells in a hash map, then sorts them once.
+    type Gathering = rustc_hash::FxHashMap<(usize, usize), Vec<usize>>;
+    let mut gathering: std::collections::BTreeMap<
+        Option<crate::value::ValueKey>,
+        (usize, Gathering),
+    > = std::collections::BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
-        let slot =
-            |channel: Option<&crate::table::Channel>, edges: Option<transform::BinEdges>| match (
-                channel, edges,
-            ) {
-                (Some(channel), Some(edges)) => {
-                    let value = channel
-                        .read(&row.row)
-                        .as_number()
-                        .filter(|v| v.is_finite())?;
-                    Some(edges.slot(value))
-                }
-                _ => Some(0),
-            };
-        let (Some(xi), Some(yi)) = (slot(x_channel, x_edges), slot(y_channel, y_edges)) else {
+        let slot = |numbers: &Option<Vec<Option<f64>>>, edges: Option<transform::BinEdges>| match (
+            numbers, edges,
+        ) {
+            (Some(numbers), Some(edges)) => {
+                let value = numbers[index].filter(|v| v.is_finite())?;
+                Some(edges.slot(value))
+            }
+            _ => Some(0),
+        };
+        let (Some(xi), Some(yi)) = (slot(&xs, x_edges), slot(&ys, y_edges)) else {
             continue;
         };
-        series
+        gathering
             .entry(row.z.as_ref().map(|z| z.key()))
-            .or_insert_with(|| (index, BinCells::new()))
+            .or_insert_with(|| (index, Gathering::default()))
             .1
             .entry((xi, yi))
             .or_default()
             .push(index);
     }
+    let mut series: std::collections::BTreeMap<Option<crate::value::ValueKey>, (usize, BinCells)> =
+        gathering
+            .into_iter()
+            .map(|(key, (first, cells))| (key, (first, cells.into_iter().collect())))
+            .collect();
 
     // Plot's `cumulative` and `filter: null` see every bin, empty or not:
     // a cumulative bin gathers its predecessors' rows (or, negative, its
@@ -2313,6 +2448,42 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
         }
     }
 
+    // Each output's input: its input field, else the channel it outputs to
+    // (the mark's own `y` for `{y: "sum"}`), else a field of its name.
+    // An input the mark binds (`$in:fill`) reads the original mark's channel.
+    type Input<'a> = (
+        Option<SharedString>,
+        Option<usize>,
+        Option<&'a crate::table::Channel>,
+    );
+    let inputs: Vec<Input> = outputs
+        .iter()
+        .map(|output| {
+            let channel = match output.name.as_ref() {
+                "y" if !bin_y => mark.channels.y.as_ref(),
+                "x" if !bin_x => mark.channels.x.as_ref(),
+                _ => None,
+            };
+            let input = output.input.clone().or_else(|| match output.name.as_ref() {
+                "x" | "y" => None,
+                _ => Some(output.name.clone()),
+            });
+            let slot = input.as_deref().and_then(bound_slot);
+            (input, slot, channel)
+        })
+        .collect();
+    let needs_records = outputs.iter().any(|output| output.reducer.reads_records());
+    // A bin outputs its extent (`x1`, `x2`) and, for the marks that read a
+    // point (a dot, a text), its midpoint as `x`.
+    let point_mark = !matches!(
+        mark.kind,
+        MarkKind::Rect
+            | MarkKind::RectX
+            | MarkKind::RectY
+            | MarkKind::BarX
+            | MarkKind::BarY
+            | MarkKind::Cell
+    );
     let mut binned: Vec<PreparedRow> = Vec::new();
     // The running top (and bottom, for negative values) of each
     // one-dimensional bin's stack.
@@ -2323,18 +2494,11 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
             // An empty bin (kept by `filter: null`) takes its series' first
             // row, as Plot reads z, fill and stroke from the group's first.
             let mut row = rows[members.first().copied().unwrap_or(*first)].clone();
-            let records: Vec<&Table> = members.iter().map(|index| &rows[*index].row).collect();
-            // A bin outputs its extent (`x1`, `x2`) and, for the marks that
-            // read a point (a dot, a text), its midpoint as `x`.
-            let point_mark = !matches!(
-                mark.kind,
-                MarkKind::Rect
-                    | MarkKind::RectX
-                    | MarkKind::RectY
-                    | MarkKind::BarX
-                    | MarkKind::BarY
-                    | MarkKind::Cell
-            );
+            let records: Vec<&Table> = if needs_records {
+                members.iter().map(|index| &rows[*index].row).collect()
+            } else {
+                Vec::new()
+            };
             if let Some(edges) = x_edges.filter(|_| bin_x) {
                 let (x0, x1) = edges.bounds(xi);
                 row.x = if point_mark {
@@ -2355,36 +2519,30 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
                 row.y1 = Some(Value::Number(y0));
                 row.y2 = Some(Value::Number(y1));
             }
-            for output in &outputs {
-                // A reducer reads its input field, else the channel it
-                // outputs to (the mark's own `y` for `{y: "sum"}`), else a
-                // field of its name.
-                let channel = match output.name.as_ref() {
-                    "y" if !bin_y => mark.channels.y.as_ref(),
-                    "x" if !bin_x => mark.channels.x.as_ref(),
-                    "fill" => None,
-                    _ => None,
-                };
-                let input = output.input.clone().or_else(|| match output.name.as_ref() {
-                    "x" | "y" => None,
-                    name => Some(SharedString::from(name.to_string())),
-                });
-                let values: Vec<Value> = members
-                    .iter()
-                    .map(|index| {
-                        let record = &rows[*index].row;
-                        match (&input, channel) {
-                            (Some(field), _) => record.value(field),
-                            (None, Some(channel)) => channel.read(record),
-                            (None, None) => Value::Null,
-                        }
-                    })
-                    .collect();
+            for (output, (input, slot, channel)) in outputs.iter().zip(&inputs) {
                 let reduced = match output.reducer {
                     transform::GroupReducer::Proportion => {
                         Value::Number(members.len() as f64 / rows.len().max(1) as f64)
                     }
-                    _ => output.reducer.reduce(&values, &records),
+                    // A count counts every member, null or not.
+                    transform::GroupReducer::Count => Value::Number(members.len() as f64),
+                    _ => {
+                        let values: Vec<Value> = members
+                            .iter()
+                            .map(|index| {
+                                let record = &rows[*index].row;
+                                match (input, channel) {
+                                    (Some(field), _) => match slot {
+                                        Some(slot) => bound_input(bound, *slot, field, record),
+                                        None => record.value(field),
+                                    },
+                                    (None, Some(channel)) => channel.read(record),
+                                    (None, None) => Value::Null,
+                                }
+                            })
+                            .collect();
+                        output.reducer.reduce(&values, &records)
+                    }
                 };
                 let number = reduced.as_number().unwrap_or(0.);
                 match output.name.as_ref() {
@@ -2426,7 +2584,7 @@ fn bin_rows(mark: &Mark, rows: &[PreparedRow]) -> Vec<PreparedRow> {
                     "r" => row.r_value = Some(number),
                     _ => {}
                 }
-                row.row = row.row.clone().with(output.name.clone(), reduced);
+                row.row.set(output.name.clone(), reduced);
             }
             binned.push(row);
         }
@@ -3097,6 +3255,24 @@ mod transform_order_tests {
     }
 
     #[test]
+    fn sort_keeps_ties_in_input_order() {
+        // A stable sort: rows with equal keys keep their input order, whichever
+        // the direction.
+        let data = Dataset::new(nums(&[2., 1., 2., 1., 2.]));
+        for descending in [false, true] {
+            let mark = Mark::new(MarkKind::Dot).x("x").y("v").sort("v", descending);
+            let rows = &prepare(&data, &[mark])[0].rows;
+            let order: Vec<f64> = rows.iter().filter_map(|r| r.x.as_number()).collect();
+            let expected = if descending {
+                [0., 2., 4., 1., 3.]
+            } else {
+                [1., 3., 0., 2., 4.]
+            };
+            assert_eq!(order, expected);
+        }
+    }
+
+    #[test]
     fn window_runs_before_draw() {
         // A window rewrites the y value in place; the first row of a backward
         // cumulative window is its own value only if the window ran before the
@@ -3326,6 +3502,43 @@ mod bin_tests {
                 row.y1.as_ref().unwrap().as_number().unwrap() > 0.,
                 "male stacks on female"
             );
+        }
+    }
+
+    #[test]
+    fn a_group_output_reads_the_mark_s_own_channel() {
+        // `groupX({fill: "mean"}, {x: "height", fill: "weight"})` averages
+        // each height's weights, and the bar's fill then reads the output.
+        let mark = Mark::new(MarkKind::BarY)
+            .x("height")
+            .fill("weight")
+            .group_x()
+            .group_output("fill", GroupReducer::Mean);
+        let rows = &prepare(&athletes(), &[mark])[0].rows;
+        let fills: Vec<(Value, Value)> = rows
+            .iter()
+            .map(|row| (row.x.clone(), row.row.value("fill")))
+            .collect();
+        assert_eq!(
+            fills,
+            vec![
+                (Value::Number(1.6), Value::Number(69.)),
+                (Value::Number(1.9), Value::Number(70.)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bin_output_reads_the_mark_s_own_channel() {
+        let mark: Mark = Mark::new(MarkKind::RectY)
+            .x("weight")
+            .fill("height")
+            .bin_output("fill", GroupReducer::Mean);
+        let rows = &prepare(&athletes(), &[mark])[0].rows;
+        assert!(!rows.is_empty());
+        for row in rows {
+            let mean = row.row.value("fill").as_number().unwrap();
+            assert!((1.6..=1.9).contains(&mean), "{mean}");
         }
     }
 

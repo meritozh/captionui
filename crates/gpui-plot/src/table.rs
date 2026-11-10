@@ -68,18 +68,49 @@ impl Table {
 
     /// Set a field, replacing any value already under that name.
     pub fn with(mut self, name: impl Into<SharedString>, value: impl Into<Value>) -> Self {
+        self.set(name, value);
+        self
+    }
+
+    /// Set a field in place, replacing any value already under that name.
+    pub fn set(&mut self, name: impl Into<SharedString>, value: impl Into<Value>) {
         let name = name.into();
         let value = value.into();
         match self.position(&name) {
             Ok(i) => Rc::make_mut(&mut self.fields)[i].1 = value,
-            Err(i) => Rc::make_mut(&mut self.fields).insert(i, (name, value)),
+            Err(i) => match Rc::get_mut(&mut self.fields) {
+                Some(fields) => fields.insert(i, (name, value)),
+                // A shared table copies its fields once, with room for the
+                // new one, rather than copying and then growing.
+                None => {
+                    let mut fields = Vec::with_capacity(self.fields.len() + 1);
+                    fields.extend_from_slice(&self.fields[..i]);
+                    fields.push((name, value));
+                    fields.extend_from_slice(&self.fields[i..]);
+                    self.fields = Rc::new(fields);
+                }
+            },
         }
-        self
     }
 
     /// Read a field by name.
     pub fn get(&self, name: &str) -> Option<&Value> {
         self.position(name).ok().map(|i| &self.fields[i].1)
+    }
+
+    /// [`Table::get`], trying `hint` first: the field's position in the last
+    /// record read, which records of one shape share. A miss searches, and
+    /// leaves the position found in `hint`.
+    #[inline]
+    pub(crate) fn get_hinted(&self, name: &str, hint: &std::cell::Cell<usize>) -> Option<&Value> {
+        if let Some((key, value)) = self.fields.get(hint.get())
+            && key.as_ref() == name
+        {
+            return Some(value);
+        }
+        let i = self.position(name).ok()?;
+        hint.set(i);
+        Some(&self.fields[i].1)
     }
 
     /// Read a field by name, or [`Value::Null`] when the field is absent.
@@ -344,6 +375,21 @@ impl Channel {
             Channel::Accessor(accessor) => accessor(row),
         }
     }
+
+    /// [`Channel::read`], finding a field through `hint` (see
+    /// [`Table::get_hinted`]), for a loop that reads one channel over many
+    /// records.
+    #[inline]
+    pub(crate) fn read_hinted(&self, row: &Table, hint: &std::cell::Cell<usize>) -> Value {
+        match self {
+            Channel::Field(name) => match row.get_hinted(name, hint) {
+                Some(Value::Number(n)) if n.is_nan() => Value::Null,
+                Some(value) => value.clone(),
+                None => Value::Null,
+            },
+            _ => self.read(row),
+        }
+    }
 }
 
 impl std::fmt::Debug for Channel {
@@ -471,5 +517,39 @@ mod tests {
     fn later_fields_replace_earlier() {
         let row = Table::new([("v", Value::Number(1.)), ("v", Value::Number(2.))]);
         assert_eq!(row.number("v"), Some(2.));
+    }
+
+    #[test]
+    fn hinted_reads_match_plain_reads_across_shapes() {
+        let rows = [
+            Table::new([("a", Value::Number(1.)), ("v", Value::Number(2.))]),
+            Table::new([("v", Value::Number(3.))]),
+            Table::new([("a", Value::Number(4.)), ("b", Value::Number(5.))]),
+            Table::new([("v", Value::Number(f64::NAN)), ("z", Value::Number(6.))]),
+            Table::new([("a", Value::Number(7.)), ("v", Value::Number(8.))]),
+        ];
+        let channel = Channel::from("v");
+        let hint = std::cell::Cell::new(0);
+        for row in &rows {
+            assert_eq!(channel.read_hinted(row, &hint), channel.read(row));
+        }
+    }
+
+    #[test]
+    fn set_copies_a_shared_table_once() {
+        let shared = Table::new([("a", Value::Number(1.)), ("c", Value::Number(3.))]);
+        let mut copy = shared.clone();
+        copy.set("b", Value::Number(2.));
+        copy.set("a", Value::Number(0.));
+        assert_eq!(shared.number("a"), Some(1.));
+        assert!(shared.get("b").is_none());
+        assert_eq!(
+            copy,
+            Table::new([
+                ("a", Value::Number(0.)),
+                ("b", Value::Number(2.)),
+                ("c", Value::Number(3.)),
+            ])
+        );
     }
 }

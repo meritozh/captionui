@@ -44,11 +44,13 @@ pub enum Reducer {
 impl Reducer {
     /// Reduce `values` to one value.
     pub fn reduce(self, values: &[Value]) -> Value {
-        let numbers: Vec<f64> = values.iter().filter_map(Value::as_number).collect();
+        // Only the numeric reducers read the values as numbers.
+        let numbers = || -> Vec<f64> { values.iter().filter_map(Value::as_number).collect() };
         match self {
             Reducer::Count => Value::Number(values.len() as f64),
-            Reducer::Sum => Value::Number(numbers.iter().sum()),
+            Reducer::Sum => Value::Number(values.iter().filter_map(Value::as_number).sum()),
             Reducer::Mean => {
+                let numbers = numbers();
                 if numbers.is_empty() {
                     Value::Null
                 } else {
@@ -88,10 +90,10 @@ impl Reducer {
                 .cloned()
                 .unwrap_or(Value::Null),
             Reducer::Median => {
-                if numbers.is_empty() {
+                let mut sorted = numbers();
+                if sorted.is_empty() {
                     return Value::Null;
                 }
-                let mut sorted = numbers.clone();
                 sorted.sort_by(f64::total_cmp);
                 let mid = sorted.len() / 2;
                 Value::Number(if sorted.len().is_multiple_of(2) {
@@ -101,6 +103,7 @@ impl Reducer {
                 })
             }
             Reducer::Deviation => {
+                let numbers = numbers();
                 if numbers.len() < 2 {
                     return Value::Number(0.);
                 }
@@ -109,7 +112,13 @@ impl Reducer {
                     / (numbers.len() - 1) as f64;
                 Value::Number(variance.sqrt())
             }
-            Reducer::SumOfSquares => Value::Number(numbers.iter().map(|n| n * n).sum()),
+            Reducer::SumOfSquares => Value::Number(
+                values
+                    .iter()
+                    .filter_map(Value::as_number)
+                    .map(|n| n * n)
+                    .sum(),
+            ),
         }
     }
 }
@@ -189,6 +198,13 @@ impl GroupReducer {
             q if q.starts_with('p') => Self::Quantile(q[1..].parse::<f64>().ok()? / 100.),
             _ => return None,
         })
+    }
+
+    /// Whether the reducer reads the group's records, not just its values:
+    /// only `find` and a custom reducer do, so the others can skip gathering
+    /// them.
+    pub(crate) fn reads_records(&self) -> bool {
+        matches!(self, GroupReducer::Find(_) | GroupReducer::Custom(_))
     }
 
     /// Reduce one group: its values, and the records they came from.
