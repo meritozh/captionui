@@ -5141,6 +5141,130 @@ mod equivalence_tests {
         }
     }
 
+    /// Records whose shapes differ from one to the next: each holds `n` and
+    /// a seeded subset of the channel fields and of decoys whose names sort
+    /// beside them, so a field's position (and whether it is there at all)
+    /// keeps changing under the hints the fast paths read through.
+    fn mixed_shapes() -> Vec<Table> {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let keys = [
+            Value::text("a"),
+            Value::text("b"),
+            Value::Number(-0.),
+            Value::Number(0.),
+            Value::Number(f64::NAN),
+            Value::Null,
+            Value::Date(chrono::DateTime::from_timestamp(9, 1).expect("an instant")),
+            Value::Date(chrono::DateTime::from_timestamp(9, 2).expect("an instant")),
+        ];
+        (0..160)
+            .map(|i| {
+                let r = next();
+                let mut row = Table::new([("n", Value::Number(i as f64))]);
+                let has = |bit: u32| r >> bit & 3 != 0;
+                if has(0) {
+                    row.set("c", keys[(r >> 8) as usize % keys.len()].clone());
+                }
+                if has(2) {
+                    let v = match (r >> 12) % 9 {
+                        0 => Value::Null,
+                        1 => Value::Number(f64::NAN),
+                        2 => Value::Number(-0.),
+                        3 => Value::Number(if i % 2 == 0 { 900. } else { -900. }),
+                        k => Value::Number(k as f64 * 1.5 + (i % 5) as f64),
+                    };
+                    row.set("v", v);
+                }
+                if has(4) {
+                    row.set("w", Value::Number(((r >> 16) % 7) as f64));
+                }
+                if has(6) {
+                    row.set("g", Value::text(["x", "y", "z"][(r >> 20) as usize % 3]));
+                }
+                // Decoys beside the sought names, before and after them.
+                for (bit, name) in [(24, "b"), (26, "cc"), (28, "u"), (30, "va"), (32, "wz")] {
+                    if r >> bit & 1 == 1 {
+                        row.set(name, Value::Number(1.));
+                    }
+                }
+                row
+            })
+            .collect()
+    }
+
+    /// The fast paths (a grouping streamed from cores, outliers read from
+    /// cores, a bin over the records) over records of changing shapes give
+    /// the rows the collected paths give: a sort by the record's index
+    /// collects the rows first without reordering them.
+    #[test]
+    fn fast_paths_read_mixed_record_shapes_as_collected_rows_do() {
+        let data = Dataset::new(mixed_shapes());
+        let outliers = |mut mark: Mark, axis: Axis| {
+            mark.outliers = Some(axis);
+            mark
+        };
+        let marks = [
+            Mark::new(MarkKind::BarY)
+                .x("c")
+                .y("v")
+                .group_x()
+                .group_output("y", GroupReducer::Median),
+            Mark::new(MarkKind::Dot)
+                .x("c")
+                .y("v")
+                .stroke("g")
+                .r("w")
+                .group_xy()
+                .group_output("r", GroupReducer::Count),
+            Mark::new(MarkKind::RuleX)
+                .x("c")
+                .y1("w")
+                .y2("v")
+                .group_x()
+                .group_output("y2", GroupReducer::Quantile(0.75)),
+            Mark::new(MarkKind::Dot)
+                .x("w")
+                .fill("v")
+                .group_z()
+                .group_output("fill", GroupReducer::Mean),
+            outliers(Mark::new(MarkKind::Dot).x("g").y("v").z("g"), Axis::Y),
+            outliers(Mark::new(MarkKind::Dot).y("c").x("v").z("c"), Axis::X),
+            Mark::new(MarkKind::RectY)
+                .x("v")
+                .fill("g")
+                .bin(Thresholds::Count(5))
+                .bin_output("y", GroupReducer::Count),
+            Mark::new(MarkKind::Dot)
+                .x("v")
+                .y("w")
+                .stroke("c")
+                .bin(Thresholds::Count(4))
+                .bin_output("r", GroupReducer::Sum),
+            Mark::new(MarkKind::RectX)
+                .y("w")
+                .stroke("v")
+                .bin(Thresholds::Count(3))
+                .bin_output("x", GroupReducer::Max),
+        ];
+        for mark in marks {
+            let fast = &prepare(&data, std::slice::from_ref(&mark))[0];
+            let collected = &prepare(&data, &[mark.clone().sort("n", false)])[0];
+            assert!(!fast.rows.is_empty(), "{:?}", mark.kind);
+            assert_eq!(
+                format!("{:?}", fast.rows),
+                format!("{:?}", collected.rows),
+                "{:?}",
+                mark.kind
+            );
+        }
+    }
+
     /// A hexbin's bins, hashed on their series and cell, are the bins a
     /// linear search by equality finds: the keys that compare equal (-0 and
     /// +0, every NaN) hash alike, and the bins keep their first appearance.
