@@ -36,6 +36,7 @@ extern crate gpui_kit as gpui;
 
 pub mod auto;
 pub mod css;
+mod debug_dump;
 pub mod delaunay;
 pub mod density;
 pub mod facet;
