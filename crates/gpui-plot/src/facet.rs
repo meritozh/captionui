@@ -381,4 +381,66 @@ mod tests {
         grid.set_empty(&[true; 4]);
         assert!(!grid.is_empty(3));
     }
+
+    #[test]
+    fn partitions_match_a_cell_by_cell_scan() {
+        use crate::table::{Channel, Dataset, Table};
+        // Keys that only a careful lookup keeps apart or together: null, -0
+        // and +0, a NaN an accessor keeps, a boolean, and keys outside the
+        // grid's domains.
+        let keys = [
+            Value::text("a"),
+            Value::Null,
+            Value::Number(-0.),
+            Value::Number(0.),
+            Value::Number(f64::NAN),
+            Value::Bool(true),
+            Value::text("off-grid"),
+            Value::text("b"),
+        ];
+        let data = Dataset::new((0..64).map(|i| {
+            Table::new([
+                ("x", keys[i % keys.len()].clone()),
+                ("y", keys[(i / 3) % keys.len()].clone()),
+                ("n", Value::Number(i as f64)),
+            ])
+        }));
+        let fx = Channel::Accessor(std::rc::Rc::new(|row: &Table| row.value("x")));
+        let fy = Channel::Accessor(std::rc::Rc::new(|row: &Table| row.value("y")));
+        let domain = |values: &[Value]| Some(values.iter().map(Value::key).collect::<Vec<_>>());
+        let wanted = [
+            Value::Bool(true),
+            Value::Number(0.),
+            Value::Number(f64::NAN),
+            Value::text("a"),
+            Value::text("b"),
+            Value::text("absent"),
+            Value::Null,
+        ];
+        let grids = [
+            Grid::new(domain(&wanted), domain(&wanted[1..5])),
+            Grid::new(domain(&wanted), None),
+            Grid::new(None, domain(&wanted)),
+        ];
+        // The cell-by-cell scan the lookup replaced: a channel must match the
+        // cell's key on its axis; an axis without a channel matches any cell.
+        let fits = |channel: Option<&Channel>, have: &Option<ValueKey>, row: &Table| match channel {
+            None => true,
+            Some(channel) => have.as_ref() == Some(&channel.read(row).key()),
+        };
+        for grid in &grids {
+            for (cx, cy) in [(Some(&fx), Some(&fy)), (Some(&fx), None), (None, Some(&fy))] {
+                let groups = grid.partition_channels(&data, cx, cy);
+                assert_eq!(groups.len(), grid.cells.len());
+                for (cell, rows) in grid.cells.iter().zip(&groups) {
+                    let expected: Vec<&Table> = data
+                        .rows()
+                        .iter()
+                        .filter(|row| fits(cx, &cell.x, row) && fits(cy, &cell.y, row))
+                        .collect();
+                    assert_eq!(rows.iter().collect::<Vec<_>>(), expected, "{cell:?}");
+                }
+            }
+        }
+    }
 }

@@ -1021,4 +1021,33 @@ mod tests {
         assert!((color.h - (220. / 360.)).abs() < 0.01);
         assert!(color.a == 1.);
     }
+
+    #[test]
+    fn dedup_keeps_each_key_s_first_occurrence() {
+        let values = [
+            Value::Number(-0.),
+            Value::text("b"),
+            Value::Number(f64::NAN),
+            Value::Null,
+            Value::Number(0.),
+            Value::Number(-f64::NAN),
+            Value::text("a"),
+            Value::text("b"),
+            Value::Bool(false),
+            Value::Null,
+            Value::Number(1.),
+        ];
+        let keys = dedup(values.iter().map(Value::key));
+        // -0 and +0 are one key, as are the NaNs.
+        let expected = [
+            Value::Number(0.),
+            Value::text("b"),
+            Value::Number(f64::NAN),
+            Value::Null,
+            Value::text("a"),
+            Value::Bool(false),
+            Value::Number(1.),
+        ];
+        assert_eq!(keys, expected.iter().map(Value::key).collect::<Vec<_>>());
+    }
 }

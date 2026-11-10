@@ -4767,4 +4767,62 @@ mod tests {
         assert_eq!(grid.rows(), 2);
         assert_eq!(grid.cells.len(), 4);
     }
+
+    #[test]
+    fn facet_domains_read_every_distinct_source() {
+        // Marks over different data, with the same facet field, both add
+        // their values; one source read twice adds nothing.
+        let source =
+            |keys: &[&str]| Dataset::new(keys.iter().map(|k| Table::new([("k", Value::text(*k))])));
+        let (a, b) = (source(&["c", "a"]), source(&["b", "a"]));
+        let dot = |data: &Dataset| Mark::new(MarkKind::Dot).data(data.clone()).x("k");
+        let plot = Plot::plot()
+            .mark(dot(&a).fx("k"))
+            .mark(dot(&b).fx("k"))
+            .mark(dot(&a).fx("k"))
+            .mark(dot(&b).fy("k"));
+        let grid = plot.facet_grid();
+        assert_eq!(grid.fx_labels(), vec!["a", "b", "c"]);
+        assert_eq!(grid.fy_labels(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn facet_interval_wrappers_are_shared_per_axis_and_channel() {
+        let data: Vec<Table> = (0..30)
+            .map(|i| {
+                Table::new([
+                    ("v", Value::Number(i as f64)),
+                    ("w", Value::Number((i % 4) as f64)),
+                ])
+            })
+            .collect();
+        let plot = Plot::new(data.clone())
+            .fx("v")
+            .fx_scale(|s| s.interval(crate::mark::Interval::Step(10.)))
+            .fy_scale(|s| s.interval(crate::mark::Interval::Step(4.)))
+            .mark(Mark::new(MarkKind::Dot).x("w"))
+            .mark(Mark::new(MarkKind::Dot).x("w").fx("v"))
+            .mark(Mark::new(MarkKind::Dot).x("w").fx("v").fy("v"))
+            .mark(Mark::new(MarkKind::Dot).x("w").fx("w"));
+        let marks = plot.interval_marks().unwrap();
+        let fx = |m: usize| marks[m].fx.clone().unwrap();
+        // The plot's field and a mark's own field of that name share one
+        // wrapper; another field, or the other axis, gets its own.
+        assert!(fx(0).same(&fx(1)) && fx(1).same(&fx(2)));
+        assert!(!fx(3).same(&fx(0)));
+        let fy = marks[2].fy.clone().unwrap();
+        assert!(!fy.same(&fx(2)));
+        for row in &data {
+            let v = row.num("v");
+            assert_eq!(fx(2).read(row), Value::Number((v / 10.).floor() * 10.));
+            assert_eq!(fy.read(row), Value::Number((v / 4.).floor() * 4.));
+            assert_eq!(
+                fx(3).read(row),
+                Value::Number((row.num("w") / 10.).floor() * 10.)
+            );
+        }
+        let grid = plot.facet_grid();
+        assert_eq!(grid.fx_labels(), vec!["0", "10", "20"]);
+        assert_eq!(grid.fy.as_ref().map(Vec::len), Some(8));
+    }
 }

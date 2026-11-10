@@ -552,4 +552,101 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn fields_sort_by_name_whatever_the_build_order() {
+        // Static, owned and multi-byte names, digits that sort as text, and a
+        // repeated name, built through `new`, `with` and `set`.
+        let owned = String::from("$index");
+        let mut row = Table::new([
+            ("b", Value::Number(1.)),
+            ("10", Value::Number(10.)),
+            ("é", Value::text("accent")),
+            ("b", Value::Number(3.)),
+        ])
+        .with(owned.as_str(), Value::Number(9.))
+        .with(SharedString::new_static("a"), Value::Bool(true));
+        row.set("2", Value::Number(2.));
+        row.set("$value", Value::Null);
+        row.set("é", Value::text("again"));
+        let names: Vec<&str> = row.field_names().map(|name| name.as_ref()).collect();
+        assert_eq!(names, ["$index", "$value", "10", "2", "a", "b", "é"]);
+        assert_eq!(row.number("b"), Some(3.));
+        assert_eq!(row.number("$index"), Some(9.));
+        assert_eq!(row.text("é").map(|t| t.as_ref()), Some("again"));
+        for absent in ["", "1", "c", "zz", "$in:fill", "ü"] {
+            assert!(row.get(absent).is_none(), "{absent}");
+        }
+        // The same fields in another order make an equal table.
+        let other = Table::new([
+            ("é", Value::text("again")),
+            ("a", Value::Bool(true)),
+            ("2", Value::Number(2.)),
+            ("$value", Value::Null),
+            ("b", Value::Number(3.)),
+            ("10", Value::Number(10.)),
+            ("$index", Value::Number(9.)),
+        ]);
+        assert_eq!(row, other);
+        assert_ne!(row, other.with("b", Value::Number(4.)));
+    }
+
+    #[test]
+    fn tuples_and_values_keep_their_index_and_wide_rows() {
+        let data = Dataset::tuples([std::array::from_fn::<f64, 12, _>(|j| j as f64); 2]);
+        assert!(data.is_tuples() && !data.is_values());
+        for (i, row) in data.rows().iter().enumerate() {
+            for j in 0..12 {
+                assert_eq!(row.number(&j.to_string()), Some(j as f64));
+            }
+            assert_eq!(row.number(INDEX), Some(i as f64));
+            assert_eq!(row.len(), 13);
+        }
+        let values = Dataset::values_of([Value::text("a"), Value::Null]);
+        assert!(values.is_values() && !values.is_tuples());
+        assert_eq!(values.rows()[1].get(VALUE), Some(&Value::Null));
+        assert_eq!(values.rows()[1].number(INDEX), Some(1.));
+        assert_eq!(Dataset::length(3).rows()[2].number(INDEX), Some(2.));
+    }
+
+    #[test]
+    fn hinted_reads_survive_stale_hints_and_pass_other_channels_through() {
+        let row = Table::new([("a", Value::Number(1.)), ("v", Value::Number(2.))]);
+        for stale in [0, 1, 2, 99] {
+            let hint = std::cell::Cell::new(stale);
+            assert_eq!(
+                Channel::from("v").read_hinted(&row, &hint),
+                Value::Number(2.)
+            );
+            assert_eq!(Channel::from("w").read_hinted(&row, &hint), Value::Null);
+        }
+        let hint = std::cell::Cell::new(1);
+        let accessor = Channel::Accessor(std::rc::Rc::new(|row: &Table| row.value("a")));
+        assert_eq!(accessor.read_hinted(&row, &hint), Value::Number(1.));
+        let constant = Channel::Constant(Value::Number(f64::NAN));
+        assert_eq!(
+            constant.read_hinted(&row, &hint).key(),
+            constant.read(&row).key()
+        );
+    }
+
+    #[test]
+    fn channels_are_the_same_only_when_known_to_read_alike() {
+        let read = |row: &Table| row.value("v");
+        let a = Channel::Accessor(std::rc::Rc::new(read));
+        // The same code in another closure is another channel: identity is
+        // all a cache can trust.
+        let b = Channel::Accessor(std::rc::Rc::new(read));
+        assert!(a.same(&a.clone()));
+        assert!(!a.same(&b));
+        assert!(Channel::from("v").same(&Channel::Field("v".into())));
+        assert!(!Channel::from("v").same(&Channel::from("w")));
+        assert!(!Channel::from("v").same(&a));
+        assert!(Channel::Constant(Value::Number(0.)).same(&Channel::Constant(Value::Number(-0.))));
+        assert!(!Channel::Constant(Value::Number(1.)).same(&Channel::Constant(Value::text("1"))));
+        assert!(!Channel::Constant(Value::text("v")).same(&Channel::from("v")));
+        let rows = Dataset::new([Table::empty()]);
+        assert!(rows.same_rows(&rows.clone()));
+        assert!(!rows.same_rows(&Dataset::new([Table::empty()])));
+    }
 }

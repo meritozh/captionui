@@ -3607,3 +3607,419 @@ mod bin_tests {
         );
     }
 }
+
+/// The behaviour the pipeline's hot-loop rewrites must keep, each checked
+/// against a naive reading of the raw records: group and bin order, bound
+/// `$in:` inputs, box parts reading their value channel, facet partitions
+/// shared only between alike marks, and a `z` shared with a position.
+#[cfg(test)]
+mod equivalence_tests {
+    use super::*;
+    use crate::mark::{GroupOutput, SortConfig};
+    use crate::style::ColorChannel;
+    use crate::table::Channel;
+    use crate::transform::GroupReducer;
+    use crate::value::ValueKey;
+    use std::rc::Rc;
+
+    /// Records with awkward keys (text, null, -0 and +0, a NaN, a boolean)
+    /// and values with nulls and NaNs, carrying a field under a bound input's
+    /// internal name that the mark's own channel must win over.
+    fn records() -> Vec<Table> {
+        let keys = [
+            Value::text("b"),
+            Value::Null,
+            Value::text("a"),
+            Value::Number(-0.),
+            Value::Number(0.),
+            Value::Number(f64::NAN),
+            Value::Bool(true),
+            Value::text("b"),
+            Value::text("a"),
+        ];
+        (0..45)
+            .map(|i| {
+                let v = match i % 7 {
+                    2 => Value::Null,
+                    4 => Value::Number(f64::NAN),
+                    _ => Value::Number(((i * 37) % 23) as f64 + 0.5),
+                };
+                Table::new([
+                    ("c", keys[i % keys.len()].clone()),
+                    ("v", v),
+                    ("w", Value::Number(((i * 11) % 7) as f64)),
+                    ("n", Value::Number(i as f64)),
+                    ("g", Value::text(["x", "y", "z"][i % 3])),
+                    ("f", Value::text(["p", "q", "r"][(i / 2) % 3])),
+                    ("$in:fill", Value::text("planted")),
+                ])
+            })
+            .collect()
+    }
+
+    /// The members of each group, by first appearance, in row order.
+    fn naive_groups(rows: &[&Table], key: impl Fn(&Table) -> ValueKey) -> Vec<Vec<usize>> {
+        let mut groups: Vec<(ValueKey, Vec<usize>)> = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            let k = key(row);
+            match groups.iter_mut().find(|(existing, _)| *existing == k) {
+                Some((_, members)) => members.push(i),
+                None => groups.push((k, vec![i])),
+            }
+        }
+        groups.into_iter().map(|(_, members)| members).collect()
+    }
+
+    fn keys(values: impl IntoIterator<Item = Value>) -> Vec<ValueKey> {
+        values.into_iter().map(|v| v.key()).collect()
+    }
+
+    #[test]
+    fn groups_keep_first_appearance_order_and_row_order() {
+        let rows = records();
+        // An accessor keeps the NaN key, which a field reads as null.
+        let mut mark = Mark::new(MarkKind::Dot)
+            .x(|row: &Table| row.value("c"))
+            .group_x();
+        let config = mark.group.as_mut().unwrap();
+        for (name, reducer, input) in [
+            ("first", GroupReducer::First, "n"),
+            ("last", GroupReducer::Last, "n"),
+            ("count", GroupReducer::Count, "v"),
+            ("lo", GroupReducer::Min, "v"),
+            ("hi", GroupReducer::Max, "v"),
+            ("mean", GroupReducer::Mean, "v"),
+            ("spread", GroupReducer::Deviation, "v"),
+            ("found", GroupReducer::find(|row| row.num("w") > 3.), "n"),
+            ("share", GroupReducer::Proportion, "v"),
+        ] {
+            config
+                .outputs
+                .push(GroupOutput::new(name, reducer).input(input));
+        }
+        let outputs = config.outputs.clone();
+        let prepared = &prepare(&Dataset::new(rows.clone()), &[mark])[0];
+        let refs: Vec<&Table> = rows.iter().collect();
+        let groups = naive_groups(&refs, |row| row.value("c").key());
+        // -0 and +0 are one group, which keeps its first member's key.
+        assert_eq!(groups.len(), 6);
+        assert_eq!(prepared.rows.len(), groups.len());
+        for (row, members) in prepared.rows.iter().zip(&groups) {
+            assert_eq!(row.x.key(), rows[members[0]].value("c").key());
+            let records: Vec<&Table> = members.iter().map(|&i| &rows[i]).collect();
+            for output in &outputs {
+                let input = output.input.as_deref().unwrap();
+                let values: Vec<Value> = records.iter().map(|r| r.value(input)).collect();
+                let expected = match output.reducer {
+                    GroupReducer::Proportion => {
+                        Value::Number(members.len() as f64 / rows.len() as f64)
+                    }
+                    _ => output.reducer.reduce(&values, &records),
+                };
+                assert_eq!(
+                    row.row.value(&output.name).key(),
+                    expected.key(),
+                    "{} of {:?}",
+                    output.name,
+                    row.x
+                );
+            }
+            // A count counts every member, missing values too.
+            assert_eq!(row.row.number("count"), Some(members.len() as f64));
+        }
+    }
+
+    #[test]
+    fn bound_group_outputs_read_the_mark_s_own_channels() {
+        let rows = records();
+        let mut mark = Mark::new(MarkKind::Dot)
+            .x("g")
+            .fill(ColorChannel::value(|row: &Table| {
+                Value::number(row.num("w") * 3.)
+            }))
+            .text(|row: &Table| row.value("n"))
+            .tip_title(|row: &Table| row.value("v"))
+            .group_x()
+            .group_output("fill", GroupReducer::Sum)
+            .group_output("text", GroupReducer::First)
+            .group_output("title", GroupReducer::Last);
+        // Sorted first, so the first and last members follow the sort.
+        mark.sort = Some(SortConfig {
+            field: Some("n".into()),
+            descending: true,
+            reverse: false,
+        });
+        let prepared = &prepare(&Dataset::new(rows.clone()), &[mark])[0];
+        let mut sorted: Vec<&Table> = rows.iter().collect();
+        sorted.sort_by_key(|row| std::cmp::Reverse(row.value("n")));
+        let groups = naive_groups(&sorted, |row| row.value("g").key());
+        assert_eq!(prepared.rows.len(), groups.len());
+        for (row, members) in prepared.rows.iter().zip(&groups) {
+            let records: Vec<&Table> = members.iter().map(|&i| sorted[i]).collect();
+            let fill: f64 = records.iter().map(|r| r.num("w") * 3.).sum();
+            assert_eq!(row.row.number("fill"), Some(fill));
+            assert_eq!(row.row.value("text"), records[0].value("n"));
+            let last = GroupReducer::Last.reduce(
+                &records.iter().map(|r| r.value("v")).collect::<Vec<_>>(),
+                &records,
+            );
+            assert_eq!(row.row.value("title").key(), last.key());
+        }
+        // Each output then binds the mark's channel to its field.
+        assert!(matches!(
+            &prepared.mark.channels.fill,
+            Some(ColorChannel::Field(name)) if name == "fill"
+        ));
+    }
+
+    #[test]
+    fn bound_bin_outputs_read_the_mark_s_own_channels() {
+        // Values between the edges of 10-wide bins, so each lands in the bin
+        // floor(v / 10).
+        let rows: Vec<Table> = (0..40)
+            .map(|i| {
+                Table::new([
+                    ("v", Value::Number(((i * 7) % 50) as f64 + 0.5)),
+                    ("w", Value::Number((i % 5) as f64)),
+                    ("$in:fill", Value::text("planted")),
+                ])
+            })
+            .collect();
+        let mark = Mark::new(MarkKind::RectY)
+            .x("v")
+            .fill(ColorChannel::value(|row: &Table| {
+                Value::number(row.num("w") * 2.)
+            }))
+            .bin(Thresholds::Interval(10.))
+            .bin_output("fill", GroupReducer::Mean)
+            .bin_output("y", GroupReducer::Count);
+        let prepared = &prepare(&Dataset::new(rows.clone()), &[mark])[0];
+        assert_eq!(prepared.rows.len(), 5);
+        let mut total = 0.;
+        for row in &prepared.rows {
+            let (lo, hi) = row.x_interval().unwrap();
+            let (lo, hi) = (lo.as_number().unwrap(), hi.as_number().unwrap());
+            let members: Vec<&Table> = rows
+                .iter()
+                .filter(|r| (lo..hi).contains(&r.num("v")))
+                .collect();
+            let mean = members.iter().map(|r| r.num("w") * 2.).sum::<f64>() / members.len() as f64;
+            assert_eq!(row.row.number("fill"), Some(mean), "[{lo}, {hi})");
+            assert_eq!(row.row.number("y"), Some(members.len() as f64));
+            total += members.len() as f64;
+        }
+        assert_eq!(total, 40.);
+    }
+
+    /// Every box part's reductions, against its outputs' reducers applied to
+    /// the value channel read from each category's raw records.
+    fn check_box(rows: &[&Table], parts: &[Mark], prepared: &[PreparedMark], vertical: bool) {
+        let value = |part: &Mark| {
+            if vertical {
+                part.channels.y.clone().unwrap()
+            } else {
+                part.channels.x.clone().unwrap()
+            }
+        };
+        let groups = naive_groups(rows, |row| row.value("g").key());
+        for (part, p) in parts.iter().zip(prepared) {
+            let Some(config) = &part.group else {
+                continue;
+            };
+            assert_eq!(p.rows.len(), groups.len(), "{:?}", part.kind);
+            let value = value(part);
+            for (row, members) in p.rows.iter().zip(&groups) {
+                let records: Vec<&Table> = members.iter().map(|&i| rows[i]).collect();
+                assert_eq!(
+                    row.z.as_ref().map(Value::key),
+                    Some(records[0].value("g").key())
+                );
+                let values: Vec<Value> = records.iter().map(|r| value.read(r)).collect();
+                for output in &config.outputs {
+                    assert_eq!(
+                        row.row.value(&output.name).key(),
+                        output.reducer.reduce(&values, &records).key(),
+                        "{:?} {}",
+                        part.kind,
+                        output.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn box_parts_reduce_their_value_channel_with_its_gaps() {
+        let rows = records();
+        let refs: Vec<&Table> = rows.iter().collect();
+        let accessor = Channel::Accessor(Rc::new(|row: &Table| row.value("v")));
+        for vertical in [true, false] {
+            for value in [Channel::from("v"), accessor.clone()] {
+                let mark = if vertical {
+                    Mark::new(MarkKind::BoxY).x("g").y(value)
+                } else {
+                    Mark::new(MarkKind::BoxX).y("g").x(value)
+                };
+                let parts = crate::mark::expand_box(mark);
+                let prepared = prepare(&Dataset::new(rows.clone()), &parts);
+                check_box(&refs, &parts, &prepared, vertical);
+            }
+        }
+    }
+
+    #[test]
+    fn faceted_box_parts_reduce_each_facet_s_rows() {
+        let rows = records();
+        let data = Dataset::new(rows.clone());
+        let parts = crate::mark::expand_box(Mark::new(MarkKind::BoxY).x("g").y("v").fx("f"));
+        let grid = Grid::from_values(["p", "q", "r"].map(Value::text).to_vec(), Vec::new());
+        let (facets, _) = prepare_facets(&data, &parts, &grid, None, None);
+        for (cell, prepared) in grid.cells.iter().zip(&facets) {
+            let refs: Vec<&Table> = rows
+                .iter()
+                .filter(|r| cell.x == Some(r.value("f").key()))
+                .collect();
+            check_box(&refs, &parts, prepared, true);
+        }
+    }
+
+    #[test]
+    fn marks_share_a_facet_partition_only_when_alike() {
+        let rows = records();
+        let data = Dataset::new(rows.clone());
+        // Fewer rows, the same channel: a partition of its own.
+        let other = Dataset::new(rows[..20].to_vec());
+        let by_f = Channel::Accessor(Rc::new(|row: &Table| row.value("f")));
+        // Another accessor naming the same facets from another field.
+        let by_g = Channel::Accessor(Rc::new(|row: &Table| {
+            Value::text(match row.text("g").map(|g| g.as_ref()) {
+                Some("x") => "q",
+                Some("y") => "r",
+                _ => "p",
+            })
+        }));
+        let dot = || Mark::new(MarkKind::Dot).x("n").y("w");
+        let marks = vec![
+            dot().fx(by_f.clone()),
+            dot().fx(by_g.clone()),
+            dot().fx(by_f.clone()),
+            dot().data(other.clone()).fx(by_f.clone()),
+            dot().fx("f"),
+            dot().data(other).fx("f"),
+            dot().fx(Value::text("q")),
+            dot().fx(by_f.clone()).fy(by_g.clone()),
+        ];
+        let p_q_r = ["p", "q", "r"].map(Value::text).to_vec();
+        for grid in [
+            Grid::from_values(p_q_r.clone(), Vec::new()),
+            Grid::from_values(p_q_r.clone(), p_q_r.clone()),
+        ] {
+            let (facets, _) = prepare_facets(&data, &marks, &grid, None, None);
+            for (cell, prepared) in grid.cells.iter().zip(&facets) {
+                for (mark, p) in marks.iter().zip(prepared) {
+                    let source = mark.data.as_ref().unwrap_or(&data);
+                    let fits = |channel: &Option<Channel>, have: &Option<ValueKey>, row: &Table| {
+                        channel
+                            .as_ref()
+                            .is_none_or(|c| have.as_ref() == Some(&c.read(row).key()))
+                    };
+                    let expected: Vec<f64> = source
+                        .rows()
+                        .iter()
+                        .filter(|r| fits(&mark.fx, &cell.x, r) && fits(&mark.fy, &cell.y, r))
+                        .map(|r| r.num("n"))
+                        .collect();
+                    let got: Vec<f64> = p.rows.iter().map(|r| r.x.as_number().unwrap()).collect();
+                    assert_eq!(got, expected, "{cell:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_z_shared_with_a_position_reads_the_raw_value() {
+        let rows = records();
+        let c = Channel::Accessor(Rc::new(|row: &Table| row.value("c")));
+        let marks = [
+            Mark::new(MarkKind::Dot).x(c.clone()).y("w").z(c.clone()),
+            Mark::new(MarkKind::Dot).x("v").y("w").z("v"),
+            Mark::new(MarkKind::Dot).x("w").y("c").z("c"),
+            // The index fills x; z still reads y's channel.
+            Mark::new(MarkKind::LineY).y("v").z("v"),
+            Mark::new(MarkKind::LineX).x("v").z("v"),
+            Mark::new(MarkKind::Dot)
+                .x(Value::Number(1.))
+                .y("w")
+                .z(Value::Number(1.)),
+        ];
+        let prepared = prepare(&Dataset::new(rows.clone()), &marks);
+        for (mark, p) in marks.iter().zip(&prepared) {
+            let z = mark.channels.z.as_ref().unwrap();
+            let expected: Vec<Option<ValueKey>> = rows
+                .iter()
+                .map(|r| Some(z.read(r)).filter(|v| !v.is_null()).map(|v| v.key()))
+                .collect();
+            let got: Vec<Option<ValueKey>> = p
+                .rows
+                .iter()
+                .map(|r| r.z.as_ref().map(Value::key))
+                .collect();
+            assert_eq!(got, expected, "{:?}", mark.kind);
+        }
+        let indices = || keys((0..rows.len()).map(|i| Value::Number(i as f64)));
+        assert_eq!(
+            keys(prepared[3].rows.iter().map(|r| r.x.clone())),
+            indices()
+        );
+        assert_eq!(
+            keys(prepared[4].rows.iter().map(|r| r.y.clone())),
+            indices()
+        );
+    }
+
+    #[test]
+    fn sorts_are_stable_in_both_directions_and_reverse_after() {
+        let rows = records();
+        for (field, descending, reverse) in [
+            (Some("w"), false, false),
+            (Some("w"), true, false),
+            (Some("w"), true, true),
+            (Some("c"), false, true),
+            (Some("v"), true, false),
+            (None, true, false),
+            (None, false, true),
+        ] {
+            let mut mark = Mark::new(MarkKind::BarY).x("n").y("v");
+            mark.sort = Some(SortConfig {
+                field: field.map(Into::into),
+                descending,
+                reverse,
+            });
+            let prepared = &prepare(&Dataset::new(rows.clone()), &[mark])[0];
+            let mut expected: Vec<&Table> = rows.iter().collect();
+            // A bar's value, by default, is the channel the mark reads.
+            let key = |r: &Table| match field {
+                Some(field) => r.value(field),
+                None => Channel::from("v").read(r),
+            };
+            expected.sort_by(|a, b| {
+                let ordering = key(a).cmp(&key(b));
+                if descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
+            });
+            if reverse {
+                expected.reverse();
+            }
+            let got: Vec<f64> = prepared
+                .rows
+                .iter()
+                .map(|r| r.x.as_number().unwrap())
+                .collect();
+            let want: Vec<f64> = expected.iter().map(|r| r.num("n")).collect();
+            assert_eq!(got, want, "{field:?} {descending} {reverse}");
+        }
+    }
+}
