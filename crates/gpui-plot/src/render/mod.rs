@@ -2389,9 +2389,22 @@ pub fn resolve_raster(
     };
     grid.blur(spec.blur);
     let grid = std::rc::Rc::new(grid);
+    // Keep as many grids as a page of raster charts needs (a plot rebuilt
+    // every frame comes back for its grid each frame), within a budget of
+    // cells, so a page of rasters does not thrash and memory stays bounded.
+    const CELL_BUDGET: usize = 1 << 21;
     GRIDS.with_borrow_mut(|grids| {
         grids.insert(0, (key, grid.clone()));
-        grids.truncate(8);
+        let mut cells = 0;
+        let keep = grids
+            .iter()
+            .position(|(_, g)| {
+                cells += g.values.len();
+                cells > CELL_BUDGET
+            })
+            .unwrap_or(grids.len())
+            .max(1);
+        grids.truncate(keep);
     });
     Some(grid)
 }
