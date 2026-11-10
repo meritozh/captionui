@@ -993,12 +993,15 @@ pub fn window_values(
             }
         }
         // Plot's non-strict `difference` (and its kin) stops where the
-        // window would start past `n - k`.
+        // window would start past `n - k`. Its loop also reaches windows
+        // whose point `i + s` lies past the series' end (an `end` anchor's
+        // last `k - 1`), where Plot's write lands on no index; those are
+        // skipped here.
         WindowReducer::Difference
         | WindowReducer::Ratio
         | WindowReducer::First
         | WindowReducer::Last => {
-            let end = n as isize - k as isize + s as isize + 1;
+            let end = (n as isize - k as isize + s as isize + 1).min(n as isize - s as isize);
             for i in -(s as isize)..end {
                 let lo = i.max(0) as usize;
                 let hi = ((i + k as isize).max(0) as usize).min(n);
@@ -1954,6 +1957,48 @@ mod tests {
             run(WindowReducer::Variance),
             vec![Some(0.5), Some(2.), Some(8.), None]
         );
+    }
+
+    /// An `end` anchor's non-strict difference (and kin) reads each window
+    /// ending at its point, truncated at the start; Plot's loop also visits
+    /// windows whose point lies past the series, which write nothing. Every
+    /// length, width and anchor runs without reading or writing out of range.
+    #[test]
+    fn end_anchored_differences_stop_at_the_series_end() {
+        let values: Vec<Option<f64>> = [1., 2., 4., 8., 16.].map(Some).to_vec();
+        let end = |reducer| window_values(&values, 3, reducer, Anchor::End, false);
+        assert_eq!(
+            end(WindowReducer::Difference),
+            vec![Some(0.), Some(1.), Some(3.), Some(6.), Some(12.)]
+        );
+        assert_eq!(
+            end(WindowReducer::Ratio),
+            vec![Some(1.), Some(2.), Some(4.), Some(4.), Some(4.)]
+        );
+        assert_eq!(
+            end(WindowReducer::First),
+            vec![Some(1.), Some(1.), Some(1.), Some(2.), Some(4.)]
+        );
+        assert_eq!(end(WindowReducer::Last), values);
+        let reducers = [
+            WindowReducer::Difference,
+            WindowReducer::Ratio,
+            WindowReducer::First,
+            WindowReducer::Last,
+        ];
+        for n in 0..7 {
+            let values: Vec<Option<f64>> = (0..n).map(|i| Some(i as f64 + 1.)).collect();
+            for k in 0..6 {
+                for anchor in [Anchor::Start, Anchor::Middle, Anchor::End] {
+                    for strict in [false, true] {
+                        for reducer in reducers {
+                            let out = window_values(&values, k, reducer, anchor, strict);
+                            assert_eq!(out.len(), n, "{n} {k} {anchor:?} {strict}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
