@@ -7,7 +7,7 @@
 //! element.
 //!
 //! ```
-//! use gpui_plot::{Plot, Table, Value};
+//! use gpui_plot::prelude::*;
 //!
 //! let data = vec![
 //!     Table::empty().with("x", Value::text("a")).with("y", Value::Number(4.)),
@@ -63,6 +63,22 @@ pub mod ticks;
 pub mod transform;
 pub mod tree;
 pub mod value;
+
+/// The mark builder traits and the types and mark constructors most charts
+/// name. The builder methods (`x`, `fill`, `stack_y`, …) are trait methods,
+/// so a module that builds marks starts with `use gpui_plot::prelude::*`.
+pub mod prelude {
+    pub use crate::mark::{
+        AxisOptions, ChannelOptions, GeoOptions, ImageOptions, MarkOptions, RasterOptions,
+        StackOptions, StyleOptions, TextOptions, TransformOptions,
+    };
+    pub use crate::mark::{Curve, Mark, MarkKind, TypedMark};
+    pub use crate::marks::*;
+    pub use crate::{
+        Channel, ColorChannel, Dataset, GroupReducer, IntoChannel, NumberChannel, Plot, Reducer,
+        Selector, StackOffset, Table, Thresholds, Value,
+    };
+}
 
 pub use mark::{
     Axis, BlendMode, GroupConfig, GroupOutput, Interval, MapConfig, MapReducer, MapTarget,

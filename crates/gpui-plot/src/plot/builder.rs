@@ -7,7 +7,7 @@ use std::rc::Rc;
 use gpui::{AnyElement, App, ElementId, SharedString, Window};
 
 use crate::frame::{FrameOptions, ScaleKind};
-use crate::mark::Mark;
+use crate::mark::{ChannelOptions, Mark};
 use crate::plot::{Interaction, LegendPosition, Plot, PlotTitle, Scales};
 use crate::scale::{ColorRange, Transform};
 use crate::table::{Dataset, Table};

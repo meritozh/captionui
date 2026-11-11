@@ -3,6 +3,7 @@
 
 use crate::facet::Grid;
 use crate::mark::{Axis, GroupOutput, Mark, MarkKind, SortConfig};
+use crate::prelude::*;
 use crate::render::bin::bin_rows;
 use crate::render::group::collapse_groups;
 use crate::render::interval::derive_intervals;

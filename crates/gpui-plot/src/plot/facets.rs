@@ -212,6 +212,7 @@ impl Plot {
 mod tests {
     use super::*;
     use crate::mark::MarkKind;
+    use crate::prelude::*;
     use crate::render;
 
     #[test]

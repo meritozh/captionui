@@ -277,6 +277,7 @@ pub(super) fn collapse_groups<R: GroupRow>(
 mod tests {
     use super::*;
     use crate::mark::MarkKind;
+    use crate::prelude::*;
     use crate::render::prepare;
     use crate::table::Dataset;
 

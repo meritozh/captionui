@@ -1,243 +1,107 @@
 //! The typed builders of the marks the basic renderer draws: dots, lines, areas,
 //! bars, rects, cells, rules, text, ticks, vectors, tips and the rest.
 
-use gpui::SharedString;
+use super::typed_marks;
 
-use super::mark_builder;
-use crate::mark::{
-    BlendMode, Curve, DomainSort, FrameAnchor, Interval, LineAnchor, MapReducer, Mark, MarkKind,
-    TextAnchor, VectorAnchor,
-};
-use crate::style::{ColorChannel, NumberChannel};
-use crate::table::IntoChannel;
-use crate::transform::{
-    Anchor, Dodge, GroupReducer, Mapper, Reducer, Selector, StackOffset, Thresholds, WindowReducer,
-};
-
-mark_builder!(
+typed_marks! {
     /// A dot mark, Plot's `dot`: one symbol per datum.
     ///
     /// ```
     /// # use gpui_plot::mark::DotMark;
+    /// # use gpui_plot::prelude::*;
     /// DotMark::new().x("date").y("value").r(4.);
     /// ```
-    DotMark,
-    MarkKind::Dot
-);
-mark_builder!(
+    DotMark = Dot;
     /// A dot at each x with no y, Plot's `dotX`.
-    DotXMark,
-    MarkKind::DotX
-);
-mark_builder!(
+    DotXMark = DotX;
     /// A dot at each y with no x, Plot's `dotY`.
-    DotYMark,
-    MarkKind::DotY
-);
-mark_builder!(
+    DotYMark = DotY;
     /// A line mark, Plot's `line`: a polyline through the data, one per series.
-    LineMark,
-    MarkKind::Line
-);
-mark_builder!(
+    LineMark = Line;
     /// A line at each x with no y, Plot's `lineX`.
-    LineXMark,
-    MarkKind::LineX
-);
-mark_builder!(
+    LineXMark = LineX;
     /// A line at each y with no x, Plot's `lineY`.
-    LineYMark,
-    MarkKind::LineY
-);
-mark_builder!(
+    LineYMark = LineY;
     /// A vertical area mark, Plot's `areaY`.
-    AreaYMark,
-    MarkKind::AreaY
-);
-mark_builder!(
+    AreaYMark = AreaY;
     /// A horizontal area mark, Plot's `areaX`.
-    AreaXMark,
-    MarkKind::AreaX
-);
-mark_builder!(
+    AreaXMark = AreaX;
     /// A vertical bar mark, Plot's `barY`.
-    BarYMark,
-    MarkKind::BarY
-);
-mark_builder!(
+    BarYMark = BarY;
     /// A horizontal bar mark, Plot's `barX`.
-    BarXMark,
-    MarkKind::BarX
-);
-mark_builder!(
+    BarXMark = BarX;
     /// A rectangle mark spanning two intervals, Plot's `rect`.
-    RectMark,
-    MarkKind::Rect
-);
-mark_builder!(
+    RectMark = Rect;
     /// A rectangle over one x, Plot's `rectX`: a horizontal histogram bar.
-    RectXMark,
-    MarkKind::RectX
-);
-mark_builder!(
+    RectXMark = RectX;
     /// A rectangle over one y, Plot's `rectY`.
-    RectYMark,
-    MarkKind::RectY
-);
-mark_builder!(
+    RectYMark = RectY;
     /// A cell mark filling one band of each axis, Plot's `cell`.
-    CellMark,
-    MarkKind::Cell
-);
-mark_builder!(
+    CellMark = Cell;
     /// A vertical rule at each x, Plot's `ruleX`.
-    RuleXMark,
-    MarkKind::RuleX
-);
-mark_builder!(
+    RuleXMark = RuleX;
     /// A horizontal rule at each y, Plot's `ruleY`.
-    RuleYMark,
-    MarkKind::RuleY
-);
-mark_builder!(
+    RuleYMark = RuleY;
     /// A text label per datum, Plot's `text`.
-    TextMark,
-    MarkKind::Text
-);
-mark_builder!(
+    TextMark = Text;
     /// A vertical tick per datum, Plot's `tickX`.
-    TickXMark,
-    MarkKind::TickX
-);
-mark_builder!(
+    TickXMark = TickX;
     /// A horizontal tick per datum, Plot's `tickY`.
-    TickYMark,
-    MarkKind::TickY
-);
-mark_builder!(
+    TickYMark = TickY;
     /// An arrow between two points, Plot's `vector`.
-    VectorMark,
-    MarkKind::Vector
-);
-mark_builder!(
+    VectorMark = Vector;
     /// A link mark, Plot's `link`.
-    LinkMark,
-    MarkKind::Link
-);
-mark_builder!(
+    LinkMark = Link;
     /// A tree diagram of a slash-separated hierarchy, Plot's `tree`.
-    TreeMark,
-    MarkKind::Tree
-);
-mark_builder!(
+    TreeMark = Tree;
     /// A raster image painted at a position, Plot's `image`.
-    ImageMark,
-    MarkKind::Image
-);
-mark_builder!(
+    ImageMark = Image;
     /// A geographic mark, Plot's `geo`: lon/lat projected equirectangularly.
-    GeoMark,
-    MarkKind::Geo
-);
-mark_builder!(
+    GeoMark = Geo;
     /// A pinned annotation, Plot's `tip`.
-    TipMark,
-    MarkKind::Tip
-);
-mark_builder!(
+    TipMark = Tip;
     /// A text label at each x, Plot's `textX`.
-    TextXMark,
-    MarkKind::TextX
-);
-mark_builder!(
+    TextXMark = TextX;
     /// A text label at each y, Plot's `textY`.
-    TextYMark,
-    MarkKind::TextY
-);
-mark_builder!(
+    TextYMark = TextY;
     /// A cell over one x, Plot's `cellX`.
-    CellXMark,
-    MarkKind::CellX
-);
-mark_builder!(
+    CellXMark = CellX;
     /// A cell over one y, Plot's `cellY`.
-    CellYMark,
-    MarkKind::CellY
-);
-mark_builder!(
+    CellYMark = CellY;
     /// A vector at each x, Plot's `vectorX`.
-    VectorXMark,
-    MarkKind::VectorX
-);
-mark_builder!(
+    VectorXMark = VectorX;
     /// A vector at each y, Plot's `vectorY`.
-    VectorYMark,
-    MarkKind::VectorY
-);
-mark_builder!(
+    VectorYMark = VectorY;
     /// A triangular marker, Plot's `spike`.
-    SpikeMark,
-    MarkKind::Spike
-);
-mark_builder!(
+    SpikeMark = Spike;
     /// A curved arrow, Plot's `arrow`.
-    ArrowMark,
-    MarkKind::Arrow
-);
-mark_builder!(
+    ArrowMark = Arrow;
     /// A waffle bar along x, Plot's `waffleX`.
-    WaffleXMark,
-    MarkKind::WaffleX
-);
-mark_builder!(
+    WaffleXMark = WaffleX;
     /// A waffle bar along y, Plot's `waffleY`.
-    WaffleYMark,
-    MarkKind::WaffleY
-);
-mark_builder!(
+    WaffleYMark = WaffleY;
     /// A static hex grid, Plot's `hexgrid`.
-    HexgridMark,
-    MarkKind::Hexgrid
-);
-mark_builder!(
+    HexgridMark = Hexgrid;
     /// A pixel grid, Plot's `raster`.
-    RasterMark,
-    MarkKind::Raster
-);
-mark_builder!(
+    RasterMark = Raster;
     /// A difference chart along x, Plot's `differenceX`.
-    DifferenceXMark,
-    MarkKind::DifferenceX
-);
-mark_builder!(
+    DifferenceXMark = DifferenceX;
     /// A difference chart along y, Plot's `differenceY`.
-    DifferenceYMark,
-    MarkKind::DifferenceY
-);
-mark_builder!(
+    DifferenceYMark = DifferenceY;
     /// A regression of x on y, Plot's `linearRegressionX`.
-    LinearRegressionXMark,
-    MarkKind::LinearRegressionX
-);
-mark_builder!(
+    LinearRegressionXMark = LinearRegressionX;
     /// A regression of y on x, Plot's `linearRegressionY`.
-    LinearRegressionYMark,
-    MarkKind::LinearRegressionY
-);
-mark_builder!(
+    LinearRegressionYMark = LinearRegressionY;
     /// A moving mean with deviation bands along x, Plot's `bollingerX`.
-    BollingerXMark,
-    MarkKind::BollingerX
-);
-mark_builder!(
+    BollingerXMark = BollingerX;
     /// A moving mean with deviation bands along y, Plot's `bollingerY`.
-    BollingerYMark,
-    MarkKind::BollingerY
-);
+    BollingerYMark = BollingerY;
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
 
     #[test]
     fn builders_share_channels() {

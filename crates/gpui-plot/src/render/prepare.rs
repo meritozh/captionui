@@ -594,6 +594,7 @@ mod tests {
     use super::*;
     use crate::facet::Grid;
     use crate::mark::MarkKind;
+    use crate::prelude::*;
     use crate::transform::StackOffset;
 
     #[test]

@@ -556,6 +556,7 @@ fn bin_cells(
 mod tests {
     use super::*;
     use crate::mark::MarkKind;
+    use crate::prelude::*;
     use crate::render::{apply_quantity_scales, apply_scale_transforms, prepare};
     use crate::transform::{GroupReducer, Thresholds};
 

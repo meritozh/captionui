@@ -10,6 +10,7 @@
 
 use gpui::{Hsla, SharedString};
 
+use crate::mark::{ChannelOptions, StyleOptions, TransformOptions};
 use crate::plot::Plot;
 use crate::table::{Dataset, Table};
 use crate::transform::GroupReducer;

@@ -1,6 +1,7 @@
 //! Tests that span several of the plot's submodules.
 
 use crate::plot::{Plot, Prepared};
+use crate::prelude::*;
 use crate::table::{Dataset, Table};
 use crate::value::Value;
 

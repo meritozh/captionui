@@ -48,6 +48,11 @@ fn ticks_0_1() -> Vec<Value> {
     (0..=10).map(|i| Value::Number(i as f64 / 10.)).collect()
 }
 
+/// Plot's `ticks: []`: an axis with its label and no ticks.
+fn no_ticks() -> Vec<Value> {
+    Vec::new()
+}
+
 /// The x domain `Plot.axisX(data)` takes from its ticks; an axis mark's
 /// ticks don't reach the scale, so the port pins it.
 fn ticks_domain(x: ScaleOptions) -> ScaleOptions {
@@ -284,13 +289,13 @@ fn e15() -> Plot {
         .grid(true)
         .x(|x| x.type_name("linear"))
         .mark(axis(AxisAnchor::Top, "top-left", LabelAnchor::Start))
-        .mark(axis(AxisAnchor::Top, "top-center", LabelAnchor::Center).tick_values(Vec::new()))
-        .mark(axis(AxisAnchor::Top, "top-right", LabelAnchor::End).tick_values(Vec::new()))
+        .mark(axis(AxisAnchor::Top, "top-center", LabelAnchor::Center).tick_values(no_ticks()))
+        .mark(axis(AxisAnchor::Top, "top-right", LabelAnchor::End).tick_values(no_ticks()))
         .mark(axis(AxisAnchor::Bottom, "bottom-left", LabelAnchor::Start))
         .mark(
-            axis(AxisAnchor::Bottom, "bottom-center", LabelAnchor::Center).tick_values(Vec::new()),
+            axis(AxisAnchor::Bottom, "bottom-center", LabelAnchor::Center).tick_values(no_ticks()),
         )
-        .mark(axis(AxisAnchor::Bottom, "bottom-right", LabelAnchor::End).tick_values(Vec::new()))
+        .mark(axis(AxisAnchor::Bottom, "bottom-right", LabelAnchor::End).tick_values(no_ticks()))
 }
 
 fn e16() -> Plot {
@@ -304,9 +309,9 @@ fn e16() -> Plot {
         .grid(true)
         .y(|y| y.type_name("linear"))
         .mark(axis(AxisAnchor::Left, "left-top", LabelAnchor::End))
-        .mark(axis(AxisAnchor::Left, "left-center", LabelAnchor::Center).tick_values(Vec::new()))
-        .mark(axis(AxisAnchor::Left, "left-bottom", LabelAnchor::Start).tick_values(Vec::new()))
+        .mark(axis(AxisAnchor::Left, "left-center", LabelAnchor::Center).tick_values(no_ticks()))
+        .mark(axis(AxisAnchor::Left, "left-bottom", LabelAnchor::Start).tick_values(no_ticks()))
         .mark(axis(AxisAnchor::Right, "right-top", LabelAnchor::End))
-        .mark(axis(AxisAnchor::Right, "right-center", LabelAnchor::Center).tick_values(Vec::new()))
-        .mark(axis(AxisAnchor::Right, "right-bottom", LabelAnchor::Start).tick_values(Vec::new()))
+        .mark(axis(AxisAnchor::Right, "right-center", LabelAnchor::Center).tick_values(no_ticks()))
+        .mark(axis(AxisAnchor::Right, "right-bottom", LabelAnchor::Start).tick_values(no_ticks()))
 }

@@ -149,6 +149,7 @@ fn interval_value(source: &Value, millis_or_number: f64) -> Value {
 mod tests {
     use super::*;
     use crate::mark::{Interval, Mark, MarkKind};
+    use crate::prelude::*;
     use crate::render::prepare;
     use crate::table::{Dataset, Table};
     use crate::value::PlotKind;

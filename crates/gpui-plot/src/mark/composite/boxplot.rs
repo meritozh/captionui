@@ -1,7 +1,7 @@
 //! Plot's box mark: the whisker reducers, and `expand_box`, which draws a box as a
 //! rule, a bar, a tick and the outlier dots.
 
-use crate::mark::{Axis, Mark, MarkKind};
+use crate::mark::{Axis, Mark, MarkKind, TransformOptions};
 use crate::style::ColorChannel;
 use crate::transform::GroupReducer;
 

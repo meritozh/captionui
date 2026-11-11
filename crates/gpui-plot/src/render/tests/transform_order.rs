@@ -1,6 +1,7 @@
 //! The order `prepare_mark` composes a mark's transforms in.
 
 use crate::mark::{MapReducer, Mark, MarkKind};
+use crate::prelude::*;
 use crate::render::{PreparedRow, prepare};
 use crate::table::{Dataset, Table};
 use crate::transform::{self, Anchor, Reducer, WindowReducer};

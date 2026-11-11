@@ -107,7 +107,7 @@ pub(crate) type Prepared = (Grid, Vec<Vec<PreparedMark>>, Vec<bool>);
 /// A plot: data, marks and the frame around them.
 ///
 /// ```
-/// use gpui_plot::{Plot, Table, Value};
+/// use gpui_plot::prelude::*;
 ///
 /// let data = vec![
 ///     Table::empty().with("x", Value::text("a")).with("y", Value::Number(4.)),

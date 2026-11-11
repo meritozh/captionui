@@ -135,6 +135,7 @@ fn stack_rows_from_series(
 mod tests {
     use super::*;
     use crate::mark::MarkKind;
+    use crate::prelude::*;
     use crate::render::prepare;
     use crate::transform::StackOffset;
 

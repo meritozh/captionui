@@ -17,7 +17,7 @@ The repository has two crates:
 ## Quick start
 
 ```rust
-use gpui_plot::{Plot, Table, Value};
+use gpui_plot::prelude::*;
 
 let data = vec![
     Table::empty().with("region", Value::text("North")).with("sales", Value::Number(158.)),
@@ -189,7 +189,11 @@ seams between them stay open for extension:
   the caller declaring its type. `Table`/`Dataset` hold the records.
 - **Marks.** `Mark` (`mark.rs`) is a pure data spec: a `MarkKind`, its
   `Channels`, and the transform options it carries. It holds no window state,
-  so a chart is a cheap value to build and rebuild. `MarkKind::category()`
+  so a chart is a cheap value to build and rebuild. Its options are builder
+  traits (`mark/options/`, one per concern) written once over `MarkOptions`
+  and implemented by `Mark` and by `TypedMark<K>`, the typed builders
+  (`DotMark` is `TypedMark<kinds::Dot>`); `use gpui_plot::prelude::*` brings
+  them into scope. `MarkKind::category()`
   returns one `MarkCategory` table that classifies every mark exactly once —
   which renderer family draws it, its band direction, its bin axis, its stack
   orientation, whether it is bivariate, a length mark, furniture, and how a

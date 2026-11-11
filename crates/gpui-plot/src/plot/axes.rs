@@ -378,6 +378,7 @@ impl Plot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
 
     #[test]
     fn a_facet_axis_mark_labels_each_facet_and_replaces_the_implicit_axis() {

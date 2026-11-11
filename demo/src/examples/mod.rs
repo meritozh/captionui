@@ -8,6 +8,7 @@
 use std::sync::OnceLock;
 
 use gpui_plot::Plot;
+use gpui_plot::prelude::*;
 
 pub mod features;
 pub mod interactions;

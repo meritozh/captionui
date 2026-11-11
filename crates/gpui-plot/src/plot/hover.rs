@@ -97,6 +97,7 @@ mod tests {
     use crate::frame::ScaleKind;
     use crate::plot::Plot;
     use crate::plot::domain::marks_use_band;
+    use crate::prelude::*;
     use crate::render;
     use crate::table::Table;
     use crate::value::Value;

@@ -682,6 +682,7 @@ impl Plot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
     use crate::render;
     use crate::table::Table;
     use crate::value::Value;

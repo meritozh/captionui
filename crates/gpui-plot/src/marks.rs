@@ -2,8 +2,7 @@
 //! with the options as builder calls, and `mark.plot()` draws it alone.
 //!
 //! ```
-//! use gpui_plot::marks::{dot, rule_y};
-//! use gpui_plot::{Plot, Table, Value};
+//! use gpui_plot::prelude::*;
 //!
 //! let data = vec![Table::empty().with("x", Value::Number(1.)).with("y", Value::Number(2.))];
 //! let plot = Plot::plot().mark(dot(data).x("x").y("y")).mark(rule_y([0.]));

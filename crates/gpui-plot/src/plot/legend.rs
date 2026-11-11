@@ -774,6 +774,7 @@ enum LegendShape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
     use crate::table::Table;
 
     #[test]

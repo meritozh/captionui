@@ -1,19 +1,21 @@
 //! The geo mark's options: geometry, centroids, projection, rings and GeoJSON.
 
-use crate::mark::Mark;
+use crate::mark::MarkOptions;
 use crate::table::IntoChannel;
 
-impl Mark {
+/// The geo mark's options: geometry, centroids, projection, rings and
+/// GeoJSON.
+pub trait GeoOptions: MarkOptions {
     /// A `geo` mark's geometry channel, Plot's `geometry` option; the
     /// records' `"geometry"` field by default.
-    pub fn geometry(mut self, channel: impl IntoChannel) -> Self {
-        self.channels.path = Some(channel.into_channel());
+    fn geometry(mut self, channel: impl IntoChannel) -> Self {
+        self.mark_mut().channels.path = Some(channel.into_channel());
         self
     }
 
     /// Plot's `geoCentroid` transform: `x` and `y` are the longitude and
     /// latitude of each record's geometry's spherical centroid.
-    pub fn geo_centroid(mut self) -> Self {
+    fn geo_centroid(mut self) -> Self {
         // The x and y accessors read the same centroid: the last geometry's
         // is kept, with its `Rc` so its address cannot be reused while it is
         // remembered, and the y read right after the x one reuses it.
@@ -38,10 +40,11 @@ impl Mark {
                     .unwrap_or(crate::value::Value::Null)
             }
         };
-        self.channels.x = Some(crate::table::Channel::Accessor(std::rc::Rc::new(centroid(
+        let mark = self.mark_mut();
+        mark.channels.x = Some(crate::table::Channel::Accessor(std::rc::Rc::new(centroid(
             0,
         ))));
-        self.channels.y = Some(crate::table::Channel::Accessor(std::rc::Rc::new(centroid(
+        mark.channels.y = Some(crate::table::Channel::Accessor(std::rc::Rc::new(centroid(
             1,
         ))));
         self
@@ -50,20 +53,20 @@ impl Mark {
     /// Plot's `centroid` transform. Plot takes the projected centroid; this
     /// takes the spherical one, which lands within a pixel or two of it for
     /// shapes the size of a county or a country.
-    pub fn centroid(self) -> Self {
+    fn centroid(self) -> Self {
         self.geo_centroid()
     }
 
     /// Set the equirectangular projection a `geo` mark maps lon/lat through.
-    pub fn projection(mut self, projection: crate::projection::Projection) -> Self {
-        self.projection = Some(projection);
+    fn projection(mut self, projection: crate::projection::Projection) -> Self {
+        self.mark_mut().projection = Some(projection);
         self
     }
 
     /// Add a GeoJSON-like ring to a `geo` mark: a closed loop of `(lon, lat)`
     /// degree points the mark fills as a projected shape.
-    pub fn ring(mut self, ring: Vec<(f64, f64)>) -> Self {
-        let geometry = self.geo_geometry.get_or_insert_with(Vec::new);
+    fn ring(mut self, ring: Vec<(f64, f64)>) -> Self {
+        let geometry = self.mark_mut().geo_geometry.get_or_insert_with(Vec::new);
         geometry.push(ring);
         self
     }
@@ -71,19 +74,21 @@ impl Mark {
     /// Add every polygon in a GeoJSON document to a `geo` mark, Plot's way of
     /// loading a geography file's shapes. `text` is the GeoJSON source — a
     /// file or URL's contents a caller has already read.
-    pub fn geojson(mut self, text: &str) -> Self {
+    fn geojson(mut self, text: &str) -> Self {
         if let Ok(rings) = crate::projection::geojson_rings(text) {
-            let geometry = self.geo_geometry.get_or_insert_with(Vec::new);
+            let geometry = self.mark_mut().geo_geometry.get_or_insert_with(Vec::new);
             geometry.extend(rings);
         }
         self
     }
 }
 
+impl<T: MarkOptions> GeoOptions for T {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mark::MarkKind;
+    use crate::mark::{Mark, MarkKind};
 
     #[test]
     fn geo_centroid_reads_each_records_own_centroid() {

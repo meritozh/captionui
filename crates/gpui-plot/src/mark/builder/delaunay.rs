@@ -1,40 +1,16 @@
 //! The typed builders of the Delaunay marks: links, meshes, hull and Voronoi.
 
-use gpui::SharedString;
+use super::typed_marks;
 
-use super::mark_builder;
-use crate::mark::{
-    BlendMode, Curve, DomainSort, FrameAnchor, Interval, LineAnchor, MapReducer, Mark, MarkKind,
-    TextAnchor, VectorAnchor,
-};
-use crate::style::{ColorChannel, NumberChannel};
-use crate::table::IntoChannel;
-use crate::transform::{
-    Anchor, Dodge, GroupReducer, Mapper, Reducer, Selector, StackOffset, Thresholds, WindowReducer,
-};
-
-mark_builder!(
+typed_marks! {
     /// A Delaunay triangulation drawn as links, Plot's `delaunayLink`.
-    DelaunayLinkMark,
-    MarkKind::DelaunayLink
-);
-mark_builder!(
+    DelaunayLinkMark = DelaunayLink;
     /// A Delaunay triangulation drawn as one mesh, Plot's `delaunayMesh`.
-    DelaunayMeshMark,
-    MarkKind::DelaunayMesh
-);
-mark_builder!(
+    DelaunayMeshMark = DelaunayMesh;
     /// The convex hull of the data, Plot's `hull`.
-    HullMark,
-    MarkKind::Hull
-);
-mark_builder!(
+    HullMark = Hull;
     /// A Voronoi cell per datum, Plot's `voronoi`.
-    VoronoiMark,
-    MarkKind::Voronoi
-);
-mark_builder!(
+    VoronoiMark = Voronoi;
     /// The Voronoi mesh of the data, Plot's `voronoiMesh`.
-    VoronoiMeshMark,
-    MarkKind::VoronoiMesh
-);
+    VoronoiMeshMark = VoronoiMesh;
+}

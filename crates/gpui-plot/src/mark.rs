@@ -20,6 +20,9 @@ use crate::style::NumberChannel;
 use crate::transform::{Anchor, Dodge, Mapper, Reducer, WindowReducer};
 
 pub use builder::*;
+// Named so that rustdoc documents the module, which a glob re-export of a
+// private module's child does not.
+pub use builder::kinds;
 pub use channels::Channels;
 pub use composite::{expand_box, expand_tree, whisker_high, whisker_low};
 pub(crate) use composite::{whisker_high_with, whisker_low_with};
@@ -29,15 +32,20 @@ pub use config::{
 };
 pub use interval::Interval;
 pub use kind::{CrossAxis, MarkCategory, MarkFamily, MarkKind};
+pub use options::{
+    AxisOptions, ChannelOptions, GeoOptions, ImageOptions, MarkOptions, RasterOptions,
+    StackOptions, StyleOptions, TextOptions, TransformOptions,
+};
 pub use style::{
     BlendMode, Curve, FrameAnchor, LineAnchor, MarkStyle, Marker, Sweep, TextAnchor, VectorAnchor,
 };
 
 /// A mark: its kind, channels and style.
 ///
-/// The typed builders ([`DotMark`], [`LineMark`], …) wrap this value and add
-/// the options that make sense for their kind; every builder reads and writes
-/// the shared channels through [`Mark`].
+/// The typed builders ([`DotMark`], [`LineMark`], …) wrap this value and fix
+/// its kind. Every builder, this one included, takes its options from the
+/// traits over [`MarkOptions`]; `use gpui_plot::prelude::*` brings them into
+/// scope.
 #[derive(Clone, Debug)]
 pub struct Mark {
     pub kind: MarkKind,

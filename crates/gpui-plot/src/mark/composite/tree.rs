@@ -2,7 +2,7 @@
 
 use gpui::Hsla;
 
-use crate::mark::{Curve, Mark, MarkKind, MarkStyle, TextAnchor};
+use crate::mark::{Curve, Mark, MarkKind, MarkStyle, TextAnchor, TransformOptions};
 use crate::style::ColorChannel;
 
 /// Plot's `tree` (and `cluster`) mark as the marks it composes: a link per
