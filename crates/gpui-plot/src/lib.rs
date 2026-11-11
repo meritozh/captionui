@@ -24,7 +24,8 @@
 //! - [`Value`] is the scalar a channel reads.
 //! - [`Mark`] covers Plot's mark types: dot, line, area, bar, rect, cell, rule,
 //!   text, tick, vector, box, violin, hexbin, density, contour, pie, arc,
-//!   waffle and link.
+//!   waffle and link. Its options (`x`, `fill`, `stack_y`, …) are builder
+//!   traits, which [`prelude`] brings into scope.
 //! - [`transform`] holds Plot's transforms: group, bin, stack, window, sort,
 //!   filter, normalize.
 //! - [`scale`] holds the scales and color ranges.

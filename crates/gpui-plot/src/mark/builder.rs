@@ -26,9 +26,16 @@ pub mod kinds {
     pub use super::radial::kinds::*;
 }
 
+/// Seals [`KindMarker`]: the markers are exactly the ones in [`kinds`], one
+/// per [`MarkKind`] with a typed builder.
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// A zero-sized type standing for one [`MarkKind`], the parameter of
-/// [`TypedMark`]; the markers live in [`kinds`].
-pub trait KindMarker {
+/// [`TypedMark`]; the markers live in [`kinds`]. The trait is sealed: name it
+/// in bounds, but only this crate implements it.
+pub trait KindMarker: sealed::Sealed {
     /// The kind of the marks the builder makes.
     const KIND: MarkKind;
     /// The builder's name, `DotMark`, which its `Debug` output carries.
@@ -123,6 +130,8 @@ macro_rules! typed_marks {
                 )]
                 #[derive(Clone, Copy, Debug, Default)]
                 pub struct $kind;
+
+                impl crate::mark::builder::sealed::Sealed for $kind {}
 
                 impl crate::mark::KindMarker for $kind {
                     const KIND: crate::mark::MarkKind = crate::mark::MarkKind::$kind;
