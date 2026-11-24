@@ -10,7 +10,7 @@ publish = false
 
 [workspace.dependencies]
 gpui-plot = { path = "crates/gpui-plot" }
-gpui-kit = "0.8.1"
+gpui-kit = "0.10.0"
 chrono = "0.4"
 
 [profile.dev]
